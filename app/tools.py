@@ -7,7 +7,8 @@ import httpx
 import trafilatura
 from ddgs import DDGS
 
-from app.agent import ask_claude
+from app.agent import ask_claude, agent_task
+import app.agent as agent_mod
 
 
 def _fetch_page(url: str, char_limit: int = 2500) -> str:
@@ -71,6 +72,20 @@ WEB_SEARCH_TOOL = {
     },
 }
 
+async def agent_build(task: str) -> str:
+    ts = datetime.datetime.now().isoformat(timespec="seconds")
+    print(f"[BUILD CALL {ts}] {task[:120]}", file=sys.stderr)
+    result = await agent_task(task)
+    cost = (getattr(agent_mod, "last_run", None) or {}).get("cost_usd")
+    try:
+        import os; os.makedirs("logs", exist_ok=True)
+        with open("logs/claude_calls.log", "a", encoding="utf-8") as f:
+            f.write(f"{ts}\tBUILD\tcost={cost}\t{task[:300]}\n")
+    except Exception:
+        pass
+    return result
+
+
 CONSULT_CLAUDE_TOOL = {
     "type": "function",
     "function": {
@@ -82,5 +97,16 @@ CONSULT_CLAUDE_TOOL = {
     },
 }
 
-TOOLS = [WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL]
-TOOL_FUNCS = {"web_search": web_search, "consult_claude": consult_claude}
+AGENT_BUILD_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "agent_build",
+        "description": "Delegate file creation/editing to the builder agent. It works in a jailed workspace folder and can create complete multi-file projects (websites, scripts, configs). Use when the user asks to build, create, edit, or fix actual FILES. Not for explaining code in chat. Pass a complete, self-contained build spec.",
+        "parameters": {"type": "object",
+            "properties": {"task": {"type": "string", "description": "complete build spec with all requirements"}},
+            "required": ["task"]},
+    },
+}
+
+TOOLS = [WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL, AGENT_BUILD_TOOL]
+TOOL_FUNCS = {"web_search": web_search, "consult_claude": consult_claude, "agent_build": agent_build}

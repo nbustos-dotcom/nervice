@@ -95,6 +95,9 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4, for
             except Exception as ex:
                 result = f"tool error: {ex}"
             print(f"[TOOL RESULT first 600 chars]\n{str(result)[:600]}\n", file=sys.stderr)
+            # builds are terminal: the builder's summary IS the answer
+            if force_tool == "agent_build":
+                return "Build complete — here's what the builder did:\n\n" + str(result)
             fired.add(force_tool)
             tool_outputs.append(str(result))
             msgs.append({"role": "assistant", "content": "",
@@ -122,6 +125,9 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4, for
             except Exception as e:
                 result = f"tool error: {e}"
             print(f"[TOOL RESULT first 600 chars]\n{str(result)[:600]}\n", file=sys.stderr)
+            # builds are terminal: the builder's summary IS the answer — no further rounds
+            if tc.function.name == "agent_build":
+                return "Build complete — here's what the builder did:\n\n" + str(result)
             fired.add(tc.function.name)
             tool_outputs.append(str(result))
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
