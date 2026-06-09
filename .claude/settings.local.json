@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe scripts/eval_grounding.py)",
+      "Bash(.venv/Scripts/python.exe -c \"import certifi; print\\(certifi.where\\(\\)\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import ssl; print\\(ssl.get_default_verify_paths\\(\\)\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -c \"import truststore; print\\('truststore OK', truststore.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pip install truststore)",
+      "Bash(export PYTHONIOENCODING=utf-8)",
+      "WebSearch",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -c \"import sys, pathlib; sys.path.insert\\(0, str\\(pathlib.Path\\('.'\\).resolve\\(\\)\\)\\); import truststore; truststore.inject_into_ssl\\(\\); import asyncio; from app.chat import respond; asyncio.run\\(respond\\('nate','tell me the latest news about AI',[]\\)\\)\")"
+    ]
+  }
+}

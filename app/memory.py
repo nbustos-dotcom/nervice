@@ -15,7 +15,7 @@ You maintain a long-term memory store of durable facts about one user named Nate
 Given the latest conversation exchange and a list of EXISTING related memories, decide what to change.
 
 A fact is DURABLE only if it would still be true and useful weeks from now and should change how you act in future conversations. Capture three kinds: who the user is (identity/situation), what they want (preferences, values, working style), what they're doing (projects, decisions, goals, people).
-DO NOT store: task-local details, transient states or moods, the step-by-step of solving a current problem, or anything that teaches nothing lasting about the user.
+DO NOT store: task-local details, transient states or moods, meta-observations about the conversation itself (e.g. how often Nate reopens the chat, what he is doing this session), the step-by-step of solving a current problem, or anything that teaches nothing lasting. NEVER fabricate or infer unstated emotional/relational facts — store only what Nate actually said or what is directly and unambiguously implied; when in doubt, omit. Use the single most accurate category; a behavior or fact is not a "preference."
 
 For each durable fact assign:
 - category: one of identity, preference, project, relationship, goal, fact

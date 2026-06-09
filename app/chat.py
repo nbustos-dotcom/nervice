@@ -3,7 +3,8 @@ from zoneinfo import ZoneInfo
 
 from app.persona import PERSONA
 from app.retrieval import retrieve
-from app.llm import chat_stream
+from app.llm import chat_stream, chat_with_tools
+from app.tools import TOOLS, TOOL_FUNCS
 from app.memory import remember
 from app.db import AsyncSessionLocal
 from app.models import Message
@@ -24,12 +25,9 @@ async def build_system_prompt(user_id, user_message):
 
 async def respond(user_id, user_message, window):
     system = await build_system_prompt(user_id, user_message)
-    full = ""
-    async for tok in chat_stream(system, window + [{"role": "user", "content": user_message}]):
-        print(tok, end="", flush=True)
-        full += tok
-    print()
-    return full
+    reply = await chat_with_tools(system, window + [{"role": "user", "content": user_message}], TOOLS, TOOL_FUNCS)
+    print(reply)
+    return reply
 
 
 async def save_exchange(user_id, conversation_id, user_message, assistant_message):

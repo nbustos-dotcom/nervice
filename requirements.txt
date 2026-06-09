@@ -9,3 +9,7 @@ python-dotenv
 ollama
 groq
 tzdata
+ddgs
+trafilatura
+httpx
+truststore
