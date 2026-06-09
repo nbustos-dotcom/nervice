@@ -13,3 +13,4 @@ ddgs
 trafilatura
 httpx
 truststore
+claude-agent-sdk
