@@ -1,8 +1,13 @@
 import app.net  # noqa
 
+import sys
+import datetime
+
 import httpx
 import trafilatura
 from ddgs import DDGS
+
+from app.agent import ask_claude
 
 
 def _fetch_page(url: str, char_limit: int = 2500) -> str:
@@ -40,6 +45,19 @@ def web_search(query: str, max_results: int = 6) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+async def consult_claude(task: str) -> str:
+    ts = datetime.datetime.now().isoformat(timespec="seconds")
+    print(f"[CLAUDE CALL {ts}] {task[:120]}", file=sys.stderr)
+    try:
+        with open("logs/claude_calls.log", "a", encoding="utf-8") as f:
+            f.write(f"{ts}\t{task[:300]}\n")
+    except FileNotFoundError:
+        import os; os.makedirs("logs", exist_ok=True)
+        with open("logs/claude_calls.log", "a", encoding="utf-8") as f:
+            f.write(f"{ts}\t{task[:300]}\n")
+    return await ask_claude(task)
+
+
 WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
@@ -53,5 +71,16 @@ WEB_SEARCH_TOOL = {
     },
 }
 
-TOOLS = [WEB_SEARCH_TOOL]
-TOOL_FUNCS = {"web_search": web_search}
+CONSULT_CLAUDE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "consult_claude",
+        "description": "Consult Claude, a far more capable (and metered) expert model. CALL IT when the task matches ANY of: (1) the user explicitly asks for Claude; (2) formal logic puzzles, riddles, or brainteasers with multiple interacting constraints; (3) mathematical proofs or multi-step quantitative problems beyond basic algebra; (4) designing or reviewing nontrivial code architecture or database schemas; (5) long rigorous analysis where a wrong answer is costly. DO NOT call it for casual chat, simple factual questions, news or current events (use web_search), or everyday tasks. When in doubt on category 2 or 3, CALL IT — a famous-sounding puzzle is usually harder than it looks. Pass a self-contained task with all needed context — Claude has no memory of this conversation.",
+        "parameters": {"type": "object",
+            "properties": {"task": {"type": "string", "description": "complete, self-contained task for Claude including all relevant context"}},
+            "required": ["task"]},
+    },
+}
+
+TOOLS = [WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL]
+TOOL_FUNCS = {"web_search": web_search, "consult_claude": consult_claude}

@@ -1,7 +1,7 @@
 import app.net  # noqa
 
-import os, json, sys
-from groq import AsyncGroq
+import os, json, sys, inspect
+from groq import AsyncGroq, BadRequestError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -69,13 +69,39 @@ async def chat_stream(system: str, messages: list[dict]):
             yield delta
 
 
-async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4):
+async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4, force_tool: str | None = None):
     msgs = [{"role": "system", "content": system}] + list(messages)
     tool_outputs: list[str] = []
+    fired: set[str] = set()
     direct_answer = None
     for round_idx in range(max_rounds):
-        resp = await _client.chat.completions.create(
-            model=TOOL_MODEL, messages=msgs, tools=tools, tool_choice="auto", temperature=0.2)
+        tool_choice = ({"type": "function", "function": {"name": force_tool}}
+                       if force_tool and round_idx == 0 else "auto")
+        try:
+            resp = await _client.chat.completions.create(
+                model=TOOL_MODEL, messages=msgs, tools=tools, tool_choice=tool_choice, temperature=0.2)
+        except BadRequestError as e:
+            # gpt-oss can refuse a forced tool call and answer in text; Groq rejects that
+            # generation as 400 tool_use_failed. The route is mechanical — run the tool ourselves.
+            if not (force_tool and round_idx == 0 and "tool_use_failed" in str(e)):
+                raise
+            question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+            fn = tool_funcs.get(force_tool)
+            arg_name = next(iter(inspect.signature(fn).parameters))
+            print(f"\n[TOOL CALL — synthesized after tool_use_failed] {force_tool}({arg_name}=<user message>)", file=sys.stderr)
+            try:
+                raw = fn(**{arg_name: question})
+                result = await raw if inspect.isawaitable(raw) else raw
+            except Exception as ex:
+                result = f"tool error: {ex}"
+            print(f"[TOOL RESULT first 600 chars]\n{str(result)[:600]}\n", file=sys.stderr)
+            fired.add(force_tool)
+            tool_outputs.append(str(result))
+            msgs.append({"role": "assistant", "content": "",
+                "tool_calls": [{"id": "forced_0", "type": "function",
+                    "function": {"name": force_tool, "arguments": json.dumps({arg_name: question})}}]})
+            msgs.append({"role": "tool", "tool_call_id": "forced_0", "content": str(result)})
+            continue
         m = resp.choices[0].message
         if not m.tool_calls:
             if round_idx == 0:
@@ -91,15 +117,21 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4):
             fn = tool_funcs.get(tc.function.name)
             try:
                 args = json.loads(tc.function.arguments or "{}")
-                result = fn(**args) if fn else f"unknown tool {tc.function.name}"
+                raw = fn(**args) if fn else f"unknown tool {tc.function.name}"
+                result = await raw if inspect.isawaitable(raw) else raw
             except Exception as e:
                 result = f"tool error: {e}"
             print(f"[TOOL RESULT first 600 chars]\n{str(result)[:600]}\n", file=sys.stderr)
+            fired.add(tc.function.name)
             tool_outputs.append(str(result))
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
-    if tool_outputs:
+    # grounded synthesis is for web material only; consult_claude answers stay in the conversation
+    if "web_search" in fired:
         question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
         return await _grounded_synthesis(question, tool_outputs)
+    if direct_answer is None and tool_outputs:
+        resp = await _client.chat.completions.create(model=TOOL_MODEL, messages=msgs, temperature=0.2)
+        return resp.choices[0].message.content
     return direct_answer
 
 

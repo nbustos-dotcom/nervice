@@ -1,9 +1,11 @@
+import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.persona import PERSONA
 from app.retrieval import retrieve
 from app.llm import chat_stream, chat_with_tools
+from app.router import classify
 from app.tools import TOOLS, TOOL_FUNCS
 from app.memory import remember
 from app.db import AsyncSessionLocal
@@ -25,7 +27,11 @@ async def build_system_prompt(user_id, user_message):
 
 async def respond(user_id, user_message, window):
     system = await build_system_prompt(user_id, user_message)
-    reply = await chat_with_tools(system, window + [{"role": "user", "content": user_message}], TOOLS, TOOL_FUNCS)
+    route = await classify(user_message)
+    if route == "hard":
+        print("[ROUTE: hard -> consult_claude]", file=sys.stderr)
+    force = "consult_claude" if route == "hard" else None
+    reply = await chat_with_tools(system, window + [{"role": "user", "content": user_message}], TOOLS, TOOL_FUNCS, force_tool=force)
     print(reply)
     return reply
 
