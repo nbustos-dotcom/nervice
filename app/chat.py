@@ -63,35 +63,44 @@ def _open_reply(user_message: str) -> str:
             "want from it?")
 
 
-async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
-    # memory retrieval and router classification are independent — overlap them so the turn
-    # pays max(retrieve, classify) instead of the sum (classify alone measured 0.3-0.8s)
-    system, route = await asyncio.gather(
-        build_system_prompt(user_id, user_message, voice_mode=voice_mode),
-        classify(user_message))
+async def execute_route(system, route, user_message, window, voice_mode: bool = False, on_ack=None):
+    """The post-classify half of a turn: 'open' short-circuit, forced-tool ack + timeout, or the
+    plain tool loop. Shared by respond() and app/streaming.py so ack/timeout/terminal semantics
+    exist exactly once. on_ack(text) is awaited right before a slow forced tool starts."""
     if route == "open":
         print("[ROUTE: open -> no agent, instant clarification]", file=sys.stderr)
-        reply = _open_reply(user_message)
-        print(reply)
-        return reply
+        return _open_reply(user_message)
     force = _FORCE.get(route)
     if force:
         print(f"[ROUTE: {route} -> {force}]", file=sys.stderr)
-        ack = _ACK[route]
-        print(ack)                       # immediate text feedback before the slow tool
-        if voice_mode and speak:
-            speak(ack)                   # voice: spoken immediately, before the await
+        if on_ack:
+            await on_ack(_ACK[route])    # immediate feedback before the slow tool
     coro = chat_with_tools(system, window + [{"role": "user", "content": user_message}],
                            TOOLS, TOOL_FUNCS, force_tool=force, voice_mode=voice_mode)
     if force:
         try:
             # route maps 1:1 to the forced agent tool, so this applies that tool's timeout;
             # wait_for cancels chat_with_tools (and the awaited agent) cleanly on expiry
-            reply = await asyncio.wait_for(coro, _TIMEOUTS[route])
+            return await asyncio.wait_for(coro, _TIMEOUTS[route])
         except asyncio.TimeoutError:
-            reply = _TIMEOUT_MSG
-    else:
-        reply = await coro
+            return _TIMEOUT_MSG
+    return await coro
+
+
+async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
+    # memory retrieval and router classification are independent — overlap them so the turn
+    # pays max(retrieve, classify) instead of the sum (classify alone measured 0.3-0.8s)
+    system, route = await asyncio.gather(
+        build_system_prompt(user_id, user_message, voice_mode=voice_mode),
+        classify(user_message))
+
+    async def _ack(text):
+        print(text)                      # immediate text feedback before the slow tool
+        if voice_mode and speak:
+            speak(text)                  # voice: spoken immediately, before the await
+
+    reply = await execute_route(system, route, user_message, window,
+                                voice_mode=voice_mode, on_ack=_ack)
     print(reply)
     return reply
 
