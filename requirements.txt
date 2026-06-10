@@ -25,3 +25,4 @@ nvidia-cudnn-cu12
 nvidia-cuda-runtime-cu12
 nvidia-cufft-cu12   # onnxruntime CUDA EP (GPU Kokoro) needs cufft+curand — torch used to bundle these
 nvidia-curand-cu12
+python-multipart

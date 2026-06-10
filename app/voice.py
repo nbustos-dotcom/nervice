@@ -261,3 +261,30 @@ def read_typed_line() -> str:
     if first in ("\r", "\n"):
         return sys.stdin.readline().strip()
     return (first + sys.stdin.readline()).strip()
+
+
+# ---- API helpers (used by app/api.py; the local loops don't need them) ----
+
+def transcribe_file(path: str) -> str:
+    """Transcribe any audio file (webm/opus/ogg/wav/m4a/...) straight from disk. faster-whisper
+    decodes + resamples to 16k mono via av (PyAV's bundled ffmpeg libs), so NO external ffmpeg
+    binary is required — phone-browser MediaRecorder webm/opus is handled by the same decoder."""
+    segments, _ = _whisper.transcribe(path, language="en")
+    return "".join(s.text for s in segments).strip()
+
+
+def synth_to_pcm(text: str):
+    """Synthesize a full reply to one int16 PCM array (+ sample rate) — same engine and cleaning
+    as speak(), but rendered to a buffer (for the API to wrap as a WAV) instead of the speakers."""
+    cleaned = _clean_for_speech(text)
+    parts, sr = [], TTS_RATE
+    for sent in _SENT_SPLIT.split(cleaned):
+        sent = sent.strip()
+        if not sent or not re.search(r"[A-Za-z0-9]", sent):
+            continue
+        audio, sr = _synth(sent)
+        if audio.size:
+            parts.append(audio)
+    if not parts:
+        return np.zeros(0, dtype=np.int16), sr
+    return np.concatenate(parts), sr
