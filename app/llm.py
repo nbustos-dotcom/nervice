@@ -1,7 +1,7 @@
 import app.net  # noqa
 
-import os, json, sys, asyncio, inspect
-from groq import AsyncGroq, BadRequestError
+import os, re, json, sys, asyncio, inspect
+from groq import AsyncGroq, BadRequestError, RateLimitError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,6 +9,33 @@ load_dotenv()
 GROQ_MODEL = "llama-3.3-70b-versatile"
 TOOL_MODEL = "openai/gpt-oss-120b"
 VERIFY_MODEL = "llama-3.3-70b-versatile"   # different family from TOOL_MODEL — no self-grading
+
+
+def rate_limit_message(err=None) -> str:
+    """Friendly, speakable reply for a Groq 429 (free-tier daily token cap). Never raises; the
+    callers below return this instead of crashing so the phone speaks it rather than going silent.
+    Pulls the 'try again in Xm' window out of the error when Groq provides it."""
+    when = "in a bit"
+    m = re.search(r"try again in ([0-9hms.]+)", str(err or ""))
+    if m:
+        hm = re.match(r"(?:(\d+)h)?(?:(\d+)m)?", m.group(1))
+        hours = int(hm.group(1)) if hm and hm.group(1) else 0
+        mins = int(hm.group(2)) if hm and hm.group(2) else 0
+        parts = []
+        if hours:
+            parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+        if mins:
+            parts.append(f"{mins} minute" + ("s" if mins != 1 else ""))
+        if parts:
+            when = "in about " + " and ".join(parts)
+        elif m.group(1):
+            when = "in under a minute"
+    return ("I've hit my daily free usage limit on the fast model — it resets "
+            f"{when}. Try me again soon.")
+
+
+def _is_rate_limit(e: Exception) -> bool:
+    return isinstance(e, RateLimitError) or "rate_limit" in str(e).lower()
 
 # Per-tool ceilings for the slow agent tools, applied wherever they fire: respond() uses them for
 # forced routes, and chat_with_tools applies them when the tool model calls one on its own — the
@@ -61,19 +88,25 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
     src = "\n\n=====\n\n".join(tool_outputs)
     synth_system = SYNTH_SYSTEM + (VOICE_SYNTH_ADDENDUM if voice_mode else "")
     verify_system = VERIFY_SYSTEM + (VOICE_VERIFY_ADDENDUM if voice_mode else "")
-    # Pass 1: isolated synthesis — model sees ONLY question + sources
-    resp = await _client.chat.completions.create(
-        model=TOOL_MODEL,
-        messages=[{"role": "system", "content": synth_system},
-                  {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nQUESTION: {question}"}],
-        temperature=0.2, **_effort(voice_mode))
-    draft = resp.choices[0].message.content
-    # Pass 2: cross-model evidence-quoting verification
-    resp = await _client.chat.completions.create(
-        model=VERIFY_MODEL,
-        messages=[{"role": "system", "content": verify_system},
-                  {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nDRAFT:\n{draft}"}],
-        temperature=0.0)
+    try:
+        # Pass 1: isolated synthesis — model sees ONLY question + sources
+        resp = await _client.chat.completions.create(
+            model=TOOL_MODEL,
+            messages=[{"role": "system", "content": synth_system},
+                      {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nQUESTION: {question}"}],
+            temperature=0.2, **_effort(voice_mode))
+        draft = resp.choices[0].message.content
+        # Pass 2: cross-model evidence-quoting verification
+        resp = await _client.chat.completions.create(
+            model=VERIFY_MODEL,
+            messages=[{"role": "system", "content": verify_system},
+                      {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nDRAFT:\n{draft}"}],
+            temperature=0.0)
+    except RateLimitError as e:
+        # Cap hit between search and synthesis: never speak unverified draft material — return the
+        # friendly limit message (the verifier boundary is preserved by NOT emitting the draft).
+        print("[groq 429 in grounded synthesis]", file=sys.stderr)
+        return rate_limit_message(e)
     out = resp.choices[0].message.content
     if "FINAL:" in out:
         return out.split("FINAL:", 1)[1].strip()
@@ -81,20 +114,39 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
 
 
 async def chat_stream(system: str, messages: list[dict]):
-    stream = await _client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "system", "content": system}] + messages,
-        temperature=0.6,
-        stream=True,
-    )
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+    try:
+        stream = await _client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "system", "content": system}] + messages,
+            temperature=0.6,
+            stream=True,
+        )
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+    except RateLimitError as e:
+        # e.g. the startup greeting when the cap is already hit — speak the limit, don't crash
+        print("[groq 429 in chat_stream]", file=sys.stderr)
+        yield rate_limit_message(e)
 
 
 async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
                           force_tool: str | None = None, voice_mode: bool = False):
+    """Thin 429 guard over the tool loop. Any Groq daily-cap hit anywhere in the loop (tool rounds,
+    trailing answer, or grounded synthesis) returns the friendly limit message instead of raising,
+    so respond()/the API return 200 with a speakable reply. Agent-tool errors (Claude) are handled
+    inside _impl and are unaffected."""
+    try:
+        return await _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds,
+                                           force_tool, voice_mode)
+    except RateLimitError as e:
+        print("[groq 429 in chat_with_tools]", file=sys.stderr)
+        return rate_limit_message(e)
+
+
+async def _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds=4,
+                                force_tool: str | None = None, voice_mode: bool = False):
     msgs = [{"role": "system", "content": system}] + list(messages)
     tool_outputs: list[str] = []
     fired: set[str] = set()

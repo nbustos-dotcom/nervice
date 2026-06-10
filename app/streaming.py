@@ -22,6 +22,7 @@ import asyncio
 
 import app.llm as llm
 import app.tools as tools
+from groq import RateLimitError
 from app import computer
 from app.router import classify
 from app.chat import build_system_prompt, execute_route, save_exchange, _ACK
@@ -213,9 +214,19 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
 
     reply, streamed = None, False
     if route == "normal":
-        reply, pivot = await _stream_normal(system, text, window, send, voice)
-        if reply is not None:
-            streamed = True
+        rate_limited = False
+        try:
+            reply, pivot = await _stream_normal(system, text, window, send, voice)
+        except RateLimitError as e:
+            # Groq daily cap hit at the streaming create (before any token/audio went out) — fall
+            # through with the friendly message; it's sent as one text+audio block below so the
+            # phone speaks the limit instead of going silent.
+            print("[groq 429 in stream_reply]", file=sys.stderr)
+            reply, pivot, rate_limited = llm.rate_limit_message(e), None, True
+        if rate_limited:
+            pass                          # reply set, streamed stays False -> delivered below
+        elif reply is not None:
+            streamed = True               # _stream_normal emitted sentences live as it generated
         else:                             # model pivoted to a tool mid-stream
             print(f"[STREAM pivot -> {pivot}]", file=sys.stderr)
             ack = _PIVOT_ACK.get(pivot)

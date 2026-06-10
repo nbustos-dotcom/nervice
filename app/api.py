@@ -31,7 +31,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from groq import RateLimitError
 from app.chat import respond, save_exchange
+from app.llm import rate_limit_message
 from app.streaming import stream_reply
 
 USER = "nate"
@@ -163,7 +165,10 @@ async def health():
 async def chat(inp: ChatIn):
     cid = inp.conversation_id or str(uuid.uuid4())
     window = _windows.setdefault(cid, [])
-    reply = await respond(USER, inp.message, window, voice_mode=False)
+    try:
+        reply = await respond(USER, inp.message, window, voice_mode=False)
+    except RateLimitError as e:   # backstop — respond() already handles 429, this guards any new path
+        return {"reply": rate_limit_message(e), "conversation_id": cid}
     _advance_window(cid, inp.message, reply)
     _store(cid, inp.message, reply)
     return {"reply": reply, "conversation_id": cid}
@@ -196,7 +201,10 @@ async def voice(audio: UploadFile = File(...), conversation_id: str | None = For
 
     window = _windows.setdefault(cid, [])
     t0 = time.time()
-    reply = await respond(USER, transcript, window, voice_mode=True)
+    try:
+        reply = await respond(USER, transcript, window, voice_mode=True)
+    except RateLimitError as e:   # backstop — reply still gets synthesized below so the phone speaks it
+        reply = rate_limit_message(e)
     llm_s = time.time() - t0
     _advance_window(cid, transcript, reply)
     _store(cid, transcript, reply)
