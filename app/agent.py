@@ -138,6 +138,9 @@ async def browse_agent(task: str) -> str:
                           "mcp__playwright__browser_run_code_unsafe"],
         permission_mode="default",
         max_turns=25,
+        # Heavy pages (YouTube homepage) produce Playwright snapshots bigger than the SDK's 1MB
+        # stdio JSON buffer and crash the agent mid-run — capacity only, no permission change.
+        max_buffer_size=10 * 1024 * 1024,
         env={"CLAUDE_CONFIG_DIR": str(CONFIG_DIR)},  # token-free auth; no secrets
     )
     parts = []

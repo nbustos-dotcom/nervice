@@ -1,5 +1,6 @@
 import app.net  # noqa
 
+import re
 import sys
 import asyncio
 import datetime
@@ -121,7 +122,23 @@ async def agent_build(task: str) -> str:
     return result
 
 
+# Bare "open <site>" with nothing to find/read/report: launching the headless server browser is
+# the wrong tool — Nate never sees its tabs, he just waits. Guard fires only when the task starts
+# with an open-verb AND names no actual task; everything else still goes to the real agent.
+_BARE_OPEN_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:open|go\s+to|visit|pull\s+up|launch|bring\s+up)\b", re.I)
+_BROWSE_TASK_WORDS = re.compile(
+    r"\b(tell|find|check|read|what|which|who|how|search|look|report|top|latest|news|summar\w*|"
+    r"extract|list|count|price|headline|story|video|trending|review|compare|describe|click|"
+    r"play|watch|buy|order|add)\b", re.I)
+
+
 async def browse(task: str) -> str:
+    if _BARE_OPEN_RE.match(task) and not _BROWSE_TASK_WORDS.search(task):
+        print(f"[BROWSE skipped — bare open] {task[:120]}", file=sys.stderr)
+        return ("Just opening that site wouldn't show you anything — my browser runs on the "
+                "server, not your screen. Tell me what you want from it and I'll go read it "
+                "and report back.")
     ts = datetime.datetime.now().isoformat(timespec="seconds")
     print(f"[BROWSE {ts}] {task[:120]}", file=sys.stderr)
     result = await browse_agent(task)

@@ -1,3 +1,4 @@
+import re
 import sys
 import asyncio
 from datetime import datetime
@@ -47,12 +48,32 @@ _TIMEOUTS = {route: TOOL_TIMEOUTS[tool] for route, tool in _FORCE.items()}
 _TIMEOUT_MSG = TIMEOUT_MSG
 
 
+_OPEN_SITE_RE = re.compile(
+    r"(?:open|go\s+to|visit|pull\s+up|launch|bring\s+up)\s+(?:the\s+)?(?:website\s+|site\s+)?"
+    r"([A-Za-z0-9][\w.-]*)", re.I)
+
+
+def _open_reply(user_message: str) -> str:
+    """Bare 'open <site>' — the headless server browser can't put a tab on Nate's screen, so a
+    silent 2-minute browse session is the wrong move. Say so and ask for the actual task."""
+    m = _OPEN_SITE_RE.search(user_message)
+    site = m.group(1) if m else "that site"
+    return (f"I can't open {site} on your screen — my browser runs here on the server, so you'd "
+            f"never see the tab. What I can do is go read {site} and report back. What do you "
+            "want from it?")
+
+
 async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
     # memory retrieval and router classification are independent — overlap them so the turn
     # pays max(retrieve, classify) instead of the sum (classify alone measured 0.3-0.8s)
     system, route = await asyncio.gather(
         build_system_prompt(user_id, user_message, voice_mode=voice_mode),
         classify(user_message))
+    if route == "open":
+        print("[ROUTE: open -> no agent, instant clarification]", file=sys.stderr)
+        reply = _open_reply(user_message)
+        print(reply)
+        return reply
     force = _FORCE.get(route)
     if force:
         print(f"[ROUTE: {route} -> {force}]", file=sys.stderr)
