@@ -49,7 +49,7 @@ _KOKORO_MODEL = _ROOT / "models" / "kokoro" / "kokoro-v1.0.onnx"
 _KOKORO_VOICES = _ROOT / "models" / "kokoro" / "voices-v1.0.bin"
 _PIPER_VOICE = _ROOT / "models" / "piper" / "en_US-ryan-high.onnx"
 
-VOICE = "am_onyx"   # Kokoro voice — swap here (e.g. am_adam, am_onyx, bm_george, am_michael)
+VOICE = "bm_george"   # Kokoro voice — swap here (e.g. am_adam, am_onyx, bm_george, bm_lewis)
 
 # Optional voice blend: average two preset style vectors (weights need not sum to 1, but ~1 is
 # natural). Set BLEND to enable; it overrides VOICE. Leave None to use VOICE as-is.
@@ -104,12 +104,17 @@ def _load_tts():
             an, aw, bn, bw = BLEND
             voice_arg = (aw * k.get_voice_style(an) + bw * k.get_voice_style(bn)).astype(np.float32)
             label = f"blend({an}{aw:g}+{bn}{bw:g})"
+            base = an
         else:
             voice_arg = VOICE
             label = VOICE
+            base = VOICE
+        # British presets (bm_/bf_) get British phonemization — en-us G2P on a British voice
+        # flattens the accent (and would not match the audition samples in models/kokoro_samples)
+        lang = "en-gb" if base.startswith(("bm_", "bf_")) else "en-us"
 
         def synth(text: str):
-            samples, sr = k.create(text, voice=voice_arg, speed=1.0, lang="en-us")
+            samples, sr = k.create(text, voice=voice_arg, speed=1.0, lang=lang)
             return (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16), sr
 
         _, rate = synth("hi")  # warm + get true rate
