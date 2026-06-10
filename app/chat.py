@@ -57,7 +57,7 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         if voice_mode and speak:
             speak(ack)                   # voice: spoken immediately, before the await
     coro = chat_with_tools(system, window + [{"role": "user", "content": user_message}],
-                           TOOLS, TOOL_FUNCS, force_tool=force)
+                           TOOLS, TOOL_FUNCS, force_tool=force, voice_mode=voice_mode)
     if force:
         try:
             # route maps 1:1 to the forced agent tool, so this applies that tool's timeout;

@@ -34,20 +34,30 @@ FINAL:
 
 _client = AsyncGroq(api_key=os.environ["GROQ_API_KEY"])
 
+# Appended to the synthesis/verify prompts on voice turns only — the main VOICE_ADDENDUM lives in
+# the chat system prompt, which grounded synthesis never sees (it builds isolated messages).
+VOICE_SYNTH_ADDENDUM = ("\n\nVOICE MODE: this answer will be spoken aloud. Two to four flowing "
+                        "conversational sentences MAX — pick only the few most important facts and "
+                        "drop the rest. Never bullets, lists, or headers. Lead with the answer.")
+VOICE_VERIFY_ADDENDUM = ("\n\nVOICE MODE: the FINAL answer will be spoken aloud — keep it to 2-4 "
+                         "conversational sentences, no lists. Tighten, never pad.")
 
-async def _grounded_synthesis(question: str, tool_outputs: list[str]) -> str:
+
+async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode: bool = False) -> str:
     src = "\n\n=====\n\n".join(tool_outputs)
+    synth_system = SYNTH_SYSTEM + (VOICE_SYNTH_ADDENDUM if voice_mode else "")
+    verify_system = VERIFY_SYSTEM + (VOICE_VERIFY_ADDENDUM if voice_mode else "")
     # Pass 1: isolated synthesis — model sees ONLY question + sources
     resp = await _client.chat.completions.create(
         model=TOOL_MODEL,
-        messages=[{"role": "system", "content": SYNTH_SYSTEM},
+        messages=[{"role": "system", "content": synth_system},
                   {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nQUESTION: {question}"}],
         temperature=0.2)
     draft = resp.choices[0].message.content
     # Pass 2: cross-model evidence-quoting verification
     resp = await _client.chat.completions.create(
         model=VERIFY_MODEL,
-        messages=[{"role": "system", "content": VERIFY_SYSTEM},
+        messages=[{"role": "system", "content": verify_system},
                   {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nDRAFT:\n{draft}"}],
         temperature=0.0)
     out = resp.choices[0].message.content
@@ -69,7 +79,8 @@ async def chat_stream(system: str, messages: list[dict]):
             yield delta
 
 
-async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4, force_tool: str | None = None):
+async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
+                          force_tool: str | None = None, voice_mode: bool = False):
     msgs = [{"role": "system", "content": system}] + list(messages)
     tool_outputs: list[str] = []
     fired: set[str] = set()
@@ -146,7 +157,7 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4, for
     # grounded synthesis is for web material only; consult_claude answers stay in the conversation
     if "web_search" in fired:
         question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        return await _grounded_synthesis(question, tool_outputs)
+        return await _grounded_synthesis(question, tool_outputs, voice_mode=voice_mode)
     if direct_answer is None and tool_outputs:
         resp = await _client.chat.completions.create(model=TOOL_MODEL, messages=msgs, temperature=0.2)
         return resp.choices[0].message.content
