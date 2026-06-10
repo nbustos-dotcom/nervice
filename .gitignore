@@ -5,3 +5,6 @@ __pycache__/
 logs/
 .playwright-mcp/
 models/
+.venv-probe312/
+models/kokoro_samples/
+models/neutts_samples/

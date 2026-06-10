@@ -17,6 +17,7 @@ claude-agent-sdk
 faster-whisper
 piper-tts
 kokoro-onnx
+onnxruntime-gpu  # replaces the onnxruntime CPU dep so Kokoro runs on the CUDA EP (~3x faster); uninstall onnxruntime if both present
 sounddevice
 webrtcvad-wheels
 nvidia-cublas-cu12

@@ -73,14 +73,29 @@ def _load_tts():
     -> int16 numpy audio."""
     try:
         from kokoro_onnx import Kokoro
-        k = Kokoro(str(_KOKORO_MODEL), str(_KOKORO_VOICES))
+        # Run Kokoro's ONNX on the GPU (CUDA EP) when onnxruntime-gpu + the CUDA DLLs are present
+        # — ~3x faster than CPU (0.84s vs 2.5s/sentence). Falls back to default (CPU) session.
+        _register_cuda_dlls()
+        ep = "cpu"
+        try:
+            import onnxruntime as ort
+            _so = ort.SessionOptions()
+            _so.log_severity_level = 3  # quiet the CUDA Memcpy/ScatterND perf warnings
+            sess = ort.InferenceSession(str(_KOKORO_MODEL), sess_options=_so,
+                                        providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            if "CUDAExecutionProvider" in sess.get_providers():
+                ep = "cuda"
+            k = Kokoro.from_session(sess, str(_KOKORO_VOICES))
+        except Exception as e:
+            print(f"[voice] kokoro CUDA session failed ({repr(e)[:60]}) — CPU", file=sys.stderr)
+            k = Kokoro(str(_KOKORO_MODEL), str(_KOKORO_VOICES))
 
         def synth(text: str):
             samples, sr = k.create(text, voice=VOICE, speed=1.0, lang="en-us")
             return (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16), sr
 
         _, rate = synth("hi")  # warm + get true rate
-        return synth, f"kokoro/{VOICE}", rate
+        return synth, f"kokoro/{VOICE} ({ep})", rate
     except Exception as e:
         print(f"[voice] kokoro unavailable ({repr(e)[:80]}) — falling back to Piper", file=sys.stderr)
         from piper import PiperVoice
