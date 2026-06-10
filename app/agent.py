@@ -132,6 +132,10 @@ async def browse_agent(task: str) -> str:
         strict_mcp_config=True,
         tools=[],  # disable ALL built-in tools — no Bash, no Write/Edit, no Read, no file tools
         allowed_tools=["mcp__playwright__*"],  # auto-approve ONLY the playwright browser tools
+        # defense in depth: arbitrary-JS execution tools removed from context entirely
+        # (disallowed_tools beats the allowed_tools wildcard)
+        disallowed_tools=["mcp__playwright__browser_evaluate",
+                          "mcp__playwright__browser_run_code_unsafe"],
         permission_mode="default",
         max_turns=25,
         env={"CLAUDE_CONFIG_DIR": str(CONFIG_DIR)},  # token-free auth; no secrets
