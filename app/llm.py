@@ -162,6 +162,12 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
             fired.add(tc.function.name)
             tool_outputs.append(str(result))
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+        # Once web material is in, the answer comes from grounded synthesis below — asking the
+        # tool model for another completion first just generates a full draft that gets discarded
+        # (measured 5.2s wasted per grounded turn). Tradeoff: the model no longer refines with a
+        # second search; SYNTH_SYSTEM already handles thin sources by answering partially.
+        if "web_search" in fired:
+            break
     # grounded synthesis is for web material only; consult_claude answers stay in the conversation
     if "web_search" in fired:
         question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
