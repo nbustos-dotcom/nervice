@@ -23,8 +23,9 @@ def _code_word(code: int) -> str:
     return "clear"
 
 
-async def get_weather() -> str | None:
-    """Compact human string like '58°F and clear, high 71 low 49', or None on any failure."""
+async def get_weather_data() -> dict | None:
+    """Structured current weather for the hardcoded coords (Oswego, IL), or None on any failure.
+    One keyless Open-Meteo call. Shape: {temp, condition, hi, lo} in °F."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             r = await client.get("https://api.open-meteo.com/v1/forecast", params={
@@ -38,10 +39,17 @@ async def get_weather() -> str | None:
             return None
         d = r.json()
         cur, daily = d["current"], d["daily"]
-        temp = round(cur["temperature_2m"])
-        word = _code_word(int(cur["weather_code"]))
-        hi = round(daily["temperature_2m_max"][0])
-        lo = round(daily["temperature_2m_min"][0])
-        return f"{temp}°F and {word}, high {hi} low {lo}"
+        return {"temp": round(cur["temperature_2m"]),
+                "condition": _code_word(int(cur["weather_code"])),
+                "hi": round(daily["temperature_2m_max"][0]),
+                "lo": round(daily["temperature_2m_min"][0])}
     except Exception:
         return None
+
+
+async def get_weather() -> str | None:
+    """Compact human string like '58°F and clear, high 71 low 49', or None on any failure."""
+    d = await get_weather_data()
+    if not d:
+        return None
+    return f"{d['temp']}°F and {d['condition']}, high {d['hi']} low {d['lo']}"

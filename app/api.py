@@ -7,6 +7,7 @@ Every endpoint requires:  Authorization: Bearer <NERVICE_API_TOKEN>
 """
 import io
 import os
+import re
 import sys
 import wave
 import uuid
@@ -15,8 +16,10 @@ import base64
 import secrets
 import asyncio
 import tempfile
+import datetime
 import importlib
 import threading
+from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 
 import pathlib
@@ -117,6 +120,13 @@ async def index():
     return FileResponse(str(_STATIC / "index.html"))
 
 
+@app.get("/v2")
+async def index_v2():
+    # New dashboard client. Like /, served UNauthenticated (inert without a token); every data
+    # route it calls (/weather, /activity, /health, /ws/*) keeps its Bearer auth.
+    return FileResponse(str(_STATIC / "index_v2.html"))
+
+
 async def auth(authorization: str = Header(None)):
     """Bearer-token gate on every route. Constant-time compare; reject missing/wrong with 401."""
     if not _TOKEN:
@@ -159,6 +169,116 @@ async def health():
         v = sys.modules["app.voice"]
         return {"status": "ok", "voice": "warm", "stt": v.WHISPER_PATH, "tts": v.TTS_ENGINE}
     return {"status": "ok", "voice": voice, "stt": "faster-whisper base.en", "tts": "kokoro"}
+
+
+@app.get("/weather", dependencies=[Depends(auth)])
+async def weather():
+    """Real current weather for the hardcoded Oswego coords (Open-Meteo, keyless). Reuses the
+    same function the chat tool uses. {available:false} when the upstream call fails."""
+    from app.weather import get_weather_data
+    d = await get_weather_data()
+    return {"available": bool(d), **(d or {})}
+
+
+# ---- activity feed: REAL recent activity merged from three live sources, newest first ----
+_TZ = ZoneInfo("America/Chicago")
+_REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _ago(now: float, ts: float) -> str:
+    s = max(0, int(now - ts))
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return f"{s // 60}m ago"
+    if s < 86400:
+        return f"{s // 3600}h ago"
+    return f"{s // 86400}d ago"
+
+
+def _log_epoch(iso: str) -> float:
+    """The audit logs write naive local-time ISO; interpret as America/Chicago for sorting."""
+    try:
+        return datetime.datetime.fromisoformat(iso).replace(tzinfo=_TZ).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _short(s: str, n: int = 46) -> str:
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[:n].rstrip() + "…"
+
+
+def _prettify_url(s: str) -> str:
+    return re.sub(r"https?://(?:www\.)?([a-z0-9-]+)\.[a-z.]+\S*",
+                  lambda m: m.group(1).capitalize(), s, flags=re.I)
+
+
+def _read_tail(path: pathlib.Path, n: int = 40) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
+    except Exception:
+        return []
+
+
+async def _activity_items(limit: int = 8) -> list[dict]:
+    items: list[tuple[float, str, str]] = []   # (epoch, kind, text)
+    # 1. local-control audit — completed actions only (skip ASK/CANCEL/ABANDON)
+    for ln in _read_tail(_REPO / "logs" / "computer_actions.log"):
+        f = ln.split("\t")
+        if len(f) >= 3 and f[1] in ("EXEC", "CONFIRM-EXEC"):
+            result = f[-1].strip()
+            if result:
+                kind = ("screenshot" if "screenshot" in result.lower()
+                        else "open" if "open" in result.lower() else "do")
+                items.append((_log_epoch(f[0]), kind, _prettify_url(result).rstrip(".")))
+    # 2. agent calls (browse / build / self-update / consult)
+    for ln in _read_tail(_REPO / "logs" / "claude_calls.log"):
+        f = ln.split("\t")
+        if len(f) < 3:
+            continue
+        ts, kind, task = f[0], f[1], f[-1].strip()
+        if kind == "BROWSE":
+            items.append((_log_epoch(ts), "browse", "Browsed: " + _short(task)))
+        elif kind == "BUILD":
+            items.append((_log_epoch(ts), "build", "Built: " + _short(task)))
+        elif kind == "SELFMOD":
+            items.append((_log_epoch(ts), "selfmod", "Drafted a self-update"))
+        elif kind == "CLAUDE":
+            items.append((_log_epoch(ts), "think", "Consulted Claude"))
+    # 3. recent questions from the conversation DB
+    try:
+        from sqlalchemy import select
+        from app.db import AsyncSessionLocal
+        from app.models import Message
+        async with AsyncSessionLocal() as s:
+            rows = (await s.execute(
+                select(Message).where(Message.user_id == USER, Message.role == "user")
+                .order_by(Message.created_at.desc()).limit(10))).scalars().all()
+        for m in rows:
+            if m.created_at:
+                items.append((m.created_at.timestamp(), "ask", "Asked: " + _short(m.content)))
+    except Exception as e:
+        print(f"[activity db] {repr(e)[:80]}", file=sys.stderr)
+
+    items.sort(key=lambda x: x[0], reverse=True)
+    now = time.time()
+    out, seen = [], set()
+    for ep, kind, text in items:
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append({"text": text, "kind": kind, "ago": _ago(now, ep)})
+        if len(out) >= limit:
+            break
+    return out
+
+
+@app.get("/activity", dependencies=[Depends(auth)])
+async def activity():
+    """REAL recent activity — local-control audit log + agent calls + recent questions, newest
+    first. No fabrication: if a source is empty there are simply fewer items."""
+    return {"items": await _activity_items()}
 
 
 @app.post("/chat", dependencies=[Depends(auth)])

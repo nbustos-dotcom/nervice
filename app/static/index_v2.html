@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#08080c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nervice">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="/static/manifest.json">
+<title>Nervice</title>
+<style>
+  /* ---------- design tokens ---------- */
+  :root{
+    --bg:#08080c; --bg-2:#0b0a12;
+    --text:#f4f2fb; --text-dim:#aaa4c6; --text-faint:#736e92;
+    --violet:#8b5cf6; --violet-bright:#a78bfa; --magenta:#d946ef; --cyan:#34e0e8;
+    --glass:rgba(255,255,255,.045); --glass-2:rgba(255,255,255,.07);
+    --hair:rgba(255,255,255,.09);
+    --ok:#34d399; --warn:#fbbf24; --down:#f87171;
+    --radius:22px; --radius-sm:14px;
+    --shadow:0 28px 70px -28px rgba(0,0,0,.75);
+    --ease:cubic-bezier(.22,.61,.36,1);
+    --gap:clamp(14px,2.2vw,26px);
+    --fs-clock:clamp(52px,12vw,86px);
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;margin:0;}
+  body{
+    background:var(--bg); color:var(--text); font-family:var(--font);
+    min-height:100dvh; overflow-x:hidden; overscroll-behavior:none;
+    -webkit-font-smoothing:antialiased; line-height:1.5; position:relative;
+  }
+
+  /* ---------- aurora depth ---------- */
+  .aurora{position:fixed; inset:-20%; z-index:0; pointer-events:none; filter:blur(100px); overflow:hidden;}
+  .blob{position:absolute; border-radius:50%; opacity:.42; will-change:transform; mix-blend-mode:screen;}
+  .b1{width:62vw; height:62vw; left:-8vw; top:-6vw;
+      background:radial-gradient(circle at 50% 50%, #7c3aed 0%, rgba(124,58,237,0) 64%);
+      animation:drift1 34s var(--ease) infinite alternate;}
+  .b2{width:54vw; height:54vw; right:-10vw; top:18vh;
+      background:radial-gradient(circle at 50% 50%, #c026d3 0%, rgba(192,38,211,0) 62%);
+      opacity:.32; animation:drift2 42s var(--ease) infinite alternate;}
+  .b3{width:48vw; height:48vw; left:24vw; bottom:-16vh;
+      background:radial-gradient(circle at 50% 50%, #4f46e5 0%, rgba(79,70,229,0) 66%);
+      opacity:.34; animation:drift3 38s var(--ease) infinite alternate;}
+  @keyframes drift1{from{transform:translate(0,0) scale(1);}to{transform:translate(10vw,8vh) scale(1.15);}}
+  @keyframes drift2{from{transform:translate(0,0) scale(1.05);}to{transform:translate(-12vw,6vh) scale(.92);}}
+  @keyframes drift3{from{transform:translate(0,0) scale(1);}to{transform:translate(8vw,-10vh) scale(1.12);}}
+  .grain{position:fixed; inset:0; z-index:1; pointer-events:none; opacity:.05; mix-blend-mode:overlay;
+         background-size:160px 160px;}
+
+  /* ---------- shell ---------- */
+  .shell{position:relative; z-index:2; min-height:100dvh; display:flex; flex-direction:column;
+         padding:calc(env(safe-area-inset-top) + 14px) clamp(14px,3vw,30px)
+                 calc(env(safe-area-inset-bottom) + 16px);}
+  header{display:flex; align-items:center; gap:12px; margin-bottom:var(--gap);}
+  .brand{font-size:18px; font-weight:600; letter-spacing:.2px;}
+  .brand b{color:var(--violet-bright); font-weight:600;}
+  .spacer{flex:1;}
+  .status{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--text-dim);
+          padding:6px 11px; background:var(--glass); border:1px solid var(--hair); border-radius:999px;}
+  .dot{width:8px; height:8px; border-radius:50%; background:var(--text-faint);
+       box-shadow:0 0 0 0 transparent; transition:background .3s;}
+  .dot.ok{background:var(--ok); box-shadow:0 0 10px 1px rgba(52,211,153,.55);}
+  .dot.warn{background:var(--warn); box-shadow:0 0 10px 1px rgba(251,191,36,.5);}
+  .dot.down{background:var(--down);}
+  .iconbtn{width:42px; height:42px; min-width:42px; border-radius:13px; cursor:pointer;
+           background:var(--glass); border:1px solid var(--hair); color:var(--text-dim);
+           display:flex; align-items:center; justify-content:center; transition:background .2s,color .2s;}
+  .iconbtn:hover{background:var(--glass-2); color:var(--text);}
+  .iconbtn:active{transform:scale(.94);}
+  .iconbtn svg{width:19px; height:19px;}
+
+  /* ---------- stage grid ---------- */
+  .stage{flex:1; display:grid; gap:var(--gap); grid-template-columns:1fr; align-content:start;}
+  .hero{display:flex; flex-direction:column; align-items:center; justify-content:center;
+        gap:clamp(14px,2.4vh,26px); padding:clamp(8px,3vh,30px) 0;}
+
+  /* ---------- the orb ---------- */
+  .orb{--amp:0; position:relative; width:clamp(190px,52vw,290px); height:clamp(190px,52vw,290px);
+       display:grid; place-items:center; cursor:pointer; touch-action:none; user-select:none;
+       -webkit-user-select:none;}
+  .orb>*{grid-area:1/1; border-radius:50%; pointer-events:none;}
+  .orb-glow{width:118%; height:118%;
+            background:radial-gradient(circle at 50% 50%, rgba(167,139,250,.85) 0%, rgba(139,92,246,.4) 38%, rgba(139,92,246,0) 70%);
+            filter:blur(26px);
+            transform:scale(calc(1 + var(--amp)*.55));
+            opacity:calc(.5 + var(--amp)*.5);
+            animation:breathe 5.5s var(--ease) infinite;
+            transition:opacity .12s linear;}
+  .orb-core{width:78%; height:78%; overflow:hidden; position:relative;
+            background:
+              radial-gradient(circle at 34% 30%, #c4b5fd 0%, #8b5cf6 26%, #6d28d9 56%, #3b1d8f 82%, #25104f 100%);
+            box-shadow:inset 0 0 40px rgba(20,8,48,.7), inset 8px 10px 30px rgba(255,255,255,.18),
+                       0 18px 50px -10px rgba(124,58,237,.6);
+            transform:scale(calc(1 + var(--amp)*.13));
+            transition:transform .1s linear, box-shadow .3s;}
+  .orb-swirl{position:absolute; inset:-12%; border-radius:50%;
+             background:conic-gradient(from 0deg,
+               rgba(217,70,239,.0) 0deg, rgba(217,70,239,.55) 70deg, rgba(52,224,232,.0) 150deg,
+               rgba(167,139,250,.5) 220deg, rgba(217,70,239,0) 300deg, rgba(217,70,239,.0) 360deg);
+             mix-blend-mode:screen; filter:blur(6px); opacity:.75;
+             animation:spin 9s linear infinite;}
+  .orb-sheen{position:absolute; width:46%; height:38%; left:18%; top:14%; border-radius:50%;
+             background:radial-gradient(circle at 40% 40%, rgba(255,255,255,.7), rgba(255,255,255,0) 70%);
+             filter:blur(3px); opacity:.7;}
+  .orb-grain{position:absolute; inset:0; border-radius:50%; background-size:90px 90px;
+             mix-blend-mode:soft-light; opacity:.35;}
+  .orb-ring{width:96%; height:96%; border-radius:50%; opacity:0;
+            background:conic-gradient(from 0deg, transparent 0deg, rgba(52,224,232,.9) 40deg, transparent 110deg, transparent 360deg);
+            -webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+            mask:radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+            animation:spin 3.4s linear infinite; transition:opacity .35s;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes breathe{0%,100%{transform:scale(1);}50%{transform:scale(1.05);}}
+
+  /* orb states */
+  .orb.is-listening .orb-glow{background:radial-gradient(circle at 50% 50%, rgba(96,165,250,.9) 0%, rgba(52,224,232,.4) 40%, rgba(52,224,232,0) 72%);}
+  .orb.is-listening .orb-core{background:radial-gradient(circle at 34% 30%, #a5f3fc 0%, #38bdf8 26%, #6366f1 58%, #3b1d8f 86%, #1f1147 100%);}
+  .orb.is-thinking .orb-ring{opacity:.95; animation-duration:1.5s;}
+  .orb.is-thinking .orb-swirl{animation-duration:3.5s; opacity:.95;}
+  .orb.is-thinking .orb-glow{animation-duration:2.4s;}
+  .orb.is-speaking .orb-glow{background:radial-gradient(circle at 50% 50%, rgba(217,70,239,.9) 0%, rgba(167,139,250,.45) 40%, rgba(139,92,246,0) 72%);}
+  .orb.is-speaking .orb-swirl{opacity:1; animation-duration:5s;}
+
+  .mic-label{font-size:13px; color:var(--text-dim); letter-spacing:.02em; min-height:18px; font-variant:all-small-caps; letter-spacing:.08em;}
+  .convo-pill{display:inline-flex; align-items:center; gap:9px; padding:11px 20px; min-height:44px;
+              border-radius:999px; cursor:pointer; font-size:14px; font-weight:600; color:var(--text-dim);
+              background:var(--glass); border:1px solid var(--hair); transition:all .25s var(--ease);}
+  .convo-pill svg{width:16px; height:16px;}
+  .convo-pill:hover{color:var(--text); background:var(--glass-2);}
+  .convo-pill.on{color:#fff; border-color:transparent;
+                 background:linear-gradient(120deg, var(--violet), var(--magenta));
+                 box-shadow:0 8px 28px -8px rgba(168,85,247,.7);}
+
+  /* ---------- glass cards ---------- */
+  .card{position:relative; background:linear-gradient(180deg, var(--glass-2), var(--glass));
+        backdrop-filter:blur(22px) saturate(150%); -webkit-backdrop-filter:blur(22px) saturate(150%);
+        border-radius:var(--radius); box-shadow:var(--shadow);
+        padding:clamp(16px,2.1vw,22px); overflow:hidden;
+        opacity:0; transform:translateY(14px); animation:rise .7s var(--ease) forwards;}
+  .card::before{content:""; position:absolute; inset:0; border-radius:inherit; padding:1px; pointer-events:none;
+    background:linear-gradient(155deg, rgba(255,255,255,.28), rgba(255,255,255,.05) 42%, rgba(255,255,255,0) 75%);
+    -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor; mask-composite:exclude;}
+  @keyframes rise{to{opacity:1; transform:translateY(0);}}
+  /* mobile (default): single column. `order` sets the stack (hero, conversation, weather, activity,
+     upcoming); grid-area names below take over at desktop, where `order` is ignored. */
+  .card-convo{order:1; animation-delay:.05s;}
+  .card-weather{order:2; animation-delay:.07s;}
+  .card-activity{order:3; animation-delay:.15s;}
+  .card-upcoming{order:4; animation-delay:.19s;}
+
+  .card-h{display:flex; align-items:center; gap:8px; margin:0 0 14px;
+          font-size:12px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--text-faint);}
+  .card-h svg{width:15px; height:15px; opacity:.8;}
+
+  /* weather */
+  .wx{display:flex; align-items:center; gap:16px;}
+  .wx-ico{width:54px; height:54px; flex:none; color:var(--violet-bright);}
+  .wx-ico svg{width:100%; height:100%;}
+  .wx-temp{font-size:40px; font-weight:600; letter-spacing:-.02em; font-variant-numeric:tabular-nums; line-height:1;}
+  .wx-cond{font-size:14px; color:var(--text-dim); text-transform:capitalize; margin-top:3px;}
+  .wx-range{margin-top:13px; font-size:13px; color:var(--text-faint); font-variant-numeric:tabular-nums;
+            display:flex; gap:14px;}
+  .wx-range b{color:var(--text-dim); font-weight:600;}
+
+  /* clock */
+  .clock{font-size:var(--fs-clock); font-weight:600; letter-spacing:-.035em; line-height:.95;
+         font-variant-numeric:tabular-nums; text-align:center;
+         background:linear-gradient(180deg,#fff, #cdc6ef); -webkit-background-clip:text;
+         background-clip:text; color:transparent;}
+  .clock .ampm{font-size:.34em; color:var(--text-dim); -webkit-text-fill-color:var(--text-dim); margin-left:.18em; letter-spacing:0;}
+  .date{margin-top:8px; font-size:15px; color:var(--text-dim); text-align:center; letter-spacing:.01em;}
+
+  /* activity feed */
+  .feed{display:flex; flex-direction:column; gap:2px; max-height:min(40vh,300px); overflow-y:auto;
+        margin:-4px -6px; padding:4px 6px;}
+  .feed::-webkit-scrollbar{width:0;}
+  .act{display:flex; align-items:flex-start; gap:11px; padding:9px 4px; border-bottom:1px solid rgba(255,255,255,.045);}
+  .act:last-child{border-bottom:none;}
+  .act-ico{width:30px; height:30px; flex:none; border-radius:9px; display:grid; place-items:center;
+           background:rgba(139,92,246,.14); color:var(--violet-bright);}
+  .act-ico svg{width:16px; height:16px;}
+  .act-ico.browse{background:rgba(52,224,232,.13); color:var(--cyan);}
+  .act-ico.ask{background:rgba(255,255,255,.06); color:var(--text-dim);}
+  .act-ico.selfmod,.act-ico.build{background:rgba(217,70,239,.14); color:#e879f9;}
+  .act-body{min-width:0; flex:1;}
+  .act-text{font-size:14px; color:var(--text); line-height:1.35; word-break:break-word;}
+  .act-time{font-size:11.5px; color:var(--text-faint); margin-top:2px; font-variant-numeric:tabular-nums;}
+  .empty{font-size:13.5px; color:var(--text-faint); padding:8px 4px; line-height:1.5;}
+
+  /* conversation */
+  .card-convo{display:flex; flex-direction:column; min-height:0;}
+  .msgs{flex:1; display:flex; flex-direction:column; gap:9px; overflow-y:auto; min-height:120px;
+        max-height:min(46vh,360px); padding-right:2px; margin-bottom:12px;}
+  .msgs::-webkit-scrollbar{width:0;}
+  .bubble{max-width:86%; padding:10px 14px; border-radius:16px; font-size:14.5px; line-height:1.45;
+          white-space:pre-wrap; word-wrap:break-word; animation:pop .35s var(--ease);}
+  .bubble.you{align-self:flex-end; color:#fff; border-bottom-right-radius:6px;
+              background:linear-gradient(135deg, var(--violet), #7c3aed);}
+  .bubble.nervice{align-self:flex-start; color:var(--text); border-bottom-left-radius:6px;
+                  background:rgba(255,255,255,.06); border:1px solid var(--hair);}
+  @keyframes pop{from{opacity:0; transform:translateY(6px) scale(.98);}to{opacity:1; transform:none;}}
+  .convo-empty{margin:auto; text-align:center; color:var(--text-faint); font-size:13.5px; padding:18px;}
+  .composer{display:flex; gap:8px; align-items:center;}
+  .composer input{flex:1; min-height:44px; background:rgba(0,0,0,.25); border:1px solid var(--hair);
+                  color:var(--text); border-radius:13px; padding:11px 14px; font-size:16px; outline:none;
+                  font-family:var(--font);}
+  .composer input:focus{border-color:var(--violet);}
+  .composer button{min-height:44px; padding:0 16px; border-radius:13px; cursor:pointer; font-size:14px; font-weight:600;
+                   background:var(--glass-2); border:1px solid var(--hair); color:var(--violet-bright);}
+  .composer button:active{transform:scale(.96);}
+
+  /* upcoming (future slot — intentionally empty, no fake data) */
+  .upcoming-empty{display:flex; flex-direction:column; gap:8px; color:var(--text-faint); font-size:13.5px;}
+  .upcoming-empty .soon{display:inline-block; align-self:flex-start; font-size:10.5px; font-weight:600;
+                        letter-spacing:.1em; text-transform:uppercase; color:var(--violet-bright);
+                        background:rgba(139,92,246,.15); padding:4px 9px; border-radius:999px;}
+
+  /* ---------- token modal + toast ---------- */
+  .overlay{position:fixed; inset:0; z-index:40; display:none; align-items:center; justify-content:center;
+           padding:24px; background:rgba(4,4,8,.6); backdrop-filter:blur(8px);}
+  .overlay.show{display:flex;}
+  .modal{width:100%; max-width:380px; background:linear-gradient(180deg, var(--glass-2), var(--glass));
+         backdrop-filter:blur(24px); border:1px solid var(--hair); border-radius:var(--radius);
+         box-shadow:var(--shadow); padding:26px;}
+  .modal h2{margin:0 0 7px; font-size:19px; font-weight:600;}
+  .modal p{margin:0 0 17px; color:var(--text-dim); font-size:13.5px; line-height:1.55;}
+  .modal input{width:100%; min-height:46px; background:rgba(0,0,0,.3); border:1px solid var(--hair);
+               color:var(--text); border-radius:13px; padding:13px 15px; font-size:16px; outline:none; margin-bottom:15px;}
+  .modal input:focus{border-color:var(--violet);}
+  .modal button{width:100%; min-height:48px; border:none; border-radius:13px; cursor:pointer;
+                font-size:15px; font-weight:600; color:#fff;
+                background:linear-gradient(120deg, var(--violet), var(--magenta));
+                box-shadow:0 10px 30px -10px rgba(168,85,247,.7);}
+  .modal button:active{transform:scale(.98);}
+  #toast{position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 26px); transform:translateX(-50%) translateY(10px);
+         z-index:50; background:rgba(20,18,30,.92); border:1px solid var(--hair); color:var(--text);
+         padding:11px 18px; border-radius:13px; font-size:14px; opacity:0; pointer-events:none;
+         transition:opacity .25s, transform .25s; max-width:84%;}
+  #toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+
+  /* ---------- desktop: orb centered, cards in the quadrants ---------- */
+  @media (min-width:1024px){
+    .stage{
+      grid-template-columns:minmax(250px,310px) minmax(440px,1fr) minmax(250px,310px);
+      grid-template-rows:auto auto;
+      grid-template-areas:
+        "weather  hero  activity"
+        "upcoming hero  conversation";
+      align-content:center;
+    }
+    .hero{grid-area:hero;}        /* spans both center rows via the template-areas above */
+    .card-weather{grid-area:weather;}
+    .card-activity{grid-area:activity;}
+    .card-convo{grid-area:conversation;}
+    .card-upcoming{grid-area:upcoming;}
+  }
+  @media (min-width:1024px) and (max-height:820px){ .hero{padding:6px 0;} }
+
+  /* ---------- reduced motion: kill drift + rotation, static gradient orb ---------- */
+  @media (prefers-reduced-motion:reduce){
+    .blob{animation:none !important;}
+    .orb-glow,.orb-swirl,.orb-ring{animation:none !important;}
+    .orb-core{transform:none !important;}
+    .orb-glow{transform:none !important; opacity:.6 !important;}
+    .orb-ring{opacity:0 !important;}
+    .card{animation:none !important; opacity:1; transform:none;}
+    .bubble{animation:none !important;}
+    *{scroll-behavior:auto !important;}
+  }
+</style>
+</head>
+<body>
+  <div class="aurora"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
+  <div class="grain" id="grain"></div>
+
+  <div class="shell">
+    <header>
+      <span class="brand">Ner<b>vice</b></span>
+      <span class="spacer"></span>
+      <span class="status"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></span>
+      <button class="iconbtn" id="gearBtn" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>
+      </button>
+      <button class="iconbtn" id="newBtn" aria-label="New chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </header>
+
+    <main class="stage">
+      <!-- HERO: the orb + clock + controls -->
+      <section class="hero">
+        <div class="orb is-idle" id="orb" role="button" tabindex="0" aria-label="Hold to talk to Nervice">
+          <div class="orb-glow"></div>
+          <div class="orb-core">
+            <div class="orb-swirl"></div>
+            <div class="orb-sheen"></div>
+            <div class="orb-grain" id="orbGrain"></div>
+          </div>
+          <div class="orb-ring"></div>
+        </div>
+        <div>
+          <div class="clock" id="clock">--:--</div>
+          <div class="date" id="date">&nbsp;</div>
+        </div>
+        <div class="mic-label" id="micLabel">hold to talk</div>
+        <button class="convo-pill" id="convoBtn" aria-pressed="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.1a9 9 0 0 1 0 19.8M7 21.9A9 9 0 0 1 7 2.1M12 7v5l3 2"/></svg>
+          <span id="convoLabel">Conversation</span>
+        </button>
+      </section>
+
+      <!-- WEATHER -->
+      <section class="card card-weather">
+        <h3 class="card-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 3v1.5M12 19.5V21M4.2 4.2l1 1M18.8 18.8l1 1M3 12h1.5M19.5 12H21M4.2 19.8l1-1M18.8 5.2l1-1"/></svg>Weather</h3>
+        <div id="wxBody"><div class="empty">Loading local weather…</div></div>
+      </section>
+
+      <!-- ACTIVITY -->
+      <section class="card card-activity">
+        <h3 class="card-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5 6 5-15L17 12h4"/></svg>Activity</h3>
+        <div class="feed" id="feed"><div class="empty">Loading recent activity…</div></div>
+      </section>
+
+      <!-- CONVERSATION -->
+      <section class="card card-convo">
+        <h3 class="card-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.2 7.6L3 21l1.9-5.8A8.5 8.5 0 1 1 21 11.5z"/></svg>Conversation</h3>
+        <div class="msgs" id="msgs"><div class="convo-empty">Tap and hold the orb to talk, or type below.</div></div>
+        <div class="composer">
+          <input id="text" type="text" placeholder="Message Nervice…" autocomplete="off" enterkeyhint="send">
+          <button id="send">Send</button>
+        </div>
+      </section>
+
+      <!-- UPCOMING — FUTURE SLOT. No calendar source connected yet; intentionally empty (no fake data). -->
+      <section class="card card-upcoming">
+        <h3 class="card-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="16" rx="2.5"/><path d="M3.5 9h17M8 2.5v4M16 2.5v4"/></svg>Upcoming</h3>
+        <div class="upcoming-empty">
+          <span class="soon">Coming soon</span>
+          <span>No calendar connected yet — events will appear here once a source is linked.</span>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="overlay" id="tokenModal">
+    <div class="modal">
+      <h2>Connect to Nervice</h2>
+      <p>Paste your API token. It's stored only in this browser — fine for a private, single-user tailnet app.</p>
+      <input id="tokenInput" type="password" placeholder="NERVICE_API_TOKEN" autocomplete="off">
+      <button id="tokenSave">Save &amp; connect</button>
+    </div>
+  </div>
+  <div id="toast"></div>
+
+<script>
+/* Security: token lives in localStorage and rides as a Bearer header / first WS frame. Acceptable
+   here because the page is served only over the private tailnet to a single user, with no public
+   exposure and zero third-party code. Every byte of this file is inline — no external requests. */
+const TOKEN_KEY='nervice_token', CID_KEY='nervice_cid';
+const $=s=>document.querySelector(s);
+const getToken=()=>localStorage.getItem(TOKEN_KEY)||'';
+function getCID(){let c=localStorage.getItem(CID_KEY); if(!c){c=(crypto.randomUUID?crypto.randomUUID():String(Date.now())); localStorage.setItem(CID_KEY,c);} return c;}
+const REDUCED=window.matchMedia('(prefers-reduced-motion:reduce)').matches;
+const wsBase=()=> (location.protocol.charAt(4)==='s' ? 'wss://' : 'ws://') + location.host;
+
+/* ---- procedural grain (runtime canvas -> dataURL; keeps the source file resource-free) ---- */
+function makeNoise(size,alpha){
+  const cv=document.createElement('canvas'); cv.width=cv.height=size;
+  const ctx=cv.getContext('2d'); const img=ctx.createImageData(size,size);
+  for(let i=0;i<img.data.length;i+=4){const v=(Math.random()*255)|0; img.data[i]=img.data[i+1]=img.data[i+2]=v; img.data[i+3]=alpha;}
+  ctx.putImageData(img,0,0); return cv.toDataURL('image/png');
+}
+(function(){ const g=makeNoise(140,26); $('#grain').style.backgroundImage=`url(${g})`;
+  $('#orbGrain').style.backgroundImage=`url(${makeNoise(90,40)})`; })();
+
+/* ---- toast ---- */
+let toastT; function toast(m){const t=$('#toast'); t.textContent=m; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2800);}
+
+/* ---- token modal ---- */
+function openToken(){$('#tokenInput').value=getToken(); $('#tokenModal').classList.add('show'); setTimeout(()=>$('#tokenInput').focus(),120);}
+function closeToken(){$('#tokenModal').classList.remove('show');}
+$('#tokenSave').onclick=()=>{const t=$('#tokenInput').value.trim(); if(!t){toast('Enter a token'); return;} localStorage.setItem(TOKEN_KEY,t); closeToken(); toast('Connected'); refreshAll();};
+$('#gearBtn').onclick=openToken;
+$('#newBtn').onclick=()=>{localStorage.removeItem(CID_KEY); getCID(); $('#msgs').innerHTML='<div class="convo-empty">New chat. Tap and hold the orb to talk, or type below.</div>'; toast('New chat');};
+
+/* ---- authed fetch ---- */
+async function api(path){
+  const token=getToken(); if(!token){openToken(); throw new Error('no token');}
+  const r=await fetch(path,{headers:{'Authorization':'Bearer '+token}});
+  if(r.status===401){toast('Invalid token'); openToken(); throw new Error('401');}
+  if(!r.ok) throw new Error('http '+r.status);
+  return r.json();
+}
+
+/* ================= the orb: states + single amplitude rAF ================= */
+const orb=$('#orb'), micLabel=$('#micLabel');
+let orbState='idle', ampActive=false, ampSmooth=0, rafId=0;
+function setState(s){
+  orbState=s; orb.className='orb is-'+s;
+  micLabel.textContent = s==='listening'?'listening…' : s==='thinking'?'thinking…' : s==='speaking'?'speaking…' : (convoMode?'conversation on':'hold to talk');
+  if(s==='listening'||s==='speaking') startAmp(); else { stopAmp(); orb.style.setProperty('--amp',0); }
+}
+function startAmp(){ if(REDUCED||ampActive) return; ampActive=true; rafId=requestAnimationFrame(ampLoop); }
+function stopAmp(){ ampActive=false; if(rafId) cancelAnimationFrame(rafId); rafId=0; ampSmooth=0; }
+function ampLoop(){
+  if(!ampActive) return;
+  const node = orbState==='speaking' ? analyser : orbState==='listening' ? micAnalyser : null;
+  let amp=0;
+  if(node){ node.getByteFrequencyData(ampData); let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i]; amp=Math.min(1,Math.sqrt(s/ampData.length)/118); }
+  ampSmooth += (amp-ampSmooth)*0.28;
+  orb.style.setProperty('--amp', ampSmooth.toFixed(3));
+  rafId=requestAnimationFrame(ampLoop);
+}
+
+/* ================= Web Audio: playback + analysers ================= */
+let audioCtx=null, analyser=null, ampData=null, micAnalyser=null, nextStart=0, scheduled=0;
+function initAudio(){
+  if(audioCtx) return;
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  analyser=audioCtx.createAnalyser(); analyser.fftSize=256; analyser.smoothingTimeConstant=.7;
+  ampData=new Uint8Array(analyser.frequencyBinCount); analyser.connect(audioCtx.destination);
+  micAnalyser=audioCtx.createAnalyser(); micAnalyser.fftSize=256; micAnalyser.smoothingTimeConstant=.7;
+}
+function unlockAudio(){ initAudio(); if(audioCtx.state==='suspended') audioCtx.resume(); }
+function b64ToBuf(b64){const bin=atob(b64); const a=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i); return a.buffer;}
+async function enqueueAudio(b64){
+  initAudio(); try{await audioCtx.resume();}catch(e){}
+  let audioBuf; try{ audioBuf=await audioCtx.decodeAudioData(b64ToBuf(b64)); }catch(e){ return; }
+  const src=audioCtx.createBufferSource(); src.buffer=audioBuf; src.connect(analyser);
+  const now=audioCtx.currentTime; const start=Math.max(now,nextStart);
+  src.start(start); nextStart=start+audioBuf.duration; scheduled++;
+  setState('speaking');
+  src.onended=()=>{ scheduled--; if(scheduled<=0){ nextStart=0; onSpeakEnd(); } };
+}
+function onSpeakEnd(){ if(convoMode){ setState('idle'); setTimeout(nextTurn,180);} else setState('idle'); }
+
+/* ================= conversation WebSocket(s) ================= */
+let voiceWS=null, chatWS=null, curBubble=null;
+function freshBubbleHost(){ const m=$('#msgs'); const e=m.querySelector('.convo-empty'); if(e) e.remove(); return m; }
+function addBubble(role,text){ const m=freshBubbleHost(); const d=document.createElement('div'); d.className='bubble '+role; d.textContent=text; m.appendChild(d); m.scrollTop=m.scrollHeight; return d; }
+function appendNervice(text){ const m=freshBubbleHost(); if(!curBubble){ curBubble=document.createElement('div'); curBubble.className='bubble nervice'; curBubble.textContent=text; m.appendChild(curBubble);} else { curBubble.textContent += (curBubble.textContent?' ':'')+text; } m.scrollTop=m.scrollHeight; }
+
+function handleFrame(f){
+  if(f.type==='transcript'){ if(f.text) addBubble('you',f.text); setState('thinking'); }
+  else if(f.type==='ack'){ appendNervice(f.text); }
+  else if(f.type==='text'){ appendNervice(f.text); }
+  else if(f.type==='audio'){ enqueueAudio(f.wav_base64); }
+  else if(f.type==='done'){ curBubble=null; if(scheduled<=0 && orbState!=='speaking'){ if(convoMode) setTimeout(nextTurn,180); else setState('idle'); } setTimeout(loadActivity,800); }
+}
+
+function openWS(path){
+  return new Promise((resolve,reject)=>{
+    const token=getToken(); if(!token){openToken(); reject(new Error('no token')); return;}
+    const ws=new WebSocket(wsBase()+path);
+    let ready=false;
+    ws.onopen=()=> ws.send(JSON.stringify({token, conversation_id:getCID(), audio: path.indexOf('chat')>=0?false:true}));
+    ws.onmessage=(e)=>{ let f; try{f=JSON.parse(e.data);}catch(_){return;} if(!ready && f.type==='ready'){ ready=true; resolve(ws); return;} handleFrame(f); };
+    ws.onclose=(e)=>{ if(path.indexOf('voice')>=0) voiceWS=null; else chatWS=null; if(e.code===1008){ toast('Invalid token'); openToken(); } if(!ready) reject(new Error('closed')); };
+    ws.onerror=()=>{};
+  });
+}
+async function getVoiceWS(){ if(voiceWS&&voiceWS.readyState===1) return voiceWS; voiceWS=await openWS('/ws/voice'); return voiceWS; }
+async function getChatWS(){ if(chatWS&&chatWS.readyState===1) return chatWS; chatWS=await openWS('/ws/chat'); return chatWS; }
+
+/* ================= push-to-talk + conversation mode ================= */
+let micStream=null, recorder=null, chunks=[], recording=false, convoMode=false;
+let vadCtx=null, vadRAF=0, recStart=0, silenceStart=0;
+const SILENCE=0.015, SIL_MS=1200, MIN_MS=700, MAX_MS=30000;
+
+function pickMime(){ for(const m of ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus']){ try{ if(MediaRecorder.isTypeSupported(m)) return m; }catch(e){} } return ''; }
+
+async function startRec(auto){
+  if(recording) return; if(!getToken()){ openToken(); return; }
+  unlockAudio();
+  try{ micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}}); }
+  catch(e){ toast('Mic permission needed'); if(convoMode) stopConvo(); return; }
+  try{ micAnalyser && audioCtx.createMediaStreamSource(micStream).connect(micAnalyser); }catch(e){}
+  chunks=[]; const mime=pickMime();
+  try{ recorder = mime? new MediaRecorder(micStream,{mimeType:mime}) : new MediaRecorder(micStream); }
+  catch(e){ recorder=new MediaRecorder(micStream); }
+  recorder.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+  recorder.onstop=onRecStop;
+  recorder.start(); recording=true; setState('listening');
+  if(auto) startVAD();
+}
+function stopRec(){ if(!recording) return; recording=false; stopVAD(); if(recorder&&recorder.state!=='inactive') recorder.stop(); }
+function releaseMic(){ if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }
+
+async function onRecStop(){
+  releaseMic();
+  if(!chunks.length){ if(convoMode) setTimeout(nextTurn,150); else setState('idle'); return; }
+  const type=(recorder.mimeType||'audio/webm'); const blob=new Blob(chunks,{type});
+  setState('thinking');
+  try{ const ws=await getVoiceWS(); ws.send(await blob.arrayBuffer()); }
+  catch(e){ setState('idle'); if(convoMode) stopConvo(); }
+}
+
+/* simple RMS VAD for hands-free mode */
+function startVAD(){
+  recStart=Date.now(); silenceStart=0;
+  if(!micAnalyser) return;
+  (function tick(){
+    if(!recording) return;
+    micAnalyser.getByteFrequencyData(ampData);
+    let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i];
+    const rms=Math.sqrt(s/ampData.length)/255, el=Date.now()-recStart;
+    if(el>=MAX_MS){ stopRec(); return; }
+    if(el<MIN_MS){ silenceStart=0; }
+    else if(rms<SILENCE){ if(!silenceStart) silenceStart=Date.now(); else if(Date.now()-silenceStart>=SIL_MS){ stopRec(); return; } }
+    else silenceStart=0;
+    vadRAF=requestAnimationFrame(tick);
+  })();
+}
+function stopVAD(){ if(vadRAF) cancelAnimationFrame(vadRAF); vadRAF=0; }
+function nextTurn(){ if(convoMode && !recording && orbState!=='speaking') startRec(true); }
+
+function startConvo(){ if(!getToken()){openToken(); return;} unlockAudio(); convoMode=true; const b=$('#convoBtn'); b.classList.add('on'); b.setAttribute('aria-pressed','true'); $('#convoLabel').textContent='Conversation: on'; toast('Conversation on — talk, then pause'); nextTurn(); }
+function stopConvo(){ convoMode=false; const b=$('#convoBtn'); b.classList.remove('on'); b.setAttribute('aria-pressed','false'); $('#convoLabel').textContent='Conversation'; stopRec(); releaseMic(); setState('idle'); }
+$('#convoBtn').onclick=()=> convoMode? stopConvo() : startConvo();
+
+/* orb = push-to-talk (hold). Disabled while conversation mode runs. */
+orb.addEventListener('pointerdown', e=>{ e.preventDefault(); if(convoMode) return; startRec(false); });
+orb.addEventListener('pointerup', e=>{ e.preventDefault(); if(!convoMode) stopRec(); });
+orb.addEventListener('pointercancel', ()=>{ if(!convoMode) stopRec(); });
+orb.addEventListener('pointerleave', ()=>{ if(!convoMode && recording) stopRec(); });
+orb.addEventListener('keydown', e=>{ if((e.key===' '||e.key==='Enter')&&!convoMode&&!recording){ e.preventDefault(); startRec(false);} });
+orb.addEventListener('keyup', e=>{ if((e.key===' '||e.key==='Enter')&&!convoMode&&recording){ e.preventDefault(); stopRec();} });
+orb.addEventListener('contextmenu', e=>e.preventDefault());
+
+/* typed messages -> /ws/chat (streamed text bubbles) */
+async function sendText(){
+  const inp=$('#text'); const msg=inp.value.trim(); if(!msg) return; inp.value='';
+  addBubble('you',msg); setState('thinking');
+  try{ const ws=await getChatWS(); ws.send(JSON.stringify({text:msg})); }
+  catch(e){ setState('idle'); }
+}
+$('#send').onclick=sendText;
+$('#text').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); sendText(); } });
+
+/* ================= panels: clock, weather, activity, health ================= */
+function tickClock(){
+  const d=new Date();
+  let h=d.getHours(); const ap=h>=12?'PM':'AM'; h=h%12||12;
+  const mm=String(d.getMinutes()).padStart(2,'0');
+  $('#clock').innerHTML=`${h}:${mm}<span class="ampm">${ap}</span>`;
+  $('#date').textContent=d.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'});
+}
+setInterval(tickClock,1000); tickClock();
+
+const WX_ICONS={
+  clear:'<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M4.6 19.4 6 18M18 6l1.4-1.4"/>',
+  cloudy:'<path d="M7 18h9a4 4 0 0 0 .4-7.98A5.5 5.5 0 0 0 5.6 9.2 3.6 3.6 0 0 0 7 18z"/>',
+  rain:'<path d="M7 15h9a4 4 0 0 0 .4-7.98A5.5 5.5 0 0 0 5.6 6.2 3.6 3.6 0 0 0 7 15z"/><path d="M8 19l-1 2M12 19l-1 2M16 19l-1 2"/>',
+  snow:'<path d="M7 15h9a4 4 0 0 0 .4-7.98A5.5 5.5 0 0 0 5.6 6.2 3.6 3.6 0 0 0 7 15z"/><path d="M9 19h.01M12.5 20h.01M15 19h.01"/>',
+  fog:'<path d="M5 9h11a4 4 0 0 0-7.4-2.5A3.6 3.6 0 0 0 5 9z"/><path d="M4 13h16M6 17h12"/>',
+  storm:'<path d="M7 14h9a4 4 0 0 0 .4-7.98A5.5 5.5 0 0 0 5.6 5.2 3.6 3.6 0 0 0 7 14z"/><path d="M12 13l-2 4h3l-2 4"/>'
+};
+async function loadWeather(){
+  try{ const w=await api('/weather'); if(!w.available){ $('#wxBody').innerHTML='<div class="empty">Weather unavailable right now.</div>'; return; }
+    const ico=WX_ICONS[w.condition]||WX_ICONS.clear;
+    $('#wxBody').innerHTML=
+      `<div class="wx"><div class="wx-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ico}</svg></div>`+
+      `<div><div class="wx-temp">${w.temp}&deg;</div><div class="wx-cond">${w.condition}</div></div></div>`+
+      `<div class="wx-range"><span>High <b>${w.hi}&deg;</b></span><span>Low <b>${w.lo}&deg;</b></span></div>`;
+  }catch(e){ if(String(e.message).indexOf('401')<0) $('#wxBody').innerHTML='<div class="empty">Weather unavailable.</div>'; }
+}
+
+const ACT_ICONS={
+  open:'<path d="M4 7a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/>',
+  screenshot:'<rect x="3" y="6" width="18" height="13" rx="2.5"/><circle cx="12" cy="12.5" r="3.2"/><path d="M8 6l1.2-2h5.6L16 6"/>',
+  browse:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/>',
+  build:'<path d="M14.5 5.5a3.5 3.5 0 0 0-4.6 4.6L3 17v4h4l6.9-6.9a3.5 3.5 0 0 0 4.6-4.6l-2.5 2.5-2-2 2.5-2.5z"/>',
+  selfmod:'<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>',
+  think:'<path d="M9.5 21h5M8 17a6 6 0 1 1 8 0c-.7.6-1 1.2-1 2v.5H9V19c0-.8-.3-1.4-1-2z"/>',
+  ask:'<path d="M21 11.5a8.5 8.5 0 0 1-12.2 7.6L3 21l1.9-5.8A8.5 8.5 0 1 1 21 11.5z"/>',
+  do:'<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>'
+};
+function esc(s){const d=document.createElement('div'); d.textContent=s; return d.innerHTML;}
+async function loadActivity(){
+  try{ const j=await api('/activity'); const f=$('#feed');
+    if(!j.items.length){ f.innerHTML='<div class="empty">No recent activity yet. Ask Nervice something or have it open an app.</div>'; return; }
+    f.innerHTML=j.items.map(it=>{
+      const ico=ACT_ICONS[it.kind]||ACT_ICONS.do;
+      return `<div class="act"><div class="act-ico ${it.kind}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ico}</svg></div>`+
+             `<div class="act-body"><div class="act-text">${esc(it.text)}</div><div class="act-time">${esc(it.ago)}</div></div></div>`;
+    }).join('');
+  }catch(e){ if(String(e.message).indexOf('401')<0) $('#feed').innerHTML='<div class="empty">Activity unavailable.</div>'; }
+}
+
+async function loadHealth(){
+  const dot=$('#statusDot'), txt=$('#statusText');
+  try{ const h=await api('/health'); const warm=h.voice==='warm';
+    dot.className='dot '+(warm?'ok':'warn'); txt.textContent= warm? 'online' : 'warming up';
+  }catch(e){ dot.className='dot down'; txt.textContent= String(e.message).indexOf('401')>=0?'no token':'offline'; }
+}
+
+function refreshAll(){ loadHealth(); loadWeather(); loadActivity(); }
+setInterval(loadHealth,30000); setInterval(loadActivity,30000); setInterval(loadWeather,900000);
+
+/* boot */
+if(!getToken()) openToken(); else refreshAll();
+getCID();
+</script>
+</body>
+</html>
