@@ -10,6 +10,7 @@ from ddgs import DDGS
 from app.agent import ask_claude, agent_task, browse_agent
 import app.agent as agent_mod
 from app import selfmod
+from app import weather as weather_mod
 
 
 def _fetch_page(url: str, char_limit: int = 2500) -> str:
@@ -59,6 +60,24 @@ async def consult_claude(task: str) -> str:
             f.write(f"{ts}\t{task[:300]}\n")
     return await ask_claude(task)
 
+
+async def get_weather() -> str:
+    """Local weather for Nate's area (coords hardcoded in app/weather.py — no location needed)."""
+    w = await weather_mod.get_weather()
+    return w or "weather service unavailable right now"
+
+
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Nate's local weather RIGHT NOW: current temperature, conditions, and today's "
+                       "high/low. His location is already configured — NEVER ask which city or region. "
+                       "Always use this for any weather, temperature, or forecast question; never use "
+                       "web_search for weather.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
 
 WEB_SEARCH_TOOL = {
     "type": "function",
@@ -162,6 +181,7 @@ BROWSE_TOOL = {
     },
 }
 
-TOOLS = [WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL, AGENT_BUILD_TOOL, PROPOSE_SELF_UPDATE_TOOL, BROWSE_TOOL]
-TOOL_FUNCS = {"web_search": web_search, "consult_claude": consult_claude,
+TOOLS = [WEATHER_TOOL, WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL, AGENT_BUILD_TOOL,
+         PROPOSE_SELF_UPDATE_TOOL, BROWSE_TOOL]
+TOOL_FUNCS = {"get_weather": get_weather, "web_search": web_search, "consult_claude": consult_claude,
               "agent_build": agent_build, "propose_self_update": propose_self_update, "browse": browse}
