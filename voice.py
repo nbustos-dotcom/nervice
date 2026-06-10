@@ -49,7 +49,7 @@ async def main():
                 continue
 
             print("Nervice: ", end="", flush=True)
-            reply = await respond(USER, user_message, window, voice_mode=True)
+            reply = await respond(USER, user_message, window, voice_mode=True, speak=speak)
             speak(reply)
             window.append({"role": "user", "content": user_message})
             window.append({"role": "assistant", "content": reply})

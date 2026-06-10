@@ -1,4 +1,5 @@
 import sys
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -32,14 +33,39 @@ async def build_system_prompt(user_id, user_message, voice_mode: bool = False):
     return f"{base}\n\n{VOICE_ADDENDUM}" if voice_mode else base
 
 
-async def respond(user_id, user_message, window, voice_mode: bool = False):
+_FORCE = {"hard": "consult_claude", "build": "agent_build",
+          "selfmod": "propose_self_update", "browse": "browse"}
+# spoken/printed the moment a slow forced tool starts, so Nate isn't left waiting in silence
+_ACK = {"hard": "Let me think hard about that one — give me a minute.",
+        "build": "On it — building now, give me a couple minutes.",
+        "browse": "Opening it up — one sec.",
+        "selfmod": "Let me draft that change for your approval — about a minute."}
+# per-tool ceilings so a hung agent never wedges the conversation loop
+_TIMEOUTS = {"hard": 180, "build": 600, "browse": 300, "selfmod": 300}
+_TIMEOUT_MSG = "That took too long and I stopped it — want me to try again?"
+
+
+async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
     system = await build_system_prompt(user_id, user_message, voice_mode=voice_mode)
     route = await classify(user_message)
-    force = {"hard": "consult_claude", "build": "agent_build",
-             "selfmod": "propose_self_update", "browse": "browse"}.get(route)
+    force = _FORCE.get(route)
     if force:
         print(f"[ROUTE: {route} -> {force}]", file=sys.stderr)
-    reply = await chat_with_tools(system, window + [{"role": "user", "content": user_message}], TOOLS, TOOL_FUNCS, force_tool=force)
+        ack = _ACK[route]
+        print(ack)                       # immediate text feedback before the slow tool
+        if voice_mode and speak:
+            speak(ack)                   # voice: spoken immediately, before the await
+    coro = chat_with_tools(system, window + [{"role": "user", "content": user_message}],
+                           TOOLS, TOOL_FUNCS, force_tool=force)
+    if force:
+        try:
+            # route maps 1:1 to the forced agent tool, so this applies that tool's timeout;
+            # wait_for cancels chat_with_tools (and the awaited agent) cleanly on expiry
+            reply = await asyncio.wait_for(coro, _TIMEOUTS[route])
+        except asyncio.TimeoutError:
+            reply = _TIMEOUT_MSG
+    else:
+        reply = await coro
     print(reply)
     return reply
 
