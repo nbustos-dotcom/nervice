@@ -22,7 +22,8 @@ from contextlib import asynccontextmanager
 import pathlib
 
 import numpy as np
-from fastapi import FastAPI, Depends, Header, HTTPException, UploadFile, File, Form
+from fastapi import (FastAPI, Depends, Header, HTTPException, UploadFile, File, Form,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -31,6 +32,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.chat import respond, save_exchange
+from app.streaming import stream_reply
 
 USER = "nate"
 _TOKEN = os.environ.get("NERVICE_API_TOKEN")
@@ -214,3 +216,93 @@ async def voice(audio: UploadFile = File(...), conversation_id: str | None = For
     print(f"[voice-timing] stt={stt_s:.2f}s llm={llm_s:.2f}s tts={tts_s:.2f}s "
           f"total={time.time()-t_total:.2f}s", file=sys.stderr)
     return {"transcript": transcript, "reply": reply, "conversation_id": cid, "audio_wav_base64": audio_b64}
+
+
+# --------------- WebSocket streaming (Phase 1) ---------------
+# Browsers cannot set headers on WebSocket connects, so the Bearer token rides in the FIRST
+# message frame — never the URL (URLs land in logs). Nothing is processed before the token
+# verifies; bad/missing token closes with 1008 (policy violation). Same token, same boundary,
+# same tailnet-only bind as the REST routes.
+
+async def _ws_handshake(ws: WebSocket) -> dict | None:
+    """Accept, read the first frame, verify the token. Returns the first frame on success;
+    closes 1008 and returns None otherwise."""
+    await ws.accept()
+    try:
+        first = await ws.receive_json()
+    except Exception:
+        await ws.close(code=1008)
+        return None
+    token = first.get("token") or ""
+    if not _TOKEN or not isinstance(token, str) or not secrets.compare_digest(token, _TOKEN):
+        await ws.close(code=1008)
+        return None
+    await ws.send_json({"type": "ready"})
+    return first
+
+
+def _ws_sender(ws: WebSocket):
+    """Serialized frame sender — the audio pipeline task and the stream loop both send; the lock
+    keeps frames whole and ordered on the wire."""
+    lock = asyncio.Lock()
+    async def send(frame: dict):
+        async with lock:
+            await ws.send_json(frame)
+    return send
+
+
+@app.websocket("/ws/chat")
+async def ws_chat(ws: WebSocket):
+    first = await _ws_handshake(ws)
+    if first is None:
+        return
+    cid = first.get("conversation_id") or str(uuid.uuid4())
+    want_audio = bool(first.get("audio", False))
+    send = _ws_sender(ws)
+    try:
+        while True:
+            msg = await ws.receive_json()
+            text = (msg.get("text") or "").strip()
+            if not text:
+                continue
+            window = _windows.setdefault(cid, [])
+            reply = await stream_reply(USER, text, window, send, voice=want_audio,
+                                       conversation_id=cid)
+            _advance_window(cid, text, reply)
+    except WebSocketDisconnect:
+        pass
+
+
+@app.websocket("/ws/voice")
+async def ws_voice(ws: WebSocket):
+    first = await _ws_handshake(ws)
+    if first is None:
+        return
+    cid = first.get("conversation_id") or str(uuid.uuid4())
+    send = _ws_sender(ws)
+    import app.voice as v   # blocks on the warm thread's import lock if mid-warm, like REST
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            data = msg.get("bytes")
+            if not data:
+                continue   # ignore stray text frames between utterances
+            tf = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
+            try:
+                tf.write(data)
+                tf.close()
+                transcript = await asyncio.to_thread(v.transcribe_file, tf.name)
+            finally:
+                os.unlink(tf.name)
+            await send({"type": "transcript", "text": transcript})
+            if not transcript.strip():
+                await send({"type": "done", "reply": ""})
+                continue
+            window = _windows.setdefault(cid, [])
+            reply = await stream_reply(USER, transcript, window, send, voice=True,
+                                       conversation_id=cid)
+            _advance_window(cid, transcript, reply)
+    except WebSocketDisconnect:
+        pass
