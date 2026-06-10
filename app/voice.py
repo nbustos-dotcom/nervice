@@ -13,12 +13,14 @@ from faster_whisper import WhisperModel
 
 
 def _register_cuda_dlls() -> None:
-    """Make the pip-installed CUDA runtime DLLs loadable by ctranslate2 — Windows doesn't search
-    site-packages for DLLs otherwise. Needs all three: cublas, cudnn, AND cuda_runtime (cudart);
-    cublas can't load without cudart. Register via both add_dll_directory and PATH for robustness."""
+    """Make the pip-installed CUDA runtime DLLs loadable by ctranslate2 (whisper) AND onnxruntime's
+    CUDA EP (Kokoro) — Windows doesn't search site-packages for DLLs otherwise. ctranslate2 needs
+    cublas+cudnn+cudart; onnxruntime additionally needs cufft+curand (torch used to bundle these,
+    so they're separate pip packages now). Register via both add_dll_directory and PATH."""
     import importlib.util
     dirs = []
-    for pkg in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_runtime"):
+    for pkg in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_runtime",
+                "nvidia.cufft", "nvidia.curand", "nvidia.nvjitlink"):
         try:
             spec = importlib.util.find_spec(pkg)
             if spec and spec.submodule_search_locations:
