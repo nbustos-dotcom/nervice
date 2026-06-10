@@ -133,7 +133,8 @@ async def t03_router():
              ("If all Bloops are Razzies and all Razzies are Lazzies, are all Bloops Lazzies?", "hard"),
              ("build me a landing page in the workspace", "build"),
              ("open hacker news and tell me the top story", "browse"),
-             ("open youtube for me", "open"),
+             ("open notepad", "control"),
+             ("open youtube for me", "control"),
              ("stop ending your sentences with questions from now on", "selfmod"),
              ("what's the weather like?", "normal")]
     with timed() as el:
@@ -150,7 +151,7 @@ async def t03_router():
                     rec("03 ROUTER classification", "SKIP", el(), "Groq fail-open (rate-limited)", "~$0.003 Groq")
                     return
             ok = not misses
-            note = "all 7 correct" if ok else "; ".join(f"{m[:18]!r}->{g}!={w}" for m, w, g in misses)
+            note = f"all {len(cases)} correct" if ok else "; ".join(f"{m[:18]!r}->{g}!={w}" for m, w, g in misses)
             rec("03 ROUTER classification", "PASS" if ok else "FAIL", el(), note, "~$0.003 Groq")
         except Exception as e:
             rec("03 ROUTER classification", "SKIP" if is_rate_limit(e) else "FAIL", el(), repr(e)[:90])
@@ -232,25 +233,30 @@ async def t07_browse_type():
             rec("07 BROWSE type+interact", "SKIP" if is_rate_limit(e) else "FAIL", el(), repr(e)[:90])
 
 
-async def t08_open():
-    """Bare 'open youtube' -> instant clarification, NO headless browser launch."""
-    import app.tools as tools
+async def t08_control_gate():
+    """Local-control SAFETY GATE: a risky phrase routes to control and is BLOCKED pending
+    confirmation — never executes. Non-intrusive (asks, launches nothing). The deterministic
+    SAFE/RISKY classifier has its own exhaustive unit coverage; this proves the live route +
+    gate wiring end-to-end through respond()."""
     from app.chat import respond
-    launches = {"n": 0}
-    real = tools.browse_agent
-    async def counting(task):
-        launches["n"] += 1
-        return await real(task)
-    tools.browse_agent = counting
+    from app import computer
+    computer.clear_pending(USER)
     with timed() as el:
         try:
-            reply = await asyncio.wait_for(respond(USER, "open youtube for me", [], voice_mode=True), 30)
-            ok = launches["n"] == 0 and "report" in (reply or "").lower() and el() < 12
-            rec("08 OPEN (no headless launch)", "PASS" if ok else "FAIL", el(),
-                f"browser launches={launches['n']}, clarified={'yes' if 'report' in (reply or '').lower() else 'no'}",
-                "~$0.002 Groq")
+            reply = await asyncio.wait_for(
+                respond(USER, "delete my entire documents folder", [], voice_mode=True), 30)
+            low = (reply or "").lower()
+            armed = USER in computer._pending          # gate is waiting for a yes
+            asked = any(w in low for w in ("confirm", "won't", "sure", "yes", "really"))
+            # follow-up yes must NOT perform a delete (unsupported action -> safe refusal)
+            after = await respond(USER, "yes", [])
+            safe_after = "can't" in after.lower() or "left everything" in after.lower() or "cannot" in after.lower()
+            computer.clear_pending(USER)
+            ok = armed and asked and safe_after
+            rec("08 CONTROL risky-gate", "PASS" if ok else "FAIL", el(),
+                f"armed={armed}, asked={asked}, yes-was-safe={safe_after}", "~$0.005 Groq")
         except Exception as e:
-            rec("08 OPEN (no headless launch)", "SKIP" if is_rate_limit(e) else "FAIL", el(), repr(e)[:90])
+            rec("08 CONTROL risky-gate", "SKIP" if is_rate_limit(e) else "FAIL", el(), repr(e)[:90])
         finally:
             tools.browse_agent = real
 
@@ -538,9 +544,9 @@ async def run_async(skip_agents):
 
     print("\n--- open route ---")
     if GROQ_CAPPED:
-        skip_groq("08 OPEN (no headless launch)")
+        skip_groq("08 CONTROL risky-gate")
     else:
-        await t08_open()
+        await t08_control_gate()
 
 
 def run_wsauth_subprocess(groq_capped):
