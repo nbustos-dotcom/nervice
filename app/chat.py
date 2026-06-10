@@ -8,6 +8,7 @@ from app.llm import chat_stream, chat_with_tools
 from app.router import classify
 from app.tools import TOOLS, TOOL_FUNCS
 from app.memory import remember
+from app.weather import get_weather
 from app.db import AsyncSessionLocal
 from app.models import Message
 
@@ -41,6 +42,27 @@ async def respond(user_id, user_message, window, voice_mode: bool = False):
     reply = await chat_with_tools(system, window + [{"role": "user", "content": user_message}], TOOLS, TOOL_FUNCS, force_tool=force)
     print(reply)
     return reply
+
+
+GREETING_INSTRUCTION = (
+    "Generate Nervice's opening greeting as Nate starts a session. One to two sentences, warm, "
+    "natural, time-appropriate (morning/afternoon/evening), mention the weather only if provided, "
+    "optionally reference one thing you know about him. No bullet lists.")
+
+
+async def greeting(user_id, voice_mode: bool = False) -> str:
+    r = await retrieve(user_id, "Nate today")
+    now = datetime.now(TZ).strftime("%A, %B %d, %Y at %I:%M %p")
+    weather = await get_weather()
+    weather_line = f"WEATHER: {weather}" if weather else "WEATHER: (unavailable — do not mention it)"
+    system = (f"{PERSONA}\n\nWHAT YOU KNOW ABOUT NATE:\n{_format_memories(r)}\n\n"
+              f"CURRENT TIME: {now}\n{weather_line}\n\n{GREETING_INSTRUCTION}")
+    if voice_mode:
+        system += f"\n\n{VOICE_ADDENDUM}"
+    parts = []
+    async for delta in chat_stream(system, [{"role": "user", "content": "(Nate just opened the session.)"}]):
+        parts.append(delta)
+    return "".join(parts).strip()
 
 
 async def save_exchange(user_id, conversation_id, user_message, assistant_message):
