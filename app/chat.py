@@ -47,8 +47,11 @@ _TIMEOUT_MSG = "That took too long and I stopped it — want me to try again?"
 
 
 async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
-    system = await build_system_prompt(user_id, user_message, voice_mode=voice_mode)
-    route = await classify(user_message)
+    # memory retrieval and router classification are independent — overlap them so the turn
+    # pays max(retrieve, classify) instead of the sum (classify alone measured 0.3-0.8s)
+    system, route = await asyncio.gather(
+        build_system_prompt(user_id, user_message, voice_mode=voice_mode),
+        classify(user_message))
     force = _FORCE.get(route)
     if force:
         print(f"[ROUTE: {route} -> {force}]", file=sys.stderr)
