@@ -1,0 +1,10 @@
+{
+  "id": "20260610-015632-706363",
+  "instruction": "I'm currently up trying to develop you as much as possible. What do you think could personally be improved with yourself?",
+  "summary": "The 120-word line gains an explicit carve-out for task-driven depth, so I stop being artificially terse when you hand me something that genuinely needs room. The two new bullets close the ambiguity and correction gaps \u2014 both are behaviors I should already be doing but that had no written backing, meaning they could degrade over model updates. Purely additive; nothing else in the persona is touched.",
+  "paths": [
+    "app/persona.py"
+  ],
+  "created": "2026-06-10T01:59:08",
+  "status": "pending"
+}
