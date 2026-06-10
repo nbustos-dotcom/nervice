@@ -43,6 +43,13 @@ VOICE_VERIFY_ADDENDUM = ("\n\nVOICE MODE: the FINAL answer will be spoken aloud 
                          "conversational sentences, no lists. Tighten, never pad.")
 
 
+def _effort(voice_mode: bool) -> dict:
+    """Voice turns run gpt-oss at low reasoning effort — measured ~0.4s faster per call with no
+    quality cliff on conversational/synthesis work. Text turns keep the default. gpt-oss only;
+    the llama models reject the param."""
+    return {"reasoning_effort": "low"} if voice_mode else {}
+
+
 async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode: bool = False) -> str:
     src = "\n\n=====\n\n".join(tool_outputs)
     synth_system = SYNTH_SYSTEM + (VOICE_SYNTH_ADDENDUM if voice_mode else "")
@@ -52,7 +59,7 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
         model=TOOL_MODEL,
         messages=[{"role": "system", "content": synth_system},
                   {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nQUESTION: {question}"}],
-        temperature=0.2)
+        temperature=0.2, **_effort(voice_mode))
     draft = resp.choices[0].message.content
     # Pass 2: cross-model evidence-quoting verification
     resp = await _client.chat.completions.create(
@@ -90,7 +97,8 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
                        if force_tool and round_idx == 0 else "auto")
         try:
             resp = await _client.chat.completions.create(
-                model=TOOL_MODEL, messages=msgs, tools=tools, tool_choice=tool_choice, temperature=0.2)
+                model=TOOL_MODEL, messages=msgs, tools=tools, tool_choice=tool_choice,
+                temperature=0.2, **_effort(voice_mode))
         except BadRequestError as e:
             # gpt-oss can refuse a forced tool call and answer in text; Groq rejects that
             # generation as 400 tool_use_failed. The route is mechanical — run the tool ourselves.
@@ -159,7 +167,8 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
         question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
         return await _grounded_synthesis(question, tool_outputs, voice_mode=voice_mode)
     if direct_answer is None and tool_outputs:
-        resp = await _client.chat.completions.create(model=TOOL_MODEL, messages=msgs, temperature=0.2)
+        resp = await _client.chat.completions.create(model=TOOL_MODEL, messages=msgs,
+                                                     temperature=0.2, **_effort(voice_mode))
         return resp.choices[0].message.content
     return direct_answer
 
