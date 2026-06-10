@@ -4,6 +4,8 @@ import os
 import re
 import sys
 import time
+import queue
+import threading
 import pathlib
 
 import numpy as np
@@ -47,7 +49,12 @@ _KOKORO_MODEL = _ROOT / "models" / "kokoro" / "kokoro-v1.0.onnx"
 _KOKORO_VOICES = _ROOT / "models" / "kokoro" / "voices-v1.0.bin"
 _PIPER_VOICE = _ROOT / "models" / "piper" / "en_US-ryan-high.onnx"
 
-VOICE = "am_michael"   # Kokoro voice — swap here (e.g. am_adam, am_eric, af_heart, am_fenrir)
+VOICE = "am_onyx"   # Kokoro voice — swap here (e.g. am_adam, am_onyx, bm_george, am_michael)
+
+# Optional voice blend: average two preset style vectors (weights need not sum to 1, but ~1 is
+# natural). Set BLEND to enable; it overrides VOICE. Leave None to use VOICE as-is.
+#   BLEND = ("am_onyx", 0.7, "am_adam", 0.3)   # 70% onyx + 30% adam
+BLEND = None
 
 try:
     import msvcrt  # Windows: lets a keypress drop a turn to typed input
@@ -92,12 +99,21 @@ def _load_tts():
             print(f"[voice] kokoro CUDA session failed ({repr(e)[:60]}) — CPU", file=sys.stderr)
             k = Kokoro(str(_KOKORO_MODEL), str(_KOKORO_VOICES))
 
+        # resolve the voice once: a blended style vector if BLEND is set, else the preset name
+        if BLEND:
+            an, aw, bn, bw = BLEND
+            voice_arg = (aw * k.get_voice_style(an) + bw * k.get_voice_style(bn)).astype(np.float32)
+            label = f"blend({an}{aw:g}+{bn}{bw:g})"
+        else:
+            voice_arg = VOICE
+            label = VOICE
+
         def synth(text: str):
-            samples, sr = k.create(text, voice=VOICE, speed=1.0, lang="en-us")
+            samples, sr = k.create(text, voice=voice_arg, speed=1.0, lang="en-us")
             return (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16), sr
 
         _, rate = synth("hi")  # warm + get true rate
-        return synth, f"kokoro/{VOICE} ({ep})", rate
+        return synth, f"kokoro/{label} ({ep})", rate
     except Exception as e:
         print(f"[voice] kokoro unavailable ({repr(e)[:80]}) — falling back to Piper", file=sys.stderr)
         from piper import PiperVoice
@@ -188,20 +204,53 @@ def _clean_for_speech(text: str) -> str:
     return text
 
 
+_SYNTH_SENTINEL = object()
+
+
 def speak(text: str) -> None:
-    """Sentence-stream the reply: split on .!? and synthesize+play each sentence as it's ready, so
-    the first sentence is audible ASAP. Skips empty/markdown-junk sentences. Code blocks are not
-    spoken (replaced earlier with 'I've put the code on screen')."""
+    """Pipelined sentence streaming: a worker thread synthesizes sentences AHEAD (queue depth 2)
+    while a single continuous output stream plays the current one — so the next chunk is already
+    rendered the moment the current ends, with no synth pause between sentences. Sentence order is
+    preserved (single FIFO producer); a synth failure is logged and that sentence skipped without
+    stalling the queue; the stream drains the final sentence fully before closing."""
     cleaned = _clean_for_speech(text)
-    for sent in _SENT_SPLIT.split(cleaned):
-        sent = sent.strip()
-        if not sent or not re.search(r"[A-Za-z0-9]", sent):
-            continue  # skip empty / punctuation-only / junk
-        audio, sr = _synth(sent)   # engine-agnostic: Kokoro or Piper fallback
-        if audio.size == 0:
-            continue
-        sd.play(audio, samplerate=sr)
-        sd.wait()
+    sentences = [s.strip() for s in _SENT_SPLIT.split(cleaned)
+                 if s.strip() and re.search(r"[A-Za-z0-9]", s)]
+    if not sentences:
+        return
+
+    q: queue.Queue = queue.Queue(maxsize=2)  # synth-ahead depth
+
+    def producer():
+        for sent in sentences:
+            try:
+                audio, sr = _synth(sent)
+            except Exception as e:  # never deadlock the queue on a bad sentence
+                print(f"[voice] synth failed, skipping sentence: {repr(e)[:80]}", file=sys.stderr)
+                continue
+            if audio.size:
+                q.put((audio.reshape(-1, 1), sr))  # blocks when full → backpressure on the worker
+        q.put(_SYNTH_SENTINEL)
+
+    worker = threading.Thread(target=producer, daemon=True)
+    worker.start()
+
+    stream = None
+    try:
+        while True:
+            item = q.get()
+            if item is _SYNTH_SENTINEL:
+                break
+            audio, sr = item
+            if stream is None:  # open once; sample rate is constant within an engine
+                stream = sd.OutputStream(samplerate=sr, channels=1, dtype="int16")
+                stream.start()
+            stream.write(audio)  # paced by playback; next chunk is already queued → seamless
+    finally:
+        if stream is not None:
+            stream.stop()   # Pa_StopStream drains buffered audio before returning (full tail)
+            stream.close()
+        worker.join()
 
 
 def read_typed_line() -> str:
