@@ -1,0 +1,10 @@
+{
+  "id": "20260610-133819-496087",
+  "instruction": "Yeah, increase the tempo then. Let's see how fast your voice can get. It's a little slow right now.",
+  "summary": "Drops the word cap from ~120 to ~60 and rewrites the voice directive to emphasize clipped, punchy delivery \u2014 speed as the default posture rather than just \"short and conversational.\" Also updates the stale \"Voice is coming soon\" note since it's clearly live now.",
+  "paths": [
+    "app/persona.py"
+  ],
+  "created": "2026-06-10T13:38:56",
+  "status": "pending"
+}
