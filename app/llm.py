@@ -1,6 +1,6 @@
 import app.net  # noqa
 
-import os, json, sys, inspect
+import os, json, sys, asyncio, inspect
 from groq import AsyncGroq, BadRequestError
 from dotenv import load_dotenv
 
@@ -9,6 +9,13 @@ load_dotenv()
 GROQ_MODEL = "llama-3.3-70b-versatile"
 TOOL_MODEL = "openai/gpt-oss-120b"
 VERIFY_MODEL = "llama-3.3-70b-versatile"   # different family from TOOL_MODEL — no self-grading
+
+# Per-tool ceilings for the slow agent tools, applied wherever they fire: respond() uses them for
+# forced routes, and chat_with_tools applies them when the tool model calls one on its own — the
+# previously unbounded path that could wedge an API turn (and the phone UI) indefinitely.
+TOOL_TIMEOUTS = {"consult_claude": 180, "agent_build": 600, "browse": 120, "propose_self_update": 300}
+TIMEOUT_MSG = "That took too long and I stopped it — want me to try again?"
+_TERMINAL_TOOLS = ("agent_build", "propose_self_update", "browse")  # their result IS the reply
 
 SYNTH_SYSTEM = """You answer the user's question using ONLY the source material provided.
 HARD RULES:
@@ -146,7 +153,19 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
             try:
                 args = json.loads(tc.function.arguments or "{}")
                 raw = fn(**args) if fn else f"unknown tool {tc.function.name}"
-                result = await raw if inspect.isawaitable(raw) else raw
+                if inspect.isawaitable(raw):
+                    limit = TOOL_TIMEOUTS.get(tc.function.name)
+                    result = await (asyncio.wait_for(raw, limit) if limit else raw)
+                else:
+                    result = raw
+            except (asyncio.TimeoutError, TimeoutError):
+                # auto-fired slow tool hit its ceiling — never wedge the turn (phone hang bug)
+                print(f"[TOOL TIMEOUT] {tc.function.name} exceeded "
+                      f"{TOOL_TIMEOUTS.get(tc.function.name)}s — cancelled", file=sys.stderr)
+                if tc.function.name in _TERMINAL_TOOLS:
+                    return TIMEOUT_MSG   # terminal tools: the reply IS the timeout notice
+                result = (f"tool timed out after {TOOL_TIMEOUTS.get(tc.function.name)}s and was "
+                          "stopped — answer from what you have and say the expert call timed out")
             except Exception as e:
                 result = f"tool error: {e}"
             print(f"[TOOL RESULT first 600 chars]\n{str(result)[:600]}\n", file=sys.stderr)

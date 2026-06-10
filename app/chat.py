@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from app.persona import PERSONA
 from app.retrieval import retrieve
-from app.llm import chat_stream, chat_with_tools
+from app.llm import chat_stream, chat_with_tools, TOOL_TIMEOUTS, TIMEOUT_MSG
 from app.router import classify
 from app.tools import TOOLS, TOOL_FUNCS
 from app.memory import remember
@@ -41,9 +41,10 @@ _ACK = {"hard": "Let me think hard about that one — give me a minute.",
         "build": "On it — building now, give me a couple minutes.",
         "browse": "Opening it up — one sec.",
         "selfmod": "Let me draft that change for your approval — about a minute."}
-# per-tool ceilings so a hung agent never wedges the conversation loop
-_TIMEOUTS = {"hard": 180, "build": 600, "browse": 300, "selfmod": 300}
-_TIMEOUT_MSG = "That took too long and I stopped it — want me to try again?"
+# per-route ceilings derived from the single per-tool map in app/llm.py (browse=120 etc.) so the
+# forced path here and the auto-fired path in chat_with_tools can never drift apart
+_TIMEOUTS = {route: TOOL_TIMEOUTS[tool] for route, tool in _FORCE.items()}
+_TIMEOUT_MSG = TIMEOUT_MSG
 
 
 async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
