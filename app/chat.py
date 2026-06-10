@@ -11,6 +11,7 @@ from app.router import classify
 from app.tools import TOOLS, TOOL_FUNCS
 from app.memory import remember
 from app.weather import get_weather
+from app import computer
 from app.db import AsyncSessionLocal
 from app.models import Message
 
@@ -48,28 +49,16 @@ _TIMEOUTS = {route: TOOL_TIMEOUTS[tool] for route, tool in _FORCE.items()}
 _TIMEOUT_MSG = TIMEOUT_MSG
 
 
-_OPEN_SITE_RE = re.compile(
-    r"(?:open|go\s+to|visit|pull\s+up|launch|bring\s+up)\s+(?:the\s+)?(?:website\s+|site\s+)?"
-    r"([A-Za-z0-9][\w.-]*)", re.I)
-
-
-def _open_reply(user_message: str) -> str:
-    """Bare 'open <site>' — the headless server browser can't put a tab on Nate's screen, so a
-    silent 2-minute browse session is the wrong move. Say so and ask for the actual task."""
-    m = _OPEN_SITE_RE.search(user_message)
-    site = m.group(1) if m else "that site"
-    return (f"I can't open {site} on your screen — my browser runs here on the server, so you'd "
-            f"never see the tab. What I can do is go read {site} and report back. What do you "
-            "want from it?")
-
-
-async def execute_route(system, route, user_message, window, voice_mode: bool = False, on_ack=None):
-    """The post-classify half of a turn: 'open' short-circuit, forced-tool ack + timeout, or the
-    plain tool loop. Shared by respond() and app/streaming.py so ack/timeout/terminal semantics
-    exist exactly once. on_ack(text) is awaited right before a slow forced tool starts."""
-    if route == "open":
-        print("[ROUTE: open -> no agent, instant clarification]", file=sys.stderr)
-        return _open_reply(user_message)
+async def execute_route(user_id, system, route, user_message, window, voice_mode: bool = False, on_ack=None):
+    """The post-classify half of a turn: 'control' local-machine action, forced-tool ack + timeout,
+    or the plain tool loop. Shared by respond() and app/streaming.py so ack/timeout/terminal
+    semantics exist exactly once. on_ack(text) is awaited right before a slow forced tool starts."""
+    if route == "control":
+        # Local-machine action. SAFE actions execute immediately; RISKY ones return a confirmation
+        # request and arm the gate (resolved next turn by computer.resolve_pending, checked in the
+        # callers before routing). Deterministic — the model never decides what's safe.
+        print("[ROUTE: control -> local computer]", file=sys.stderr)
+        return computer.handle_control(user_id, user_message)
     force = _FORCE.get(route)
     if force:
         print(f"[ROUTE: {route} -> {force}]", file=sys.stderr)
@@ -88,6 +77,13 @@ async def execute_route(system, route, user_message, window, voice_mode: bool = 
 
 
 async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
+    # A pending local-action confirmation takes precedence over routing: a "yes"/"no" here answers
+    # the prior RISKY ask, never gets classified as a fresh turn.
+    pending = computer.resolve_pending(user_id, user_message)
+    if pending is not None:
+        print(pending)
+        return pending
+
     # memory retrieval and router classification are independent — overlap them so the turn
     # pays max(retrieve, classify) instead of the sum (classify alone measured 0.3-0.8s)
     system, route = await asyncio.gather(
@@ -99,7 +95,7 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         if voice_mode and speak:
             speak(text)                  # voice: spoken immediately, before the await
 
-    reply = await execute_route(system, route, user_message, window,
+    reply = await execute_route(user_id, system, route, user_message, window,
                                 voice_mode=voice_mode, on_ack=_ack)
     print(reply)
     return reply

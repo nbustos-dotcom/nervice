@@ -8,3 +8,4 @@ models/
 .venv-probe312/
 models/kokoro_samples/
 models/neutts_samples/
+screenshots/

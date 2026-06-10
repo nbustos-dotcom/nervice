@@ -22,6 +22,7 @@ import asyncio
 
 import app.llm as llm
 import app.tools as tools
+from app import computer
 from app.router import classify
 from app.chat import build_system_prompt, execute_route, save_exchange, _ACK
 
@@ -194,6 +195,19 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
                        conversation_id: str) -> str:
     """One full streamed turn. `send` is an async callable taking one JSON-able frame dict.
     Returns the final reply; the caller advances its window. Persistence fires here."""
+    # A pending local-action confirmation answers the prior RISKY ask — never streamed, never
+    # re-classified. Delivered as one complete text+audio reply, same as a tool turn.
+    pending = computer.resolve_pending(user_id, text)
+    if pending is not None:
+        await send({"type": "text", "text": pending})
+        if voice:
+            b64 = await asyncio.to_thread(_synth_full_b64, pending)
+            if b64:
+                await send({"type": "audio", "wav_base64": b64})
+        await send({"type": "done", "reply": pending})
+        _store(user_id, conversation_id, text, pending)
+        return pending
+
     system, route = await asyncio.gather(
         build_system_prompt(user_id, text, voice_mode=voice), classify(text))
 
@@ -213,16 +227,16 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
                         await send({"type": "audio", "wav_base64": b64})
             # Full existing pipeline: auto tool fire, per-tool timeouts, grounded synthesis,
             # verifier, terminal tools — identical to a REST turn. Nothing streams raw.
-            reply = await execute_route(system, "normal", text, window, voice_mode=voice)
+            reply = await execute_route(user_id, system, "normal", text, window, voice_mode=voice)
 
-    if reply is None:                     # forced tool route or "open" — never token-streamed
+    if reply is None:                     # forced tool route or control — never token-streamed
         async def on_ack(a):
             await send({"type": "ack", "text": a})
             if voice:
                 b64 = await asyncio.to_thread(_synth_sentence_b64, a)
                 if b64:
                     await send({"type": "audio", "wav_base64": b64})
-        reply = await execute_route(system, route, text, window, voice_mode=voice, on_ack=on_ack)
+        reply = await execute_route(user_id, system, route, text, window, voice_mode=voice, on_ack=on_ack)
 
     if not streamed and reply:            # complete-reply paths deliver text then audio as one
         await send({"type": "text", "text": reply})
