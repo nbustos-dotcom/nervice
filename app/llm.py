@@ -101,6 +101,9 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4, for
             # self-update proposals are terminal: return the gate's verbatim id/approve-reject text
             if force_tool == "propose_self_update":
                 return str(result)
+            # browse is terminal: the browser agent's report returns verbatim, no chat rewrite
+            if force_tool == "browse":
+                return str(result)
             fired.add(force_tool)
             tool_outputs.append(str(result))
             msgs.append({"role": "assistant", "content": "",
@@ -133,6 +136,9 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4, for
                 return "Build complete — here's what the builder did:\n\n" + str(result)
             # self-update proposals are terminal: return the gate's verbatim id/approve-reject text
             if tc.function.name == "propose_self_update":
+                return str(result)
+            # browse is terminal: the browser agent's report returns verbatim
+            if tc.function.name == "browse":
                 return str(result)
             fired.add(tc.function.name)
             tool_outputs.append(str(result))

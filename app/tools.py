@@ -7,7 +7,7 @@ import httpx
 import trafilatura
 from ddgs import DDGS
 
-from app.agent import ask_claude, agent_task
+from app.agent import ask_claude, agent_task, browse_agent
 import app.agent as agent_mod
 from app import selfmod
 
@@ -87,6 +87,20 @@ async def agent_build(task: str) -> str:
     return result
 
 
+async def browse(task: str) -> str:
+    ts = datetime.datetime.now().isoformat(timespec="seconds")
+    print(f"[BROWSE {ts}] {task[:120]}", file=sys.stderr)
+    result = await browse_agent(task)
+    cost = (getattr(agent_mod, "last_run", None) or {}).get("cost_usd")
+    try:
+        import os; os.makedirs("logs", exist_ok=True)
+        with open("logs/claude_calls.log", "a", encoding="utf-8") as f:
+            f.write(f"{ts}\tBROWSE\tcost={cost}\t{task[:300]}\n")
+    except Exception:
+        pass
+    return result
+
+
 async def propose_self_update(instruction: str) -> str:
     ts = datetime.datetime.now().isoformat(timespec="seconds")
     print(f"[SELFMOD {ts}] {instruction[:120]}", file=sys.stderr)
@@ -137,6 +151,17 @@ PROPOSE_SELF_UPDATE_TOOL = {
     },
 }
 
-TOOLS = [WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL, AGENT_BUILD_TOOL, PROPOSE_SELF_UPDATE_TOOL]
+BROWSE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "browse",
+        "description": "Drive a real visible browser: open sites, read pages, click through, report back. Use when the user asks to open/check/browse a specific website or do something ON a site. Not for general factual lookups (web_search is cheaper/faster for those).",
+        "parameters": {"type": "object",
+            "properties": {"task": {"type": "string", "description": "what to do in the browser, including the target site/URL"}},
+            "required": ["task"]},
+    },
+}
+
+TOOLS = [WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL, AGENT_BUILD_TOOL, PROPOSE_SELF_UPDATE_TOOL, BROWSE_TOOL]
 TOOL_FUNCS = {"web_search": web_search, "consult_claude": consult_claude,
-              "agent_build": agent_build, "propose_self_update": propose_self_update}
+              "agent_build": agent_build, "propose_self_update": propose_self_update, "browse": browse}

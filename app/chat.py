@@ -28,7 +28,8 @@ async def build_system_prompt(user_id, user_message):
 async def respond(user_id, user_message, window):
     system = await build_system_prompt(user_id, user_message)
     route = await classify(user_message)
-    force = {"hard": "consult_claude", "build": "agent_build", "selfmod": "propose_self_update"}.get(route)
+    force = {"hard": "consult_claude", "build": "agent_build",
+             "selfmod": "propose_self_update", "browse": "browse"}.get(route)
     if force:
         print(f"[ROUTE: {route} -> {force}]", file=sys.stderr)
     reply = await chat_with_tools(system, window + [{"role": "user", "content": user_message}], TOOLS, TOOL_FUNCS, force_tool=force)
