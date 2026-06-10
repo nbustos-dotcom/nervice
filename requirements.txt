@@ -16,5 +16,9 @@ truststore
 claude-agent-sdk
 faster-whisper
 piper-tts
+kokoro-onnx
 sounddevice
 webrtcvad-wheels
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+nvidia-cuda-runtime-cu12

@@ -19,14 +19,20 @@ def _format_memories(r):
     return "\n".join(f"- [{m.category}] {m.content}" for m in items) if items else "(nothing stored yet)"
 
 
-async def build_system_prompt(user_id, user_message):
+VOICE_ADDENDUM = ("VOICE MODE: your reply will be spoken aloud. Flowing conversational sentences "
+                  "only — never bullet points, numbered lists, markdown, or headers. Keep it "
+                  "tight; expand only when Nate asks.")
+
+
+async def build_system_prompt(user_id, user_message, voice_mode: bool = False):
     r = await retrieve(user_id, user_message)
     now = datetime.now(TZ).strftime("%A, %B %d, %Y at %I:%M %p")
-    return f"{PERSONA}\n\nWHAT YOU KNOW ABOUT NATE:\n{_format_memories(r)}\n\nCURRENT TIME: {now}"
+    base = f"{PERSONA}\n\nWHAT YOU KNOW ABOUT NATE:\n{_format_memories(r)}\n\nCURRENT TIME: {now}"
+    return f"{base}\n\n{VOICE_ADDENDUM}" if voice_mode else base
 
 
-async def respond(user_id, user_message, window):
-    system = await build_system_prompt(user_id, user_message)
+async def respond(user_id, user_message, window, voice_mode: bool = False):
+    system = await build_system_prompt(user_id, user_message, voice_mode=voice_mode)
     route = await classify(user_message)
     force = {"hard": "consult_claude", "build": "agent_build",
              "selfmod": "propose_self_update", "browse": "browse"}.get(route)

@@ -1,5 +1,6 @@
 import app.net  # noqa  (truststore: Norton TLS — needed for first-run model downloads)
 
+import os
 import re
 import sys
 import time
@@ -9,7 +10,26 @@ import numpy as np
 import sounddevice as sd
 import webrtcvad
 from faster_whisper import WhisperModel
-from piper import PiperVoice
+
+
+def _register_cuda_dlls() -> None:
+    """Make the pip-installed CUDA runtime DLLs loadable by ctranslate2 — Windows doesn't search
+    site-packages for DLLs otherwise. Needs all three: cublas, cudnn, AND cuda_runtime (cudart);
+    cublas can't load without cudart. Register via both add_dll_directory and PATH for robustness."""
+    import importlib.util
+    dirs = []
+    for pkg in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_runtime"):
+        try:
+            spec = importlib.util.find_spec(pkg)
+            if spec and spec.submodule_search_locations:
+                bin_dir = pathlib.Path(list(spec.submodule_search_locations)[0]) / "bin"
+                if bin_dir.is_dir():
+                    os.add_dll_directory(str(bin_dir))
+                    dirs.append(str(bin_dir))
+        except Exception:
+            pass  # missing package -> CUDA load fails -> CPU fallback engages
+    if dirs:
+        os.environ["PATH"] = os.pathsep.join(dirs) + os.pathsep + os.environ.get("PATH", "")
 
 # All audio is processed locally — faster-whisper (STT) and Piper (TTS) run on this machine.
 # Nothing audio-related leaves the box; only the final TEXT goes to the existing pipeline,
@@ -21,7 +41,11 @@ _FRAME_LEN = SAMPLE_RATE * VAD_FRAME_MS // 1000   # 480 samples / 30ms
 _VAD = webrtcvad.Vad(2)      # aggressiveness 2 (0 lax .. 3 strict)
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
-_PIPER_VOICE = _ROOT / "models" / "piper" / "en_US-lessac-medium.onnx"
+_KOKORO_MODEL = _ROOT / "models" / "kokoro" / "kokoro-v1.0.onnx"
+_KOKORO_VOICES = _ROOT / "models" / "kokoro" / "voices-v1.0.bin"
+_PIPER_VOICE = _ROOT / "models" / "piper" / "en_US-ryan-high.onnx"
+
+VOICE = "am_michael"   # Kokoro voice — swap here (e.g. am_adam, am_eric, af_heart, am_fenrir)
 
 try:
     import msvcrt  # Windows: lets a keypress drop a turn to typed input
@@ -30,8 +54,9 @@ except ImportError:
 
 
 def _load_whisper():
-    """Prefer CUDA; fall back to CPU int8 if the CUDA/cuBLAS runtime is missing (common on
-    Windows). Warm the model once so the first real transcription isn't slow."""
+    """Prefer CUDA (DLLs registered above); fall back to CPU int8 if the CUDA runtime is missing.
+    Warm the model once so the first real transcription isn't slow."""
+    _register_cuda_dlls()
     for dev, ct in (("cuda", "float16"), ("cpu", "int8")):
         try:
             m = WhisperModel("base.en", device=dev, compute_type=ct)
@@ -42,17 +67,45 @@ def _load_whisper():
     raise RuntimeError("no usable faster-whisper backend (cuda and cpu both failed)")
 
 
+def _load_tts():
+    """Kokoro (natural, 24kHz) preferred; Piper en_US-ryan-high as fallback if kokoro-onnx is
+    broken on this Python. Returns (synth_fn, engine_name, sample_rate) where synth_fn(text)
+    -> int16 numpy audio."""
+    try:
+        from kokoro_onnx import Kokoro
+        k = Kokoro(str(_KOKORO_MODEL), str(_KOKORO_VOICES))
+
+        def synth(text: str):
+            samples, sr = k.create(text, voice=VOICE, speed=1.0, lang="en-us")
+            return (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16), sr
+
+        _, rate = synth("hi")  # warm + get true rate
+        return synth, f"kokoro/{VOICE}", rate
+    except Exception as e:
+        print(f"[voice] kokoro unavailable ({repr(e)[:80]}) — falling back to Piper", file=sys.stderr)
+        from piper import PiperVoice
+        pv = PiperVoice.load(str(_PIPER_VOICE))
+        rate = pv.config.sample_rate
+
+        def synth(text: str):
+            chunks = list(pv.synthesize(text))
+            if not chunks:
+                return np.zeros(0, dtype=np.int16), rate
+            return np.concatenate([c.audio_int16_array for c in chunks]), rate
+
+        return synth, "piper/en_US-ryan-high", rate
+
+
 print("[voice] loading local models (STT + TTS)...", file=sys.stderr)
 _t0 = time.time()
 _whisper, WHISPER_PATH = _load_whisper()
-_piper = PiperVoice.load(str(_PIPER_VOICE))
-TTS_RATE = _piper.config.sample_rate
+_synth, TTS_ENGINE, TTS_RATE = _load_tts()
 print(f"[voice] models loaded in {time.time() - _t0:.1f}s  "
-      f"(stt=faster-whisper base.en {WHISPER_PATH}, tts=piper lessac-medium @ {TTS_RATE}Hz)",
+      f"(stt=faster-whisper base.en {WHISPER_PATH}, tts={TTS_ENGINE} @ {TTS_RATE}Hz)",
       file=sys.stderr)
 
 
-def record_until_silence(max_seconds: int = 60, trailing_silence: float = 1.0,
+def record_until_silence(max_seconds: int = 60, trailing_silence: float = 0.7,
                          allow_type_abort: bool = True):
     """Capture 16kHz mono from the default mic, gated by webrtcvad: start collecting on the first
     voiced frames (with a short pre-roll so onsets aren't clipped), stop after ~trailing_silence of
@@ -127,11 +180,10 @@ def speak(text: str) -> None:
         sent = sent.strip()
         if not sent or not re.search(r"[A-Za-z0-9]", sent):
             continue  # skip empty / punctuation-only / junk
-        chunks = list(_piper.synthesize(sent))
-        if not chunks:
+        audio, sr = _synth(sent)   # engine-agnostic: Kokoro or Piper fallback
+        if audio.size == 0:
             continue
-        audio = np.concatenate([c.audio_int16_array for c in chunks])
-        sd.play(audio, samplerate=TTS_RATE)
+        sd.play(audio, samplerate=sr)
         sd.wait()
 
 

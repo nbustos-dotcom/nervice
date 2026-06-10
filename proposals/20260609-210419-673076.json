@@ -1,0 +1,9 @@
+{
+  "id": "20260609-210419-673076",
+  "instruction": "/quit",
+  "summary": "/quit isn't available in this environment.",
+  "paths": [],
+  "created": "2026-06-09T21:04:31",
+  "status": "rejected",
+  "reason": "no diff block found in the proposer's output"
+}
