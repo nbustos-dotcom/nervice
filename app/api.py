@@ -60,11 +60,43 @@ def _warm_voice():
         print(f"[api] voice warm FAILED: {repr(e)[:120]}", file=sys.stderr)
 
 
+async def _db_keepalive(stop: asyncio.Event, interval_s: float = 60.0):
+    """Ping the pooled Supabase connection so the remote pooler never idles it out — a real turn
+    then pays warm retrieval (~0.3-0.8s) instead of the ~2.1s reconnect measured after idle.
+    Ping errors are logged and the loop keeps going (pre_ping covers the next real checkout).
+    Shutdown is an Event, NOT task.cancel(): cancelling mid-checkout rips through SQLAlchemy's
+    greenlet bridge and leaks the connection — with the event, a mid-flight ping always completes
+    and checks its connection back in before the loop exits."""
+    from sqlalchemy import text
+    from app.db import engine
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+            break                       # stop requested while sleeping
+        except asyncio.TimeoutError:
+            pass                        # interval elapsed — ping
+        try:
+            async with engine.connect() as c:
+                await c.execute(text("SELECT 1"))
+        except Exception as e:
+            print(f"[api] db keepalive failed: {repr(e)[:80]}", file=sys.stderr)
+
+
 @asynccontextmanager
 async def lifespan(_app):
     _voice_state["status"] = "warming"
     threading.Thread(target=_warm_voice, daemon=True).start()
-    yield
+    stop = asyncio.Event()
+    keepalive = asyncio.create_task(_db_keepalive(stop))
+    try:
+        yield
+    finally:
+        stop.set()
+        try:
+            await asyncio.wait_for(keepalive, timeout=10)   # let a mid-flight ping finish
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            keepalive.cancel()                              # hung network — last resort
+
 
 
 app = FastAPI(title="Nervice API", lifespan=lifespan)
