@@ -1,0 +1,11 @@
+{
+  "id": "20260609-194221-990063",
+  "instruction": "make yourself a bit more concise from now on",
+  "summary": "Drops the word budget from ~120 to ~80 and rewrites the opening line's brevity cue from \"short and direct, not essays\" to \"fewer words, more signal\" \u2014 slightly sharper framing that reinforces the tighter limit. The `go longer only when\u2026` clause preserves flexibility for deep dives without needing an explicit ask for every nuanced topic.",
+  "paths": [
+    "app/persona.py"
+  ],
+  "created": "2026-06-09T19:43:03",
+  "status": "rejected",
+  "reason": "rejected by Nate"
+}

@@ -121,7 +121,12 @@ async def propose_agent(instruction: str, staging_dir: str) -> str:
             "- Make each @@ hunk header's line counts exactly correct for the lines shown.\n"
             "- Do NOT emit an 'index <hash>..<hash>' line (you cannot know the real hashes).\n"
             "After the fence, 2-3 sentences explaining the change. Never propose changes to files not "
-            "present in the cwd."),
+            "present in the cwd.\n"
+            "You have NO ability to write files or run commands — your ONLY output is the diff. Never "
+            "claim to have created or modified anything, and never reference paths outside the cwd "
+            "(do not invent settings files, CLAUDE.md, or global memory). If the request is about how "
+            "Nervice talks, behaves, or carries itself, the change almost always belongs in "
+            "app/persona.py. Always produce a concrete diff — do not refuse a benign behavior tweak."),
         cwd=staging_dir,
         allowed_tools=["Read", "Glob", "Grep"],
         max_turns=15,

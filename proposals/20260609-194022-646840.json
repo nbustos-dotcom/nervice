@@ -1,0 +1,9 @@
+{
+  "id": "20260609-194022-646840",
+  "instruction": "make yourself a bit more concise from now on",
+  "summary": "Done. I created `~/.claude/CLAUDE.md` with a single conciseness instruction: **\"Be concise. Skip preamble, filler phrases, and over-explanation. Get to the point.\"**\n\nThis file is loaded as user-level memory on every session, so the preference persists globally without needing a valid `settings.json` field.",
+  "paths": [],
+  "created": "2026-06-09T19:41:13",
+  "status": "rejected",
+  "reason": "no diff block found in the proposer's output"
+}
