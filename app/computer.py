@@ -44,6 +44,9 @@ WHITELIST: dict[str, str] = {
     "explorer": "explorer.exe", "file explorer": "explorer.exe", "files": "explorer.exe",
     "paint": "mspaint.exe",
     "chrome": "chrome", "google chrome": "chrome",
+    "brave": "brave", "brave browser": "brave",
+    "edge": "msedge", "microsoft edge": "msedge",
+    "firefox": "firefox",
     "spotify": "spotify",
     "vscode": "code", "vs code": "code", "code": "code",
 }
@@ -64,6 +67,81 @@ SITES: dict[str, str] = {
     "youtube music": "https://music.youtube.com",
     "wikipedia": "https://www.wikipedia.org",
 }
+
+# ---------------------------------------------------------------------------
+# Browsers. Nate changes the default in ONE line: BROWSER = "brave" | "chrome" | "edge" |
+# "firefox" | "default" (the OS default). open_url() launches this browser's real exe with the URL
+# as an argument; if the chosen browser isn't installed it falls back Brave -> Chrome -> OS default
+# (logged), so a URL still opens. A request that NAMES a browser ("...in chrome") never falls back
+# silently — if that browser is missing it says so plainly rather than using a different one.
+# ---------------------------------------------------------------------------
+BROWSER = "brave"
+
+_BROWSER_ALIASES = {
+    "brave": "brave", "brave browser": "brave",
+    "chrome": "chrome", "google chrome": "chrome", "chrome browser": "chrome",
+    "edge": "edge", "microsoft edge": "edge", "msedge": "edge", "edge browser": "edge",
+    "firefox": "firefox", "mozilla firefox": "firefox", "mozilla": "firefox", "firefox browser": "firefox",
+}
+_BROWSER_EXE = {"brave": "brave.exe", "chrome": "chrome.exe", "edge": "msedge.exe", "firefox": "firefox.exe"}
+
+
+def _browser_candidates(canon: str) -> list[str]:
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    local = os.environ.get("LOCALAPPDATA", "")
+    table = {
+        "brave": [rf"{pf}\BraveSoftware\Brave-Browser\Application\brave.exe",
+                  rf"{pf86}\BraveSoftware\Brave-Browser\Application\brave.exe",
+                  rf"{local}\BraveSoftware\Brave-Browser\Application\brave.exe"],
+        "chrome": [rf"{pf}\Google\Chrome\Application\chrome.exe",
+                   rf"{pf86}\Google\Chrome\Application\chrome.exe",
+                   rf"{local}\Google\Chrome\Application\chrome.exe"],
+        "edge": [rf"{pf86}\Microsoft\Edge\Application\msedge.exe",
+                 rf"{pf}\Microsoft\Edge\Application\msedge.exe"],
+        "firefox": [rf"{pf}\Mozilla Firefox\firefox.exe",
+                    rf"{pf86}\Mozilla Firefox\firefox.exe"],
+    }
+    return table.get(canon, [])
+
+
+def _app_paths_lookup(exe_name: str) -> str | None:
+    """The Windows 'App Paths' registry key is where browsers register their real exe location —
+    a robust fallback when the app isn't on PATH or in the usual Program Files spot."""
+    try:
+        import winreg
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                key = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe_name}"
+                with winreg.OpenKey(root, key) as k:
+                    val, _ = winreg.QueryValueEx(k, None)
+                    if val and os.path.isfile(val):
+                        return val
+            except FileNotFoundError:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _browser_exe(name: str) -> tuple[str | None, str | None]:
+    """Resolve a browser friendly-name to (existing exe path, canonical name), or (None, canon)
+    if that browser isn't installed. Pure filesystem/registry checks — no launching."""
+    canon = _BROWSER_ALIASES.get(name.lower().strip())
+    if not canon:
+        return None, None
+    for p in _browser_candidates(canon):
+        if p and os.path.isfile(p):
+            return p, canon
+    exe = _BROWSER_EXE[canon]
+    via = _app_paths_lookup(exe) or shutil.which(exe)
+    return (via, canon) if via else (None, canon)
+
+
+def detect_browsers() -> dict[str, str | None]:
+    """Which of the four known browsers are installed -> their exe path (or None). For the report."""
+    return {canon: _browser_exe(canon)[0] for canon in ("brave", "chrome", "edge", "firefox")}
+
 
 # NOTE: "run" is deliberately NOT an open-verb — "run <x>" reads as shell-exec intent, which must
 # never map to a launch. It falls through to the fail-safe RISKY branch instead.
@@ -102,13 +180,14 @@ _PENDING_TTL = 300                              # seconds a confirmation request
 
 class Decision:
     """The deterministic verdict for one control request."""
-    def __init__(self, action, target, risk, supported, reason, raw):
+    def __init__(self, action, target, risk, supported, reason, raw, browser=None):
         self.action = action          # 'open_app'|'open_url'|'screenshot'|'list_windows'|'focus_window'|None
         self.target = target          # app name / url / window substring / ''
         self.risk = risk              # 'safe' | 'risky'
         self.supported = supported    # can we actually do it (False for delete/close/send/etc.)
         self.reason = reason          # why risky, for the spoken confirmation
         self.raw = raw                # original message
+        self.browser = browser        # for open_url: a specific browser the user named, else None
 
 
 def _audit(kind: str, detail: str) -> None:
@@ -146,6 +225,27 @@ def _looks_like_url(t: str) -> str | None:
     return None
 
 
+def _to_url(site: str) -> str:
+    """Best-effort URL for a site phrase the user wants opened in a named browser. Known site or
+    domain resolves exactly; anything else becomes a https:// guess (it just navigates — opening a
+    URL is SAFE regardless of where it lands)."""
+    return _looks_like_url(site) or ("https://" + re.sub(r"\s+", "", site.strip()))
+
+
+def _split_browser(target: str) -> tuple[str, str | None]:
+    """Pull a trailing '... in/on/using <browser>' off the target. Only treats it as a browser
+    directive when the named thing actually resolves to a known browser, so 'open youtube in
+    spanish' isn't misread. Returns (site_part, canonical_browser_or_None)."""
+    m = re.search(r"^(.*?)\s+(?:in|on|using|with|through)\s+(?:a\s+|the\s+|my\s+)?(.+)$", target, re.I)
+    if not m:
+        return target, None
+    cand = re.sub(r"\s+browser$", "", m.group(2).strip().lower())
+    canon = _BROWSER_ALIASES.get(cand)
+    if canon:
+        return m.group(1).strip(), canon
+    return target, None
+
+
 def interpret(message: str) -> Decision:
     """Map a natural-language control request to a Decision. Deterministic and fail-safe: anything
     not clearly on the SAFE list is RISKY."""
@@ -179,6 +279,11 @@ def interpret(message: str) -> Decision:
     m = re.search(rf"(?:{_OPEN_VERBS})\s+(.+)", low, re.I)
     if m:
         target = _clean_target(m.group(1))
+        # "open <site> in <browser>" — opening a URL in a (named) browser is SAFE, no confirmation.
+        # This is the case that used to be misread as an unknown app and falsely confirmed.
+        site_part, browser = _split_browser(target)
+        if browser:
+            return Decision("open_url", _to_url(site_part), "safe", True, "", msg, browser=browser)
         url = _looks_like_url(target)
         if url:
             return Decision("open_url", url, "safe", True, "", msg)
@@ -197,36 +302,78 @@ def interpret(message: str) -> Decision:
 # The five named actions (the entire physical capability surface)
 # ---------------------------------------------------------------------------
 
-def _launch(target: str) -> None:
-    """Start an app without a shell. Resolve a real exe on PATH first; otherwise hand the (already
-    sanitized / whitelisted) name to Windows `start`, which resolves App Paths (chrome, spotify,
-    code). shell=False throughout and the target is never raw user text with metachars."""
+def _spawn(exe: str, *args: str) -> bool:
+    """Launch a verified exe with args, no shell. Returns True only if the process actually
+    started (Popen raises on a bad path) — so callers NEVER claim success without a real launch."""
+    try:
+        subprocess.Popen([exe, *args], close_fds=True)
+        return True
+    except Exception as e:
+        print(f"[computer launch failed] {exe}: {repr(e)[:80]}", file=sys.stderr)
+        return False
+
+
+def _launch(target: str) -> bool:
+    """Start an app without a shell, honestly. Resolve a real exe (PATH or App Paths) and verify
+    the spawn; only fall back to Windows `start` when we can't resolve it. Returns True iff a
+    process was actually started. target is whitelisted or charset-validated by the caller."""
     exe = shutil.which(target) or shutil.which(target + ".exe")
     if exe and exe.lower().endswith(".exe"):
-        subprocess.Popen([exe], close_fds=True)
-        return
-    # App-Paths / .cmd shims (code, chrome, spotify): `cmd /c start "" <target>`; target is a single
-    # argv element (no shell parsing) and is whitelisted or charset-validated by the caller.
-    subprocess.Popen(["cmd", "/c", "start", "", target], close_fds=True)
+        return _spawn(exe)
+    app = _app_paths_lookup(target if target.lower().endswith(".exe") else target + ".exe")
+    if app:
+        return _spawn(app)
+    # last resort for App-Paths apps we couldn't resolve (rare): `start` resolves them itself.
+    try:
+        subprocess.Popen(["cmd", "/c", "start", "", target], close_fds=True)
+        return True
+    except Exception as e:
+        print(f"[computer launch failed] start {target}: {repr(e)[:80]}", file=sys.stderr)
+        return False
 
 
 def open_app(name: str) -> str:
     spec = WHITELIST.get(name.lower(), name)
     if not _SAFE_NAME.match(spec):
         return f"I won't launch \"{name}\" — the name has characters I don't allow."
-    try:
-        _launch(spec)
+    if _launch(spec):
         return f"Opened {name} for you."
-    except Exception as e:
-        return f"I tried to open {name} but it didn't start ({repr(e)[:60]})."
+    return f"I tried to open {name} but it didn't start — it may not be installed."
 
 
-def open_url(url: str) -> str:
+def open_url(url: str, browser: str | None = None) -> str:
+    """Open a URL. A NAMED browser is honored exactly or reported missing (never silently
+    swapped). The default opens BROWSER, then falls back Brave -> Chrome -> OS default (logged).
+    Every return reflects whether a launch actually happened."""
     if not re.match(r"^https?://", url):
         url = "https://" + url
+
+    # A specifically named browser: open it or say plainly it's not installed — never substitute.
+    if browser:
+        exe, canon = _browser_exe(browser)
+        if exe is None:
+            _audit("BROWSER-MISSING", f"{browser}\t{url}")
+            return f"I didn't open it — {canon or browser} doesn't look installed on this machine."
+        if _spawn(exe, url):
+            _audit("BROWSER", f"{canon}\t{exe}\t{url}")
+            return f"Opened {url} in {canon.capitalize()}."
+        return f"I tried to open {url} in {canon.capitalize()} but it didn't start."
+
+    # Default: BROWSER first, then Brave -> Chrome, then the OS default.
+    for cand in dict.fromkeys([BROWSER, "brave", "chrome"]):   # ordered, de-duped
+        exe, canon = _browser_exe(cand)
+        if exe and _spawn(exe, url):
+            note = "" if cand == BROWSER else f" ({BROWSER.capitalize()} wasn't found)"
+            _audit("BROWSER", f"{canon}\t{exe}\t{url}{'  fallback' if cand != BROWSER else ''}")
+            if cand != BROWSER:
+                print(f"[computer] {BROWSER} not found — opened URL in {canon}", file=sys.stderr)
+            return f"Opened {url} in {canon.capitalize()}{note}."
+    # Last resort: whatever the OS has set as default.
     try:
-        os.startfile(url)   # default browser, no shell
-        return f"Opened {url} in your browser."
+        os.startfile(url)
+        _audit("BROWSER", f"os-default\t{url}")
+        print(f"[computer] no Brave/Chrome found — opened URL in the OS default browser", file=sys.stderr)
+        return f"Opened {url} in your default browser."
     except Exception as e:
         return f"I couldn't open {url} ({repr(e)[:60]})."
 
@@ -305,7 +452,7 @@ def focus_window(substr: str) -> str:
 
 
 _ACTIONS = {"open_app": lambda d: open_app(d.target),
-            "open_url": lambda d: open_url(d.target),
+            "open_url": lambda d: open_url(d.target, d.browser),
             "screenshot": lambda d: screenshot(),
             "list_windows": lambda d: list_windows(),
             "focus_window": lambda d: focus_window(d.target)}
