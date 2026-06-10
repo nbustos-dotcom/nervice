@@ -9,6 +9,7 @@ from ddgs import DDGS
 
 from app.agent import ask_claude, agent_task
 import app.agent as agent_mod
+from app import selfmod
 
 
 def _fetch_page(url: str, char_limit: int = 2500) -> str:
@@ -86,6 +87,23 @@ async def agent_build(task: str) -> str:
     return result
 
 
+async def propose_self_update(instruction: str) -> str:
+    ts = datetime.datetime.now().isoformat(timespec="seconds")
+    print(f"[SELFMOD {ts}] {instruction[:120]}", file=sys.stderr)
+    rec = await selfmod.propose(instruction)
+    cost = (getattr(agent_mod, "last_run", None) or {}).get("cost_usd")
+    try:
+        import os; os.makedirs("logs", exist_ok=True)
+        with open("logs/claude_calls.log", "a", encoding="utf-8") as f:
+            f.write(f"{ts}\tSELFMOD\tcost={cost}\t{rec.get('status')}\t{instruction[:300]}\n")
+    except Exception:
+        pass
+    if rec.get("status") == "pending":
+        return (f"Proposal {rec['id']} created: {rec.get('summary', '')} "
+                f"Review with 'show {rec['id']}', then 'approve {rec['id']}' or 'reject {rec['id']}'.")
+    return f"Proposal not created — {rec.get('reason', 'rejected')}. (id {rec['id']})"
+
+
 CONSULT_CLAUDE_TOOL = {
     "type": "function",
     "function": {
@@ -108,5 +126,17 @@ AGENT_BUILD_TOOL = {
     },
 }
 
-TOOLS = [WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL, AGENT_BUILD_TOOL]
-TOOL_FUNCS = {"web_search": web_search, "consult_claude": consult_claude, "agent_build": agent_build}
+PROPOSE_SELF_UPDATE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "propose_self_update",
+        "description": "Create a proposal to change Nervice's own behavior/code (persona, routing, tools). Use when the user asks Nervice to change how IT behaves or works. The proposal requires the user's explicit approval before anything is applied.",
+        "parameters": {"type": "object",
+            "properties": {"instruction": {"type": "string", "description": "what to change about Nervice's own behavior or code, in plain language"}},
+            "required": ["instruction"]},
+    },
+}
+
+TOOLS = [WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL, AGENT_BUILD_TOOL, PROPOSE_SELF_UPDATE_TOOL]
+TOOL_FUNCS = {"web_search": web_search, "consult_claude": consult_claude,
+              "agent_build": agent_build, "propose_self_update": propose_self_update}

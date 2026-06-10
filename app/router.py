@@ -1,6 +1,7 @@
 from app.llm import chat_json
 
-ROUTER_SYSTEM = """Classify the user's message into exactly one route. Output ONLY JSON: {"route":"hard"} or {"route":"build"} or {"route":"normal"}.
+ROUTER_SYSTEM = """Classify the user's message into exactly one route. Output ONLY JSON: {"route":"hard"} or {"route":"build"} or {"route":"selfmod"} or {"route":"normal"}.
+selfmod = the user asks Nervice to change its own behavior, personality, rules, or code (e.g. "be more concise from now on", "stop ending with questions", "change how you route X").
 build = the user asks to create, build, edit, or fix actual files/projects (websites, scripts, apps, documents as files).
 hard = formal logic puzzles/riddles/brainteasers with interacting constraints; mathematical proofs or multi-step quantitative problems beyond basic algebra; design or review of nontrivial code architecture or database schemas; long rigorous analysis where wrong answers are costly; or the user explicitly asks for Claude.
 normal = everything else: chat, opinions, simple facts, news/current events, everyday tasks.
@@ -11,6 +12,6 @@ async def classify(user_message: str) -> str:
     try:
         out = await chat_json(ROUTER_SYSTEM, user_message)
         route = out.get("route")
-        return route if route in ("hard", "build") else "normal"
+        return route if route in ("hard", "build", "selfmod") else "normal"
     except Exception:
         return "normal"   # fail open to the free path

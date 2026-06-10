@@ -102,3 +102,42 @@ async def agent_task(task: str) -> str:
     finally:
         os.environ.update(saved)
     return (final or "\n".join(parts)).strip()
+
+
+async def propose_agent(instruction: str, staging_dir: str) -> str:
+    """READ-ONLY self-modification proposer. cwd is a staging copy of editable files only —
+    no Write, no Edit, no Bash. Emits a unified diff for OUR gate to validate and apply."""
+    CONFIG_DIR.mkdir(exist_ok=True)
+    opts = ClaudeAgentOptions(
+        system_prompt=(
+            "You are Nervice's self-modification proposer. The cwd contains the only files you may "
+            "propose changes to. Read what you need, then output a single unified diff (git format, "
+            "a/ b/ prefixes, correct relative paths) implementing the requested change, inside one "
+            "```diff fence. Minimal, surgical changes only. After the fence, 2-3 sentences explaining "
+            "the change. Never propose changes to files not present in the cwd."),
+        cwd=staging_dir,
+        allowed_tools=["Read", "Glob", "Grep"],
+        max_turns=15,
+        # token-free auth from stored creds; no secrets, same scrub as the builder
+        env={"CLAUDE_CONFIG_DIR": str(CONFIG_DIR)},
+    )
+    parts = []
+    final = None
+    last_run.clear()
+    saved = {k: os.environ.pop(k) for k in _SCRUB_KEYS if k in os.environ}
+    try:
+        async for message in query(prompt=instruction, options=opts):
+            if isinstance(message, ResultMessage):
+                final = message.result
+                last_run.update(cost_usd=message.total_cost_usd, num_turns=message.num_turns,
+                                is_error=message.is_error, permission_denials=message.permission_denials)
+                continue
+            content = getattr(message, "content", None)
+            if isinstance(content, list):
+                for block in content:
+                    text = getattr(block, "text", None)
+                    if text:
+                        parts.append(text)
+    finally:
+        os.environ.update(saved)
+    return (final or "\n".join(parts)).strip()
