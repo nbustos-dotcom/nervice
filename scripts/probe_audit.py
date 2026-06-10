@@ -11,8 +11,8 @@ captured = []
 _orig_search = tools.web_search
 
 
-def logged_search(query: str, max_results: int = 6) -> str:
-    out = _orig_search(query, max_results)
+async def logged_search(query: str, max_results: int = 6) -> str:
+    out = await _orig_search(query, max_results)   # web_search is async now
     captured.append((query, out))
     return out
 

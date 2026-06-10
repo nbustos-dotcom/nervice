@@ -1,6 +1,7 @@
 import app.net  # noqa
 
 import sys
+import asyncio
 import datetime
 
 import httpx
@@ -13,37 +14,51 @@ from app import selfmod
 from app import weather as weather_mod
 
 
-def _fetch_page(url: str, char_limit: int = 2500) -> str:
+async def _fetch_page(client: httpx.AsyncClient, url: str, char_limit: int = 2500) -> str:
     try:
-        r = httpx.get(url, timeout=8, follow_redirects=True,
-                      headers={"User-Agent": "Mozilla/5.0"})
+        r = await client.get(url, timeout=8, follow_redirects=True,
+                             headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
             return ""
-        text = trafilatura.extract(r.text) or ""
-        return text[:char_limit]
+        text = await asyncio.to_thread(trafilatura.extract, r.text)  # CPU-bound; off the loop
+        return (text or "")[:char_limit]
     except Exception:
         return ""
 
 
-def web_search(query: str, max_results: int = 6) -> str:
+async def web_search(query: str, max_results: int = 6) -> str:
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
+        def _ddg():
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, max_results=max_results))
+        results = await asyncio.to_thread(_ddg)   # DDGS is sync; keep it off the event loop
     except Exception as e:
         return f"Search error: {e}"
     if not results:
         return "No results found (may be rate-limited; try again)."
+    # Fetch the first 4 URL-bearing pages CONCURRENTLY (was serial — 8.9s measured) and keep the
+    # first 3 that yield text, in result order: same "3 full-text sources" output as before,
+    # with one spare to absorb a failed fetch.
+    candidates = [u for u in ((r.get("href") or r.get("url") or "") for r in results) if u]
+    to_fetch = candidates[:4]
+    async with httpx.AsyncClient() as client:
+        fetched = await asyncio.gather(*(_fetch_page(client, u) for u in to_fetch))
+        bodies = dict(zip(to_fetch, fetched))
+        # one bounded retry wave if most of the first wave came back empty — keeps the old
+        # "keep trying further results" coverage without its serial worst case
+        if sum(1 for b in bodies.values() if b) < 2 and candidates[4:6]:
+            more = candidates[4:6]
+            fetched2 = await asyncio.gather(*(_fetch_page(client, u) for u in more))
+            bodies.update(dict(zip(more, fetched2)))
     blocks = []
-    fetched = 0
+    kept = 0
     for r in results:
         url = r.get("href") or r.get("url") or ""
         title = r.get("title", "")
         snippet = r.get("body", "")
-        body = ""
-        if fetched < 3 and url:
-            body = _fetch_page(url)
-            if body:
-                fetched += 1
+        body = bodies.get(url, "") if kept < 3 else ""
+        if body:
+            kept += 1
         blocks.append(f"SOURCE: {title}\nURL: {url}\nSNIPPET: {snippet}" + (f"\nFULL TEXT:\n{body}" if body else ""))
     return "\n\n---\n\n".join(blocks)
 
