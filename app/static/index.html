@@ -70,9 +70,13 @@
   }
   #mic:active{transform:scale(.94);}
   #mic.recording{background:radial-gradient(circle at 50% 35%,#f87171,var(--danger)); animation:pulse 1s infinite; box-shadow:0 0 0 0 rgba(239,68,68,.6);}
-  #mic.busy{opacity:.6; animation:pulse 1.2s infinite;}
+  #mic.busy{opacity:.7; animation:pulse 1.2s infinite;}
+  #mic.speaking{background:radial-gradient(circle at 50% 35%,#34d399,#10b981); animation:pulse2 1.4s infinite;}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(239,68,68,.5);}70%{box-shadow:0 0 0 18px rgba(239,68,68,0);}100%{box-shadow:0 0 0 0 rgba(239,68,68,0);}}
-  .miclabel{color:var(--muted); font-size:12px;}
+  @keyframes pulse2{0%{box-shadow:0 0 0 0 rgba(16,185,129,.5);}70%{box-shadow:0 0 0 18px rgba(16,185,129,0);}100%{box-shadow:0 0 0 0 rgba(16,185,129,0);}}
+  .miclabel{color:var(--muted); font-size:12px; min-height:14px;}
+  .convobtn{background:var(--panel); border:1px solid var(--line); color:var(--muted); border-radius:20px; padding:7px 16px; font-size:13px; font-weight:600; cursor:pointer;}
+  .convobtn.on{background:var(--accent); color:#fff; border-color:var(--accent);}
   /* token / settings overlay */
   .overlay{position:fixed; inset:0; background:rgba(0,0,0,.72); backdrop-filter:blur(6px); display:none; align-items:center; justify-content:center; padding:24px; z-index:20;}
   .overlay.show{display:flex;}
@@ -102,10 +106,15 @@
     <button id="send">Send</button>
   </div>
   <div class="micwrap">
+    <button id="convo" class="convobtn">🔁 Conversation</button>
     <button id="mic" aria-label="Hold to talk">🎤</button>
     <span class="miclabel" id="micLabel">hold to talk</span>
   </div>
 </footer>
+
+<!-- ONE persistent audio element, unlocked inside a touch gesture so iOS Safari allows the
+     later reply playback (see unlockAudio). playsinline keeps it from going fullscreen on iOS. -->
+<audio id="player" playsinline></audio>
 
 <div class="overlay" id="tokenModal">
   <div class="card">
@@ -125,8 +134,21 @@
    `tailscale serve`) to a single user — there is no public exposure and no third-party JS/CDN. */
 const TOKEN_KEY='nervice_token', CID_KEY='nervice_cid';
 const $=s=>document.querySelector(s);
-const messagesEl=$('#messages'), toastEl=$('#toast'), micBtn=$('#mic'), micLabel=$('#micLabel');
-let busy=false, mediaRecorder=null, chunks=[], micStream=null;
+const messagesEl=$('#messages'), toastEl=$('#toast'), micBtn=$('#mic'), micLabel=$('#micLabel'),
+      convoBtn=$('#convo'), player=$('#player');
+let busy=false, recording=false, convoMode=false, mediaRecorder=null, chunks=[], micStream=null;
+// iOS Safari blocks programmatic audio unless an <audio> element was played inside a user gesture.
+const SILENT_WAV="data:audio/wav;base64,UklGRsQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+let audioUnlocked=false;
+function unlockAudio(){
+  if(audioUnlocked) return;
+  try{
+    player.src=SILENT_WAV;
+    const p=player.play();
+    if(p && p.then){ p.then(()=>{ player.pause(); audioUnlocked=true; }).catch(()=>{}); }
+    else { player.pause(); audioUnlocked=true; }
+  }catch(e){}
+}
 
 const getToken=()=>localStorage.getItem(TOKEN_KEY)||'';
 function getCID(){ let c=localStorage.getItem(CID_KEY); if(!c){ c=(crypto.randomUUID?crypto.randomUUID():String(Date.now())); localStorage.setItem(CID_KEY,c);} return c; }
@@ -159,21 +181,26 @@ async function api(path, opts={}){
   return res.json();
 }
 
+function setState(s){  // 'idle' | 'listening' | 'thinking' | 'speaking'
+  micBtn.classList.remove('recording','busy','speaking');
+  if(s==='listening'){ micBtn.classList.add('recording'); micLabel.textContent='listening…'; }
+  else if(s==='thinking'){ micBtn.classList.add('busy'); micLabel.textContent='thinking…'; }
+  else if(s==='speaking'){ micBtn.classList.add('speaking'); micLabel.textContent='speaking…'; }
+  else { micLabel.textContent = convoMode ? 'conversation on' : 'hold to talk'; }
+}
+
 async function sendText(){
   const inp=$('#text'); const msg=inp.value.trim(); if(!msg||busy) return;
-  inp.value=''; addMsg('you', msg); setBusy(true);
+  inp.value=''; addMsg('you', msg); busy=true; setState('thinking');
   try{
     const j=await api('/chat',{method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({message:msg, conversation_id:getCID()})});
     if(j.conversation_id) localStorage.setItem(CID_KEY, j.conversation_id);
     addMsg('nervice', j.reply);
-  }catch(e){} finally{ setBusy(false); }
+  }catch(e){} finally{ busy=false; setState('idle'); }
 }
 $('#send').onclick=sendText;
 $('#text').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); sendText(); }});
-
-function setBusy(b){ busy=b; micBtn.classList.toggle('busy', b); micLabel.textContent = b ? 'thinking…' : 'hold to talk'; }
-function setRecording(r){ micBtn.classList.toggle('recording', r); micLabel.textContent = r ? 'listening…' : 'hold to talk'; }
 
 function pickMime(){
   const c=['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
@@ -181,52 +208,98 @@ function pickMime(){
   return '';  // let the browser choose (iOS Safari often gives mp4/m4a — server decodes via av)
 }
 
-async function startRec(){
-  if(busy || (mediaRecorder && mediaRecorder.state==='recording')) return;
+// ---- silence-detection (VAD) for conversation mode ----
+let audioCtx=null, vadRAF=null, recStart=0, silenceStart=0;
+const SILENCE_RMS=0.015, SILENCE_MS=1200, MIN_MS=800, MAX_MS=30000;
+function startVAD(stream){
+  try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ return; }
+  const node=audioCtx.createAnalyser(); node.fftSize=1024;
+  audioCtx.createMediaStreamSource(stream).connect(node);
+  const buf=new Float32Array(node.fftSize);
+  recStart=Date.now(); silenceStart=0;
+  (function tick(){
+    if(!recording){ return; }
+    node.getFloatTimeDomainData(buf);
+    let sum=0; for(let i=0;i<buf.length;i++) sum+=buf[i]*buf[i];
+    const rms=Math.sqrt(sum/buf.length), elapsed=Date.now()-recStart;
+    if(elapsed>=MAX_MS){ stopRec(); return; }
+    if(elapsed<MIN_MS){ silenceStart=0; }
+    else if(rms<SILENCE_RMS){ if(!silenceStart) silenceStart=Date.now(); else if(Date.now()-silenceStart>=SILENCE_MS){ stopRec(); return; } }
+    else { silenceStart=0; }
+    vadRAF=requestAnimationFrame(tick);
+  })();
+}
+function stopVAD(){ if(vadRAF) cancelAnimationFrame(vadRAF); vadRAF=null; if(audioCtx){ audioCtx.close().catch(()=>{}); audioCtx=null; } }
+
+async function startRec(auto){
+  if(busy || recording) return;
   if(!getToken()){ openToken(); return; }
   try{ micStream=await navigator.mediaDevices.getUserMedia({audio:true}); }
-  catch(e){ toast('Mic permission needed'); return; }
+  catch(e){ toast('Mic permission needed'); if(convoMode) stopConvo(); return; }
   chunks=[]; const mime=pickMime();
   try{ mediaRecorder = mime ? new MediaRecorder(micStream,{mimeType:mime}) : new MediaRecorder(micStream); }
   catch(e){ mediaRecorder = new MediaRecorder(micStream); }
   mediaRecorder.ondataavailable=e=>{ if(e.data && e.data.size) chunks.push(e.data); };
   mediaRecorder.onstop=onRecStop;
-  mediaRecorder.start(); setRecording(true);
+  mediaRecorder.start(); recording=true; setState('listening');
+  if(auto) startVAD(micStream);
 }
-function stopRec(){ setRecording(false); if(mediaRecorder && mediaRecorder.state!=='inactive') mediaRecorder.stop(); }
+function stopRec(){ if(!recording) return; recording=false; stopVAD(); if(mediaRecorder && mediaRecorder.state!=='inactive') mediaRecorder.stop(); }
+
+function releaseMic(){ if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }
 
 async function onRecStop(){
-  if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
-  if(!chunks.length){ return; }
+  releaseMic();
+  if(!chunks.length){ if(convoMode) setTimeout(nextTurn,150); else setState('idle'); return; }
   const type=(mediaRecorder.mimeType||'audio/webm');
   const blob=new Blob(chunks,{type});
   const ext=type.includes('mp4')?'mp4':type.includes('ogg')?'ogg':type.includes('wav')?'wav':'webm';
   const fd=new FormData(); fd.append('audio', blob, 'rec.'+ext); fd.append('conversation_id', getCID());
-  setBusy(true);
+  busy=true; setState('thinking');
   try{
     const j=await api('/voice',{method:'POST', body:fd});
     if(j.conversation_id) localStorage.setItem(CID_KEY, j.conversation_id);
     if(j.transcript) addMsg('you', j.transcript);
     addMsg('nervice', j.reply||'…');
-    if(j.audio_wav_base64) playWav(j.audio_wav_base64);
-  }catch(e){} finally{ setBusy(false); }
+    busy=false;
+    if(j.audio_wav_base64) playReply(j.audio_wav_base64);
+    else if(convoMode) nextTurn(); else setState('idle');
+  }catch(e){ busy=false; stopConvo(); }   // error/401 ends the loop (api shows the toast)
 }
 
-function playWav(b64){
+function playReply(b64){
   try{
     const bin=atob(b64), arr=new Uint8Array(bin.length);
     for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
     const url=URL.createObjectURL(new Blob([arr],{type:'audio/wav'}));
-    const a=new Audio(url); a.play().catch(()=>{}); a.onended=()=>URL.revokeObjectURL(url);
-  }catch(e){}
+    setState('speaking');
+    player.src=url;
+    player.onended=()=>{ URL.revokeObjectURL(url); if(convoMode) nextTurn(); else setState('idle'); };
+    player.play().catch(()=>{ if(convoMode) nextTurn(); else setState('idle'); });
+  }catch(e){ if(convoMode) nextTurn(); else setState('idle'); }
 }
 
-/* press-and-hold via pointer events (unifies touch + mouse) */
-micBtn.addEventListener('pointerdown', e=>{ e.preventDefault(); startRec(); });
-micBtn.addEventListener('pointerup',   e=>{ e.preventDefault(); stopRec(); });
-micBtn.addEventListener('pointercancel', stopRec);
-micBtn.addEventListener('pointerleave', e=>{ if(micBtn.classList.contains('recording')) stopRec(); });
+// ---- conversation mode (explicit toggle; never auto-starts on load) ----
+function nextTurn(){ if(convoMode && !busy && !recording) startRec(true); }
+function startConvo(){
+  if(!getToken()){ openToken(); return; }
+  unlockAudio();
+  convoMode=true; convoBtn.classList.add('on'); convoBtn.textContent='🔁 Conversation: ON';
+  toast('Conversation on — talk, then pause'); nextTurn();
+}
+function stopConvo(){
+  convoMode=false; convoBtn.classList.remove('on'); convoBtn.textContent='🔁 Conversation';
+  stopRec(); releaseMic(); try{ player.pause(); }catch(e){} busy=false; setState('idle');
+}
+convoBtn.onclick=()=>{ convoMode ? stopConvo() : startConvo(); };
+
+// ---- hold-to-talk (only when conversation mode is off) ----
+micBtn.addEventListener('pointerdown', e=>{ e.preventDefault(); unlockAudio(); if(!convoMode) startRec(false); });
+micBtn.addEventListener('pointerup',   e=>{ e.preventDefault(); if(!convoMode) stopRec(); });
+micBtn.addEventListener('pointercancel', ()=>{ if(!convoMode) stopRec(); });
+micBtn.addEventListener('pointerleave', ()=>{ if(!convoMode && recording) stopRec(); });
 micBtn.addEventListener('contextmenu', e=>e.preventDefault());
+$('#send').addEventListener('pointerdown', unlockAudio);
 
 if(!getToken()) openToken();
 </script>

@@ -10,10 +10,14 @@ import os
 import sys
 import wave
 import uuid
+import time
 import base64
 import secrets
 import asyncio
 import tempfile
+import importlib
+import threading
+from contextlib import asynccontextmanager
 
 import pathlib
 
@@ -39,7 +43,31 @@ WINDOW_MAX = 12
 _windows: dict[str, list] = {}
 _pending: set = set()  # fire-and-forget save tasks (same pattern as the local loops)
 
-app = FastAPI(title="Nervice API")
+# Voice-model warm state: cold -> warming -> warm (or failed: ...). Warmed in a background
+# thread at startup so the first phone /voice call doesn't eat the 7-12s model load.
+_voice_state = {"status": "cold"}
+
+
+def _warm_voice():
+    try:
+        print("[api] voice models warming...", file=sys.stderr)
+        t0 = time.time()
+        importlib.import_module("app.voice")   # import lock makes concurrent /voice waits safe
+        _voice_state["status"] = "warm"
+        print(f"[api] voice models warm ({time.time() - t0:.1f}s)", file=sys.stderr)
+    except Exception as e:
+        _voice_state["status"] = f"failed: {repr(e)[:80]}"
+        print(f"[api] voice warm FAILED: {repr(e)[:120]}", file=sys.stderr)
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    _voice_state["status"] = "warming"
+    threading.Thread(target=_warm_voice, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="Nervice API", lifespan=lifespan)
 
 # The phone client (static files) is served UNauthenticated — acceptable ONLY because the page is
 # inert without a token and is reachable only over the private tailnet. Every API route below keeps
@@ -89,11 +117,12 @@ class ChatIn(BaseModel):
 
 @app.get("/health", dependencies=[Depends(auth)])
 async def health():
-    # Lazy: do NOT import app.voice here (importing it loads whisper + Kokoro). Report load state.
-    if "app.voice" in sys.modules:
+    # Voice models are warmed by the startup thread; report where that stands without forcing a load.
+    voice = _voice_state["status"]
+    if voice == "warm" and "app.voice" in sys.modules:
         v = sys.modules["app.voice"]
-        return {"status": "ok", "stt": v.WHISPER_PATH, "tts": v.TTS_ENGINE}
-    return {"status": "ok", "stt": "faster-whisper base.en (lazy)", "tts": "kokoro (lazy — loads on first /voice)"}
+        return {"status": "ok", "voice": "warm", "stt": v.WHISPER_PATH, "tts": v.TTS_ENGINE}
+    return {"status": "ok", "voice": voice, "stt": "faster-whisper base.en", "tts": "kokoro"}
 
 
 @app.post("/chat", dependencies=[Depends(auth)])
@@ -108,31 +137,39 @@ async def chat(inp: ChatIn):
 
 @app.post("/voice", dependencies=[Depends(auth)])
 async def voice(audio: UploadFile = File(...), conversation_id: str | None = Form(None)):
-    # Lazy model load: first /voice call pulls in app.voice (whisper + Kokoro). Text-only API
-    # use never loads the voice models.
+    # Models are normally warm (startup thread); if a call lands mid-warm, this import blocks on
+    # the import lock until ready instead of failing. Text-only API use never needs them.
+    t_total = time.time()
     import app.voice as v
 
     data = await audio.read()
     suffix = os.path.splitext(audio.filename or "")[1] or ".bin"
     tf = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    t0 = time.time()
     try:
         tf.write(data)
         tf.close()
         transcript = v.transcribe_file(tf.name)   # av decodes webm/opus/ogg/wav — no ffmpeg binary
     finally:
         os.unlink(tf.name)
+    stt_s = time.time() - t0
 
     cid = conversation_id or str(uuid.uuid4())
     if not transcript.strip():
+        print(f"[voice-timing] stt={stt_s:.2f}s llm=0 tts=0 total={time.time()-t_total:.2f}s (no speech)",
+              file=sys.stderr)
         return {"transcript": "", "reply": "(no speech detected)", "conversation_id": cid, "audio_wav_base64": ""}
 
     window = _windows.setdefault(cid, [])
+    t0 = time.time()
     reply = await respond(USER, transcript, window, voice_mode=True)
+    llm_s = time.time() - t0
     _advance_window(cid, transcript, reply)
     _store(cid, transcript, reply)
 
     # Synthesize the reply to a WAV and return it base64-encoded in the JSON. The phone client
     # decodes audio_wav_base64 -> bytes -> Blob({type:'audio/wav'}) and plays it.
+    t0 = time.time()
     pcm, sr = v.synth_to_pcm(reply)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -141,4 +178,7 @@ async def voice(audio: UploadFile = File(...), conversation_id: str | None = For
         w.setframerate(sr)
         w.writeframes(pcm.tobytes())
     audio_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    tts_s = time.time() - t0
+    print(f"[voice-timing] stt={stt_s:.2f}s llm={llm_s:.2f}s tts={tts_s:.2f}s "
+          f"total={time.time()-t_total:.2f}s", file=sys.stderr)
     return {"transcript": transcript, "reply": reply, "conversation_id": cid, "audio_wav_base64": audio_b64}

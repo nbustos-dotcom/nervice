@@ -22,8 +22,9 @@ def _format_memories(r):
 
 
 VOICE_ADDENDUM = ("VOICE MODE: your reply will be spoken aloud. Flowing conversational sentences "
-                  "only — never bullet points, numbered lists, markdown, or headers. Keep it "
-                  "tight; expand only when Nate asks.")
+                  "only — never bullet points, numbered lists, markdown, or headers. "
+                  "Spoken replies are 2-4 sentences MAX unless Nate explicitly asks you to go "
+                  "deep. Lead with the answer.")
 
 
 async def build_system_prompt(user_id, user_message, voice_mode: bool = False):
