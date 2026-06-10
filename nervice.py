@@ -74,4 +74,5 @@ async def main():
         await save_exchange(USER, conversation_id, user_message, reply)
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -14,3 +14,7 @@ trafilatura
 httpx
 truststore
 claude-agent-sdk
+faster-whisper
+piper-tts
+sounddevice
+webrtcvad-wheels
