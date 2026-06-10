@@ -63,6 +63,16 @@ def extract_diff(text: str) -> str | None:
     return None
 
 
+def _normalize_diff(diff: str) -> str:
+    """Line-ending and metadata hygiene only — does NOT change which lines are added/removed,
+    so the human reviews the same semantic change that gets applied. Converts CRLF->LF (the
+    proposer runs on Windows and emits CRLF, which git apply parses as a corrupt patch) and drops
+    fabricated 'index <hash>..<hash>' lines the proposer cannot know."""
+    lines = diff.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines = [ln for ln in lines if not ln.startswith("index ")]
+    return "\n".join(lines)
+
+
 def diff_paths(diff: str) -> set[str]:
     """Target paths from +++/--- lines, stripping a/ b/ prefixes and ignoring /dev/null."""
     paths: set[str] = set()
@@ -105,6 +115,8 @@ async def propose(instruction: str) -> dict:
         shutil.rmtree(staging, ignore_errors=True)
 
     diff = extract_diff(response)
+    if diff:
+        diff = _normalize_diff(diff)
     if not diff:
         rec = {"id": pid, "instruction": instruction, "summary": _after_fence(response),
                "paths": [], "created": _now_iso(), "status": "rejected",
@@ -183,13 +195,21 @@ def apply(pid: str) -> tuple[bool, str]:
         if not ps or not ps.issubset(EDITABLE):
             return False, f"path re-validation failed ({label}): {sorted(ps - EDITABLE) or '(empty)'}"
 
-    # 3. dry-run
-    chk = _git("apply", "--check", str(patch))
-    if chk.returncode != 0:
-        return False, f"git apply --check failed (not applied):\n{chk.stderr.strip()}"
-
-    # 4. apply
-    ap = _git("apply", str(patch))
+    # 3+4. dry-run then apply, GIT-ONLY (exact, no fuzz). --recount tolerates a wrong @@ line
+    #      count but never wrong context, so what lands is exactly the reviewed change. autocrlf
+    #      is forced off so git's line-ending normalization can't fight an LF patch on Windows.
+    flag_sets = (["--recount"], ["--recount", "--ignore-whitespace"])
+    chosen, last_err = None, ""
+    for flags in flag_sets:
+        chk = _git("-c", "core.autocrlf=false", "apply", "--check", *flags, str(patch))
+        if chk.returncode == 0:
+            chosen = flags
+            break
+        last_err = chk.stderr.strip()
+    if chosen is None:
+        return False, ("git apply --check failed (not applied) — the proposed diff does not apply "
+                       f"cleanly; reject it and ask for a fresh proposal:\n{last_err}")
+    ap = _git("-c", "core.autocrlf=false", "apply", *chosen, str(patch))
     if ap.returncode != 0:
         return False, f"git apply failed (not applied):\n{ap.stderr.strip()}"
 

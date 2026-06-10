@@ -113,8 +113,15 @@ async def propose_agent(instruction: str, staging_dir: str) -> str:
             "You are Nervice's self-modification proposer. The cwd contains the only files you may "
             "propose changes to. Read what you need, then output a single unified diff (git format, "
             "a/ b/ prefixes, correct relative paths) implementing the requested change, inside one "
-            "```diff fence. Minimal, surgical changes only. After the fence, 2-3 sentences explaining "
-            "the change. Never propose changes to files not present in the cwd."),
+            "```diff fence. Minimal, surgical changes only.\n"
+            "The diff MUST apply cleanly with `git apply`. To guarantee that:\n"
+            "- Include at least 3 lines of UNCHANGED context above and below every change.\n"
+            "- Reproduce context lines BYTE-FOR-BYTE from the file — never reword, reflow, or change "
+            "quotes/dashes/whitespace on unchanged lines.\n"
+            "- Make each @@ hunk header's line counts exactly correct for the lines shown.\n"
+            "- Do NOT emit an 'index <hash>..<hash>' line (you cannot know the real hashes).\n"
+            "After the fence, 2-3 sentences explaining the change. Never propose changes to files not "
+            "present in the cwd."),
         cwd=staging_dir,
         allowed_tools=["Read", "Glob", "Grep"],
         max_turns=15,

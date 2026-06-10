@@ -1,0 +1,10 @@
+{
+  "id": "20260609-192324-314562",
+  "instruction": "In the persona, add one sentence to HOW YOU CARRY YOURSELF: keep replies under roughly 120 words unless Nate asks to go deep.",
+  "summary": "Adds a single length-cap bullet to the **HOW YOU CARRY YOURSELF** section, right after the existing \"short and conversational\" bullet so the two brevity rules sit together. The rule is soft (\"roughly\") to leave room for judgment, and the escape hatch (\"unless Nate asks to go deep\") preserves full depth when he wants it.",
+  "paths": [
+    "app/persona.py"
+  ],
+  "created": "2026-06-09T19:24:01",
+  "status": "pending"
+}
