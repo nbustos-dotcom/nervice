@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nervice">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="/static/manifest.json">
+<title>Nervice</title>
+<style>
+  :root{
+    --bg:#09090b; --panel:#18181b; --panel2:#27272a; --line:#27272a;
+    --accent:#6366f1; --accent2:#818cf8; --text:#fafafa; --muted:#a1a1aa; --danger:#ef4444;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    display:flex; flex-direction:column; overscroll-behavior:none;
+  }
+  header{
+    display:flex; align-items:center; gap:10px;
+    padding:calc(env(safe-area-inset-top) + 12px) 16px 12px;
+    border-bottom:1px solid var(--line); background:rgba(9,9,11,.85); backdrop-filter:blur(8px);
+    position:sticky; top:0; z-index:5;
+  }
+  header .logo{font-weight:700; font-size:19px; letter-spacing:.2px;}
+  header .logo b{color:var(--accent);}
+  header .spacer{flex:1;}
+  .iconbtn{
+    background:var(--panel); border:1px solid var(--line); color:var(--muted);
+    width:38px; height:38px; border-radius:10px; font-size:16px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .iconbtn:active{background:var(--panel2);}
+  #messages{
+    flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px;
+    -webkit-overflow-scrolling:touch;
+  }
+  .msg{max-width:82%; padding:10px 14px; border-radius:16px; line-height:1.4; font-size:15px; white-space:pre-wrap; word-wrap:break-word;}
+  .msg.you{align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:5px;}
+  .msg.nervice{align-self:flex-start; background:var(--panel); border:1px solid var(--line); border-bottom-left-radius:5px;}
+  .hint{color:var(--muted); text-align:center; font-size:13px; margin:auto 0; padding:24px;}
+  footer{
+    padding:10px 14px calc(env(safe-area-inset-bottom) + 12px);
+    border-top:1px solid var(--line); background:var(--bg); display:flex; flex-direction:column; gap:12px;
+  }
+  .row{display:flex; gap:8px; align-items:center;}
+  #text{
+    flex:1; background:var(--panel); border:1px solid var(--line); color:var(--text);
+    border-radius:12px; padding:11px 14px; font-size:16px; outline:none;
+  }
+  #text:focus{border-color:var(--accent);}
+  #send{
+    background:var(--panel); border:1px solid var(--line); color:var(--accent);
+    border-radius:12px; padding:0 16px; height:44px; font-size:15px; font-weight:600; cursor:pointer;
+  }
+  #send:active{background:var(--panel2);}
+  .micwrap{display:flex; flex-direction:column; align-items:center; gap:6px;}
+  #mic{
+    width:84px; height:84px; border-radius:50%; border:none; cursor:pointer;
+    background:radial-gradient(circle at 50% 35%, var(--accent2), var(--accent));
+    color:#fff; font-size:32px; display:flex; align-items:center; justify-content:center;
+    box-shadow:0 6px 24px rgba(99,102,241,.4); transition:transform .08s, box-shadow .2s;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+  }
+  #mic:active{transform:scale(.94);}
+  #mic.recording{background:radial-gradient(circle at 50% 35%,#f87171,var(--danger)); animation:pulse 1s infinite; box-shadow:0 0 0 0 rgba(239,68,68,.6);}
+  #mic.busy{opacity:.6; animation:pulse 1.2s infinite;}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(239,68,68,.5);}70%{box-shadow:0 0 0 18px rgba(239,68,68,0);}100%{box-shadow:0 0 0 0 rgba(239,68,68,0);}}
+  .miclabel{color:var(--muted); font-size:12px;}
+  /* token / settings overlay */
+  .overlay{position:fixed; inset:0; background:rgba(0,0,0,.72); backdrop-filter:blur(6px); display:none; align-items:center; justify-content:center; padding:24px; z-index:20;}
+  .overlay.show{display:flex;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:22px; width:100%; max-width:360px;}
+  .card h2{margin:0 0 6px; font-size:18px;}
+  .card p{margin:0 0 16px; color:var(--muted); font-size:13px; line-height:1.5;}
+  .card input{width:100%; background:var(--bg); border:1px solid var(--line); color:var(--text); border-radius:11px; padding:12px 14px; font-size:15px; outline:none; margin-bottom:14px;}
+  .card input:focus{border-color:var(--accent);}
+  .card button{width:100%; background:var(--accent); border:none; color:#fff; border-radius:11px; padding:13px; font-size:15px; font-weight:600; cursor:pointer;}
+  #toast{position:fixed; left:50%; transform:translateX(-50%); bottom:calc(env(safe-area-inset-bottom) + 120px); background:var(--panel2); border:1px solid var(--line); color:var(--text); padding:10px 16px; border-radius:12px; font-size:14px; opacity:0; transition:opacity .2s; pointer-events:none; z-index:30; max-width:80%;}
+  #toast.show{opacity:1;}
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">Ner<b>vice</b></span>
+  <span class="spacer"></span>
+  <button class="iconbtn" id="newBtn" title="New chat">+</button>
+  <button class="iconbtn" id="gearBtn" title="Settings">⚙</button>
+</header>
+
+<div id="messages"><div class="hint">Hold the mic and talk, or type below.</div></div>
+
+<footer>
+  <div class="row">
+    <input id="text" type="text" placeholder="Message Nervice…" autocomplete="off" enterkeyhint="send">
+    <button id="send">Send</button>
+  </div>
+  <div class="micwrap">
+    <button id="mic" aria-label="Hold to talk">🎤</button>
+    <span class="miclabel" id="micLabel">hold to talk</span>
+  </div>
+</footer>
+
+<div class="overlay" id="tokenModal">
+  <div class="card">
+    <h2>Connect to Nervice</h2>
+    <p>Paste your API token. It's stored only in this browser (localStorage) — fine for a private,
+       single-user tailnet app.</p>
+    <input id="tokenInput" type="password" placeholder="NERVICE_API_TOKEN" autocomplete="off">
+    <button id="tokenSave">Save</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* Security note: the token lives in localStorage and is sent as a Bearer header on every API call.
+   Acceptable here because this page is served ONLY over the private Tailscale tailnet (HTTPS via
+   `tailscale serve`) to a single user — there is no public exposure and no third-party JS/CDN. */
+const TOKEN_KEY='nervice_token', CID_KEY='nervice_cid';
+const $=s=>document.querySelector(s);
+const messagesEl=$('#messages'), toastEl=$('#toast'), micBtn=$('#mic'), micLabel=$('#micLabel');
+let busy=false, mediaRecorder=null, chunks=[], micStream=null;
+
+const getToken=()=>localStorage.getItem(TOKEN_KEY)||'';
+function getCID(){ let c=localStorage.getItem(CID_KEY); if(!c){ c=(crypto.randomUUID?crypto.randomUUID():String(Date.now())); localStorage.setItem(CID_KEY,c);} return c; }
+
+let toastT;
+function toast(msg){ toastEl.textContent=msg; toastEl.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>toastEl.classList.remove('show'),2600); }
+
+function openToken(){ $('#tokenInput').value=getToken(); $('#tokenModal').classList.add('show'); setTimeout(()=>$('#tokenInput').focus(),100); }
+function closeToken(){ $('#tokenModal').classList.remove('show'); }
+$('#tokenSave').onclick=()=>{ const t=$('#tokenInput').value.trim(); if(!t){toast('Enter a token');return;} localStorage.setItem(TOKEN_KEY,t); closeToken(); toast('Saved'); };
+$('#gearBtn').onclick=openToken;
+
+$('#newBtn').onclick=()=>{ localStorage.removeItem(CID_KEY); messagesEl.innerHTML='<div class="hint">New chat. Hold the mic and talk, or type below.</div>'; };
+
+function addMsg(role, text){
+  const hint=messagesEl.querySelector('.hint'); if(hint) hint.remove();
+  const d=document.createElement('div'); d.className='msg '+(role==='you'?'you':'nervice'); d.textContent=text;
+  messagesEl.appendChild(d); messagesEl.scrollTop=messagesEl.scrollHeight;
+}
+
+async function api(path, opts={}){
+  const token=getToken();
+  if(!token){ openToken(); throw new Error('no token'); }
+  const headers=Object.assign({}, opts.headers||{}, {'Authorization':'Bearer '+token});
+  let res;
+  try{ res=await fetch(path, Object.assign({}, opts, {headers})); }
+  catch(e){ toast('Network error'); throw e; }
+  if(res.status===401){ toast('Invalid token'); openToken(); throw new Error('401'); }
+  if(!res.ok){ toast('Error '+res.status); throw new Error('http '+res.status); }
+  return res.json();
+}
+
+async function sendText(){
+  const inp=$('#text'); const msg=inp.value.trim(); if(!msg||busy) return;
+  inp.value=''; addMsg('you', msg); setBusy(true);
+  try{
+    const j=await api('/chat',{method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message:msg, conversation_id:getCID()})});
+    if(j.conversation_id) localStorage.setItem(CID_KEY, j.conversation_id);
+    addMsg('nervice', j.reply);
+  }catch(e){} finally{ setBusy(false); }
+}
+$('#send').onclick=sendText;
+$('#text').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); sendText(); }});
+
+function setBusy(b){ busy=b; micBtn.classList.toggle('busy', b); micLabel.textContent = b ? 'thinking…' : 'hold to talk'; }
+function setRecording(r){ micBtn.classList.toggle('recording', r); micLabel.textContent = r ? 'listening…' : 'hold to talk'; }
+
+function pickMime(){
+  const c=['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
+  for(const m of c){ try{ if(MediaRecorder.isTypeSupported(m)) return m; }catch(e){} }
+  return '';  // let the browser choose (iOS Safari often gives mp4/m4a — server decodes via av)
+}
+
+async function startRec(){
+  if(busy || (mediaRecorder && mediaRecorder.state==='recording')) return;
+  if(!getToken()){ openToken(); return; }
+  try{ micStream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+  catch(e){ toast('Mic permission needed'); return; }
+  chunks=[]; const mime=pickMime();
+  try{ mediaRecorder = mime ? new MediaRecorder(micStream,{mimeType:mime}) : new MediaRecorder(micStream); }
+  catch(e){ mediaRecorder = new MediaRecorder(micStream); }
+  mediaRecorder.ondataavailable=e=>{ if(e.data && e.data.size) chunks.push(e.data); };
+  mediaRecorder.onstop=onRecStop;
+  mediaRecorder.start(); setRecording(true);
+}
+function stopRec(){ setRecording(false); if(mediaRecorder && mediaRecorder.state!=='inactive') mediaRecorder.stop(); }
+
+async function onRecStop(){
+  if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
+  if(!chunks.length){ return; }
+  const type=(mediaRecorder.mimeType||'audio/webm');
+  const blob=new Blob(chunks,{type});
+  const ext=type.includes('mp4')?'mp4':type.includes('ogg')?'ogg':type.includes('wav')?'wav':'webm';
+  const fd=new FormData(); fd.append('audio', blob, 'rec.'+ext); fd.append('conversation_id', getCID());
+  setBusy(true);
+  try{
+    const j=await api('/voice',{method:'POST', body:fd});
+    if(j.conversation_id) localStorage.setItem(CID_KEY, j.conversation_id);
+    if(j.transcript) addMsg('you', j.transcript);
+    addMsg('nervice', j.reply||'…');
+    if(j.audio_wav_base64) playWav(j.audio_wav_base64);
+  }catch(e){} finally{ setBusy(false); }
+}
+
+function playWav(b64){
+  try{
+    const bin=atob(b64), arr=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+    const url=URL.createObjectURL(new Blob([arr],{type:'audio/wav'}));
+    const a=new Audio(url); a.play().catch(()=>{}); a.onended=()=>URL.revokeObjectURL(url);
+  }catch(e){}
+}
+
+/* press-and-hold via pointer events (unifies touch + mouse) */
+micBtn.addEventListener('pointerdown', e=>{ e.preventDefault(); startRec(); });
+micBtn.addEventListener('pointerup',   e=>{ e.preventDefault(); stopRec(); });
+micBtn.addEventListener('pointercancel', stopRec);
+micBtn.addEventListener('pointerleave', e=>{ if(micBtn.classList.contains('recording')) stopRec(); });
+micBtn.addEventListener('contextmenu', e=>e.preventDefault());
+
+if(!getToken()) openToken();
+</script>
+</body>
+</html>

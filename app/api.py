@@ -15,8 +15,12 @@ import secrets
 import asyncio
 import tempfile
 
+import pathlib
+
 import numpy as np
 from fastapi import FastAPI, Depends, Header, HTTPException, UploadFile, File, Form
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -36,6 +40,17 @@ _windows: dict[str, list] = {}
 _pending: set = set()  # fire-and-forget save tasks (same pattern as the local loops)
 
 app = FastAPI(title="Nervice API")
+
+# The phone client (static files) is served UNauthenticated — acceptable ONLY because the page is
+# inert without a token and is reachable only over the private tailnet. Every API route below keeps
+# its Bearer auth; the static mount does not bypass it.
+_STATIC = pathlib.Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
+
+
+@app.get("/")
+async def index():
+    return FileResponse(str(_STATIC / "index.html"))
 
 
 async def auth(authorization: str = Header(None)):
