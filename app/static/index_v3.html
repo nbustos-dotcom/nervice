@@ -574,7 +574,11 @@ function handleFrame(f){
   if(f.type==='transcript'){ if(f.text) addBubble('you',f.text); setState('thinking'); }
   else if(f.type==='ack'||f.type==='text'){ appendNervice(f.text); }
   else if(f.type==='audio'){ enqueueAudio(f.wav_base64); }
-  else if(f.type==='done'){ const doneBubble=curBubble; curBubble=null; if(scheduled<=0 && orbState!=='speaking'){ if(convoMode) setTimeout(nextTurn,180); else setState('idle'); } setTimeout(loadActivity,800); setTimeout(loadStats,800); setTimeout(()=>loadLastTurn(doneBubble),500); }
+  else if(f.type==='done'){ const doneBubble=curBubble; curBubble=null;
+    // transcript completeness safeguard: text frames are paired with audio (sync reveal), so if
+    // anything was missed, the done frame's full reply fills the bubble.
+    if(doneBubble && f.reply && doneBubble.textContent.trim().length < f.reply.trim().length - 4){ doneBubble.textContent=f.reply; }
+    if(scheduled<=0 && orbState!=='speaking'){ if(convoMode) setTimeout(nextTurn,180); else setState('idle'); } setTimeout(loadActivity,800); setTimeout(loadStats,800); setTimeout(()=>loadLastTurn(doneBubble),500); }
 }
 function openWS(path){
   return new Promise((resolve,reject)=>{

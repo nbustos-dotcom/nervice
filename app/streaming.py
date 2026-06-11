@@ -121,6 +121,10 @@ class _AudioPipeline:
             if first:
                 await self._released.wait()
                 first = False
+            # TEXT is sent HERE, paired right before its audio — not at generation speed — so the
+            # transcript reveals in step with the voice instead of "typing then talking". The done
+            # frame carries the full reply as the client's completeness safeguard.
+            await self._send({"type": "text", "text": sent})
             if b64:
                 await self._send({"type": "audio", "wav_base64": b64})
 
@@ -169,9 +173,10 @@ async def _stream_normal(system: str, text: str, window: list, send, voice: bool
                     if not sent:
                         continue
                     sentences.append(sent)
-                    await send({"type": "text", "text": sent})
                     if audio:
-                        audio.add(sent)
+                        audio.add(sent)   # voice: text+audio sent as a pair by the pipeline (sync)
+                    else:
+                        await send({"type": "text", "text": sent})
                 buf = parts[-1]
             if audio and sentences and buf.strip():
                 audio.release()           # the NEXT sentence has started — holdback over
@@ -190,9 +195,10 @@ async def _stream_normal(system: str, text: str, window: list, send, voice: bool
     tail = buf.strip()
     if tail:
         sentences.append(tail)
-        await send({"type": "text", "text": tail})
         if audio:
-            audio.add(tail)
+            audio.add(tail)               # voice: paired text+audio via the pipeline
+        else:
+            await send({"type": "text", "text": tail})
     if audio:
         await audio.finish()
     return " ".join(sentences), None
@@ -313,22 +319,25 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         reply = await execute_route(user_id, system, route, text, window, voice_mode=voice, on_ack=on_ack)
 
     if not streamed and reply:
-        # Complete-reply paths (tool turns + the capped fallback rungs): text lands at once, but
-        # audio is SENTENCE-PIPELINED like the streaming path — the phone starts speaking after
-        # the first sentence's synth (~0.8s) instead of waiting for the whole reply's audio
-        # (~1-3s saved on the local rung). Frames are sent in order; the client schedules them
-        # back-to-back, so playback is seamless and complete.
-        await send({"type": "text", "text": reply})
-        if voice:
+        # Complete-reply paths (tool turns + the capped fallback rungs). Voice: sentence-pipelined
+        # TTS with each sentence's TEXT sent right before its audio — the transcript reveals in
+        # step with the voice (no full-text dump before audio), and the phone starts speaking
+        # after the first sentence's synth. The done frame carries the full reply as the
+        # completeness safeguard. Text-only turns get the whole reply at once, as before.
+        if not voice:
+            await send({"type": "text", "text": reply})
+        else:
             sents = [s.strip() for s in _SENT_BOUNDARY.split(reply)
                      if s.strip() and re.search(r"[A-Za-z0-9]", s)]
             if len(sents) <= 1:
+                await send({"type": "text", "text": reply})
                 b64 = await asyncio.to_thread(_synth_full_b64, reply)
                 if b64:
                     await send({"type": "audio", "wav_base64": b64})
             else:
                 for s in sents:
                     b64 = await asyncio.to_thread(_synth_sentence_b64, s)
+                    await send({"type": "text", "text": s})
                     if b64:
                         await send({"type": "audio", "wav_base64": b64})
 
