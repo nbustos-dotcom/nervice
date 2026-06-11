@@ -2,8 +2,7 @@ import app.net  # noqa  (truststore: Norton TLS)
 
 import httpx
 
-# Approximate coords only (Oswego, IL area) — no PII, no account, one keyless HTTPS call.
-_LAT, _LON = 41.68, -88.35
+from app.geo import load_location   # phone GPS if sent, else Orland Hills default
 
 
 def _code_word(code: int) -> str:
@@ -24,16 +23,17 @@ def _code_word(code: int) -> str:
 
 
 async def get_weather_data() -> dict | None:
-    """Structured current weather for the hardcoded coords (Oswego, IL), or None on any failure.
-    One keyless Open-Meteo call. Shape: {temp, condition, hi, lo} in °F."""
+    """Structured current weather for the stored location (phone GPS or default), or None on any
+    failure. One keyless Open-Meteo call. Shape: {temp, condition, hi, lo, place} in °F."""
+    loc = load_location()
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             r = await client.get("https://api.open-meteo.com/v1/forecast", params={
-                "latitude": _LAT, "longitude": _LON,
+                "latitude": loc["lat"], "longitude": loc["lon"],
                 "current": "temperature_2m,weather_code",
                 "daily": "temperature_2m_max,temperature_2m_min",
                 "temperature_unit": "fahrenheit",
-                "timezone": "America/Chicago",
+                "timezone": "auto",
             })
         if r.status_code != 200:
             return None
@@ -42,7 +42,8 @@ async def get_weather_data() -> dict | None:
         return {"temp": round(cur["temperature_2m"]),
                 "condition": _code_word(int(cur["weather_code"])),
                 "hi": round(daily["temperature_2m_max"][0]),
-                "lo": round(daily["temperature_2m_min"][0])}
+                "lo": round(daily["temperature_2m_min"][0]),
+                "place": loc.get("name")}
     except Exception:
         return None
 
@@ -56,17 +57,19 @@ async def get_weather() -> str | None:
 
 
 async def get_forecast(days: int = 7) -> dict | None:
-    """Current conditions + a real multi-day daily forecast (one keyless Open-Meteo call), or None
-    on failure. Shape: {temp, code, condition, hi, lo, forecast:[{date, day, code, condition, hi, lo}]}."""
+    """Current conditions + a real multi-day daily forecast for the stored location (phone GPS or
+    default), one keyless Open-Meteo call, or None on failure.
+    Shape: {temp, code, condition, hi, lo, place, forecast:[{date, day, code, condition, hi, lo}]}."""
     import datetime
+    loc = load_location()
     try:
         async with httpx.AsyncClient(timeout=6) as client:
             r = await client.get("https://api.open-meteo.com/v1/forecast", params={
-                "latitude": _LAT, "longitude": _LON,
+                "latitude": loc["lat"], "longitude": loc["lon"],
                 "current": "temperature_2m,weather_code",
                 "daily": "weather_code,temperature_2m_max,temperature_2m_min",
                 "temperature_unit": "fahrenheit",
-                "timezone": "America/Chicago",
+                "timezone": "auto",
                 "forecast_days": days,
             })
         if r.status_code != 200:
@@ -82,6 +85,6 @@ async def get_forecast(days: int = 7) -> dict | None:
                        "lo": round(dl["temperature_2m_min"][i])})
         return {"temp": round(cur["temperature_2m"]),
                 "code": int(cur["weather_code"]), "condition": _code_word(int(cur["weather_code"])),
-                "hi": fc[0]["hi"], "lo": fc[0]["lo"], "forecast": fc}
+                "hi": fc[0]["hi"], "lo": fc[0]["lo"], "place": loc.get("name"), "forecast": fc}
     except Exception:
         return None

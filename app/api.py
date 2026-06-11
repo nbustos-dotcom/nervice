@@ -182,11 +182,34 @@ async def health():
 
 @app.get("/weather", dependencies=[Depends(auth)])
 async def weather():
-    """Real current weather + multi-day forecast for the hardcoded Oswego coords (Open-Meteo,
-    keyless). {available:false} when the upstream call fails — never fabricated."""
+    """Real current weather + multi-day forecast for the stored location (phone GPS if sent, else
+    the Orland Hills default). Includes `place`. {available:false} on upstream failure — never faked."""
     from app.weather import get_forecast
     d = await get_forecast(7)
     return {"available": bool(d), **(d or {})}
+
+
+class LocationIn(BaseModel):
+    lat: float
+    lon: float
+
+
+@app.post("/location", dependencies=[Depends(auth)])
+async def set_location_ep(inp: LocationIn):
+    """The phone reports its real GPS here; weather then uses it. Reverse-geocoded for display."""
+    from app.geo import set_location
+    if not (-90 <= inp.lat <= 90 and -180 <= inp.lon <= 180):
+        raise HTTPException(status_code=422, detail="lat/lon out of range")
+    rec = await set_location(inp.lat, inp.lon)
+    return {"ok": True, "name": rec["name"], "lat": rec["lat"], "lon": rec["lon"]}
+
+
+@app.get("/location", dependencies=[Depends(auth)])
+async def get_location_ep():
+    """Current stored location (phone GPS or default) for the settings UI."""
+    from app.geo import load_location
+    loc = load_location()
+    return {"lat": loc["lat"], "lon": loc["lon"], "name": loc.get("name"), "source": loc.get("source", "default")}
 
 
 # ----------------------------- /system : real machine telemetry -----------------------------

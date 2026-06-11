@@ -9,3 +9,6 @@ models/
 models/kokoro_samples/
 models/neutts_samples/
 screenshots/
+
+# user location store (private)
+data/

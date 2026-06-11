@@ -225,6 +225,8 @@
   .modal input{width:100%; min-height:44px; background:rgba(0,0,0,.35); border:1px solid var(--line); color:var(--text); padding:12px; font-size:16px; outline:none; font-family:var(--mono); margin-bottom:13px;}
   .modal input:focus{border-color:var(--accent-soft);}
   .modal button{width:100%; min-height:46px; border:1px solid var(--accent); background:var(--accent); color:#021014; cursor:pointer; font-family:var(--mono); font-size:12px; letter-spacing:.16em; text-transform:uppercase; font-weight:600;}
+  .modal button.sec{background:transparent; color:var(--dim); border-color:var(--line); font-weight:400; margin-top:10px;}
+  .modal button.sec:hover{color:var(--accent); border-color:var(--accent-soft);}
   #toast{position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 22px); transform:translateX(-50%) translateY(8px); z-index:50;
          border:1px solid var(--line); background:var(--bg2); color:var(--text); padding:9px 15px; font-family:var(--mono); font-size:12px;
          letter-spacing:.04em; opacity:0; pointer-events:none; transition:.25s; max-width:84%;}
@@ -306,7 +308,7 @@
       <!-- RIGHT RAIL -->
       <section class="col">
         <div class="panel" style="animation-delay:.06s">
-          <h3 class="ph">WEATHER <span class="ln"></span><span class="n">OSWEGO IL</span></h3>
+          <h3 class="ph">WEATHER <span class="ln"></span><span class="n" id="wxPlace">—</span></h3>
           <div id="wxNow"><div class="empty">acquiring…</div></div>
           <div class="fc" id="forecast"></div>
         </div>
@@ -328,6 +330,7 @@
       <p>Paste your API token. Stored only in this browser — fine for a private, single-user tailnet HUD.</p>
       <input id="tokenInput" type="password" placeholder="NERVICE_API_TOKEN" autocomplete="off">
       <button id="tokenSave">Connect</button>
+      <button id="useLocBtn" class="sec">Use my location for weather</button>
     </div>
   </div>
   <div id="toast"></div>
@@ -664,6 +667,7 @@ const WX={ clear:'<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M
 function wxSvg(c){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${WX[c]||WX.clear}</svg>`; }
 async function loadWeather(){
   try{ const w=await api('/weather'); if(!w.available){ $('#wxNow').innerHTML='<div class="empty">unavailable</div>'; return; }
+    if(w.place) $('#wxPlace').textContent=String(w.place).toUpperCase();
     $('#wxNow').innerHTML=`<div class="wx-now"><div class="wx-ico">${wxSvg(w.condition)}</div>`+
       `<div><div class="wx-t">${w.temp}&deg;</div><div class="wx-c">${w.condition}</div></div></div>`;
     $('#forecast').innerHTML=(w.forecast||[]).slice(0,7).map((d,i)=>
@@ -708,8 +712,24 @@ async function loadNews(){
   }catch(e){ $('#newsPanel').style.display='none'; }
 }
 
+/* ---- real GPS: phone -> POST /location -> weather follows. Graceful on denial (keeps default). ---- */
+function requestLocation(explicit){
+  if(!navigator.geolocation){ if(explicit) toast('Geolocation not supported'); return; }
+  const token=getToken(); if(!token){ if(explicit) openToken(); return; }
+  navigator.geolocation.getCurrentPosition(async pos=>{
+    try{
+      const r=await fetch('/location',{method:'POST',
+        headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+        body:JSON.stringify({lat:pos.coords.latitude, lon:pos.coords.longitude})});
+      if(r.ok){ const j=await r.json(); if(explicit) toast('Location set: '+j.name); loadWeather(); }
+    }catch(e){}
+  }, err=>{ if(explicit) toast('Location denied — using default'); },   // denial -> default, no nag
+     {enableHighAccuracy:false, timeout:8000, maximumAge:600000});
+}
+$('#useLocBtn').onclick=()=>{ closeToken(); requestLocation(true); };
+
 /* ================= boot ================= */
-function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); }
+function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); requestLocation(false); }
 buildGauges();
 setInterval(loadSystem, 2000);
 setInterval(loadHealth, 15000);
