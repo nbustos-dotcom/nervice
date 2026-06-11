@@ -1,12 +1,33 @@
+import sys
+import json
 import uuid
+import pathlib
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
+from groq import RateLimitError
 
 from app.db import AsyncSessionLocal
 from app.embeddings import embed
 from app.llm import chat_json
 from app.models import Memory
+from app import ollama_client as ollama
+
+# When Groq is capped, extraction runs on the LOCAL rung with a QUARANTINE: salience capped <=3
+# (stays OUT of the always-injected CORE tier, which requires >=4) and the ops are logged here for
+# batch re-verification when Groq resets. Failed extractions are queued here too — never lost.
+_REQUEUE = pathlib.Path(__file__).resolve().parent.parent / "data" / "memory_requeue.jsonl"
+_LOCAL_SALIENCE_CAP = 3
+
+
+def _requeue_log(entry: dict) -> None:
+    try:
+        _REQUEUE.parent.mkdir(parents=True, exist_ok=True)
+        entry["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with open(_REQUEUE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[memory requeue log failed] {repr(e)[:80]}", file=sys.stderr)
 
 VALID_CATEGORIES = {"identity", "preference", "project", "relationship", "goal", "fact"}
 
@@ -87,7 +108,22 @@ async def remember(
             f"\n\nLATEST exchange:\nUser: {user_text}\nAssistant: {assistant_text}"
         )
 
-        raw = await chat_json(RECONCILE_SYSTEM, user_msg)
+        local_extract = False
+        try:
+            raw = await chat_json(RECONCILE_SYSTEM, user_msg)
+        except RateLimitError:
+            # Groq capped — extract on the local rung instead of silently losing the fact.
+            try:
+                raw = await ollama.chat_json(RECONCILE_SYSTEM, user_msg, timeout=40)
+                local_extract = True
+                print("[memory] groq capped -> local ollama extraction (quarantined)", file=sys.stderr)
+            except Exception as e:
+                # Both out: queue the exchange so nothing is lost, extract on a later pass.
+                _requeue_log({"kind": "deferred", "user_id": user_id, "conv": source_conv_id,
+                              "user_text": user_text[:500], "assistant_text": assistant_text[:500],
+                              "reason": f"groq capped + local failed: {repr(e)[:80]}"})
+                print(f"[memory] extraction deferred to requeue: {repr(e)[:80]}", file=sys.stderr)
+                return []
         ops = raw.get("ops", [])
 
         applied = []
@@ -100,6 +136,12 @@ async def remember(
             kind = op["op"]
             content = op["content"].strip()
             salience = op["salience"]
+            if local_extract:
+                # QUARANTINE: a 4B extraction never enters the always-injected CORE tier (>=4)
+                # and is flagged for re-verification when Groq resets.
+                salience = min(salience, _LOCAL_SALIENCE_CAP)
+                _requeue_log({"kind": "verify", "user_id": user_id, "conv": source_conv_id,
+                              "op": kind, "content": content[:300], "extractor": "ollama-qwen3.5:4b"})
 
             if kind == "add":
                 vec = await embed(content)
