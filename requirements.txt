@@ -27,3 +27,5 @@ nvidia-cufft-cu12   # onnxruntime CUDA EP (GPU Kokoro) needs cufft+curand — to
 nvidia-curand-cu12
 python-multipart
 psutil
+pvporcupine
+pvrecorder

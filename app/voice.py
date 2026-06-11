@@ -144,13 +144,16 @@ print(f"[voice] models loaded in {time.time() - _t0:.1f}s  "
 
 
 def record_until_silence(max_seconds: int = 60, trailing_silence: float = 0.7,
-                         allow_type_abort: bool = True):
+                         allow_type_abort: bool = True, start_timeout: float | None = None):
     """Capture 16kHz mono from the default mic, gated by webrtcvad: start collecting on the first
     voiced frames (with a short pre-roll so onsets aren't clipped), stop after ~trailing_silence of
     quiet, hard cap at max_seconds. Returns int16 PCM in memory. If allow_type_abort and the user
-    presses a key, returns None to signal "type this turn instead". PCM is never written to disk."""
+    presses a key, returns None to signal "type this turn instead". PCM is never written to disk.
+    start_timeout (optional): if no speech ONSET occurs within this many seconds, return empty PCM
+    (size 0) — used by the wake loop's short follow-up window; default None keeps prior behavior."""
     silence_limit = int(trailing_silence * 1000 / VAD_FRAME_MS)
     max_frames = int(max_seconds * 1000 / VAD_FRAME_MS)
+    start_frames = int(start_timeout * 1000 / VAD_FRAME_MS) if start_timeout else None
     preroll_len = 8  # ~240ms kept before speech onset
     preroll, collected = [], []
     started = False
@@ -158,13 +161,15 @@ def record_until_silence(max_seconds: int = 60, trailing_silence: float = 0.7,
     print("🎤 listening...", flush=True)
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
                         blocksize=_FRAME_LEN) as stream:
-        for _ in range(max_frames):
+        for fi in range(max_frames):
             if allow_type_abort and msvcrt and msvcrt.kbhit():
                 return None  # user wants to type this turn
             data, _ = stream.read(_FRAME_LEN)
             mono = data[:, 0]
             speech = _VAD.is_speech(mono.tobytes(), SAMPLE_RATE)
             if not started:
+                if start_frames is not None and fi >= start_frames:
+                    return np.zeros(0, dtype=np.int16)   # no speech onset in the window
                 preroll.append(mono.copy())
                 if len(preroll) > preroll_len:
                     preroll.pop(0)
