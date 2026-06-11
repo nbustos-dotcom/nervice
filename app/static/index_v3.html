@@ -386,7 +386,7 @@
     <div class="modal">
       <h2>// AUTH REQUIRED</h2>
       <p>Paste your API token. Stored only in this browser — fine for a private, single-user tailnet HUD.</p>
-      <input id="tokenInput" type="password" placeholder="NERVICE_API_TOKEN" autocomplete="off">
+      <input id="tokenInput" type="password" placeholder="NERVICE_API_TOKEN" autocomplete="off" enterkeyhint="go">
       <button id="tokenSave">Connect</button>
       <button id="useLocBtn" class="sec">Use my location for weather</button>
     </div>
@@ -405,9 +405,24 @@ const wsBase=()=> (location.protocol.charAt(4)==='s' ? 'wss://' : 'ws://') + loc
 let toastT; function toast(m){const t=$('#toast'); t.textContent=m; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2800);}
 
 /* ---- token modal ---- */
-function openToken(){$('#tokenInput').value=getToken(); $('#tokenModal').classList.add('show'); setTimeout(()=>$('#tokenInput').focus(),120);}
+/* IDEMPOTENT + NON-DESTRUCTIVE: while unauthenticated, every poll (loadSystem 2s, loadLastTurn 4s,
+   ...) reaches here via api()'s no-token/401 paths. The old unconditional value=getToken() wiped
+   typing AND paste every <=2s (and a 401 reset the field to the stale bad token). Rules now:
+   already-open -> untouched; prefill only a fresh, empty, unfocused field; focus only on open. */
+function openToken(){
+  const inp=$('#tokenInput'), modal=$('#tokenModal');
+  if(modal.classList.contains('show')) return;
+  if(document.activeElement!==inp && !inp.value) inp.value=getToken();
+  modal.classList.add('show');
+  // select-all when the field holds the STORED token (prefilled or retained after save) so the
+  // first keystroke/paste REPLACES the masked dots — on iOS a paste into an unselected password
+  // field concatenates at the caret. In-progress typed content never matches the stored token,
+  // so a close->reopen mid-entry keeps the caret and typing continues unharmed.
+  setTimeout(()=>{ inp.focus(); if(inp.value && inp.value===getToken()) inp.select(); },120);
+}
 function closeToken(){$('#tokenModal').classList.remove('show');}
-$('#tokenSave').onclick=()=>{const t=$('#tokenInput').value.trim(); if(!t){toast('Enter a token'); return;} localStorage.setItem(TOKEN_KEY,t); closeToken(); toast('// LINK ESTABLISHED'); refreshAll();};
+$('#tokenSave').onclick=()=>{const t=$('#tokenInput').value.trim(); if(!t){$('#tokenInput').value=''; toast('Enter a token'); return;} localStorage.setItem(TOKEN_KEY,t); closeToken(); toast('// LINK ESTABLISHED'); refreshAll();};
+$('#tokenInput').addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.isComposing){ e.preventDefault(); $('#tokenSave').click(); } });
 $('#gearBtn').onclick=openToken;
 $('#newBtn').onclick=()=>{localStorage.removeItem(CID_KEY); getCID(); $('#msgs').innerHTML='<div class="convo-empty">// new session</div>'; toast('New session');};
 
@@ -415,7 +430,7 @@ $('#newBtn').onclick=()=>{localStorage.removeItem(CID_KEY); getCID(); $('#msgs')
 async function api(path){
   const token=getToken(); if(!token){openToken(); throw new Error('no token');}
   const r=await fetch(path,{headers:{'Authorization':'Bearer '+token}});
-  if(r.status===401){toast('Invalid token'); openToken(); throw new Error('401');}
+  if(r.status===401){ if(!$('#tokenModal').classList.contains('show')) toast('Invalid token'); openToken(); throw new Error('401');}
   if(!r.ok) throw new Error('http '+r.status);
   return r.json();
 }
@@ -588,7 +603,7 @@ function openWS(path){
     const ws=new WebSocket(wsBase()+path); let ready=false;
     ws.onopen=()=> ws.send(JSON.stringify({token, conversation_id:getCID(), audio: path.indexOf('chat')>=0?false:true}));
     ws.onmessage=(e)=>{ let f; try{f=JSON.parse(e.data);}catch(_){return;} if(!ready && f.type==='ready'){ ready=true; resolve(ws); return;} handleFrame(f); };
-    ws.onclose=(e)=>{ if(path.indexOf('voice')>=0) voiceWS=null; else chatWS=null; if(e.code===1008){ toast('Invalid token'); openToken(); } if(!ready) reject(new Error('closed')); };
+    ws.onclose=(e)=>{ if(path.indexOf('voice')>=0) voiceWS=null; else chatWS=null; if(e.code===1008){ if(!$('#tokenModal').classList.contains('show')) toast('Invalid token'); openToken(); } if(!ready) reject(new Error('closed')); };
     ws.onerror=()=>{};
   });
 }
@@ -692,7 +707,8 @@ $('#convoBtn').onclick=()=> convoMode? stopConvo() : startConvo();
    pill owns the mic when hands-free mode is on, so the reactor tap is inert then. */
 function toggleTalk(){ if(convoMode) return; if(recording) stopRec(false); else startRec(false); }
 reactor.addEventListener('click', e=>{ e.preventDefault(); toggleTalk(); });
-reactor.addEventListener('keydown', e=>{ if((e.key===' '||e.key==='Enter')&&!convoMode){ e.preventDefault(); toggleTalk(); } });
+reactor.addEventListener('keydown', e=>{ if(/^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement||{}).tagName||'')) return;   // never swallow keys typed into a field
+  if((e.key===' '||e.key==='Enter')&&!convoMode){ e.preventDefault(); toggleTalk(); } });
 reactor.addEventListener('contextmenu', e=>e.preventDefault());
 async function sendText(){
   const inp=$('#text'); const msg=inp.value.trim(); if(!msg) return; inp.value='';
