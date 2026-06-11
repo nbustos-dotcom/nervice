@@ -4,6 +4,7 @@ lists / file COUNTS — it never modifies, deletes, kills, runs a shell, or read
 Acting on the machine (the screen-control boundary) is a separate phase and lives in app/computer.py.
 """
 import os
+import re
 import time
 import platform
 import pathlib
@@ -131,6 +132,61 @@ def get_top_processes(by: str = "memory", n: int = 5) -> str:
     rows.sort(key=lambda r: r[1], reverse=True)
     top = ["{} — {:,.0f} MB".format(nm, rss / 1e6) for nm, rss in rows[:n]]
     return "Top processes by memory: " + "; ".join(top) + "."
+
+
+# ----------------------- direct-answer fast path (no LLM round) -----------------------
+# The router's is_machine_question() already identifies machine questions deterministically;
+# these templates answer them by calling the telemetry DIRECTLY — ~1s instead of the 9-19s
+# LLM tool-round. Returns None when unsure, so the normal LLM path stays the fallback.
+_Q_FILES = re.compile(r"\bhow\s+many\s+(files?|folders?|items?)\b", re.I)
+_Q_PATH = re.compile(r"\b(?:in|under|inside)\s+(?:my\s+)?([\w .\\/:~-]+?)(?:\s+folder|\s+directory)?\s*\??\s*$", re.I)
+_Q_TOPPROC = re.compile(r"\b(?:using|eating|hogging|consuming|taking)\b.{0,24}\b(memory|ram|cpu|processor)\b"
+                        r"|\bwhat(?:'s| is)\s+(?:process(?:es)?\s+)?(?:using|running|eating)\b", re.I)
+_Q_CPU = re.compile(r"\b(cpu|processor)\b", re.I)
+_Q_GPU = re.compile(r"\b(gpu|graphics\s*card|video\s*card)\b", re.I)
+_Q_RAM = re.compile(r"\b(ram|memory)\b", re.I)
+_Q_DISK = re.compile(r"\b(disk|storage|drive|space)\b", re.I)
+_Q_OS = re.compile(r"\b(os|operating\s+system|windows\s+version)\b", re.I)
+_Q_UP = re.compile(r"\b(uptime|been\s+(?:up|on|running)|turned\s+on)\b", re.I)
+_Q_SPECS = re.compile(r"\b(specs?|hardware|system\s+info)\b", re.I)
+
+
+def answer_machine_question(text: str) -> str | None:
+    """Direct, natural-sounding answer to a machine question from live telemetry — no model
+    round-trip. None when the question doesn't map cleanly (caller falls back to the LLM path)."""
+    q = (text or "").strip()
+    if _Q_FILES.search(q):
+        m = _Q_PATH.search(q)
+        return count_files(m.group(1).strip() if m else None)
+    if _Q_TOPPROC.search(q):
+        by = "cpu" if re.search(r"\bcpu|processor\b", q, re.I) else "memory"
+        return get_top_processes(by, 3)
+    t = system_telemetry()
+    g = t["gpu"]
+    if _Q_SPECS.search(q):
+        return get_system_info()
+    if _Q_GPU.search(q):
+        if not g.get("available"):
+            return "No GPU shows up via nvidia-smi right now."
+        return (f"You've got an {g['name']} — {g['util']}% busy, "
+                f"{g['vram_used']} of {g['vram_total']} MB VRAM in use, running {g['temp']}°C.")
+    if _Q_CPU.search(q):
+        return (f"You're on an {_cpu_name()} — {t['cpu']['count']} logical cores, "
+                f"sitting at {t['cpu']['total']:.0f}% right now.")
+    if _Q_RAM.search(q):
+        return (f"{t['ram']['used']/1e9:.1f} of {t['ram']['total']/1e9:.1f} GB RAM in use "
+                f"({t['ram']['percent']:.0f}%).")
+    if _Q_DISK.search(q):
+        free = (t['disk']['total'] - t['disk']['used']) / 1e9
+        return (f"Disk C: has {free:.0f} GB free of {t['disk']['total']/1e9:.0f} GB "
+                f"({t['disk']['percent']:.0f}% used).")
+    if _Q_UP.search(q):
+        up = t["uptime_s"]; d, h, m_ = up // 86400, (up % 86400) // 3600, (up % 3600) // 60
+        span = f"{d} day{'s' if d != 1 else ''} and {h} hours" if d else f"{h} hours {m_} minutes"
+        return f"This machine's been up {span}."
+    if _Q_OS.search(q):
+        return f"You're on {platform.platform()}."
+    return None
 
 
 _COMMON_DIRS = ("downloads", "documents", "desktop", "pictures", "videos", "music")

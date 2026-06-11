@@ -10,8 +10,9 @@ from app.retrieval import retrieve
 from app.agent import current_rung
 from app.turnlog import log_turn
 from app.llm import chat_stream, chat_with_tools, TOOL_TIMEOUTS, TIMEOUT_MSG, LADDER_EXHAUSTED_MSG
-from app.router import classify
+from app.router import classify, is_machine_question as classify_is_machine
 from app.tools import TOOLS, TOOL_FUNCS
+from app import sysinfo
 from app.memory import remember
 from app.weather import get_weather
 from app import computer
@@ -99,6 +100,16 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         print(skill_reply)
         log_turn("skill", "skill", time.monotonic() - t0, "rest")
         return skill_reply
+
+    # sysinfo DIRECT fast path: machine questions are identified deterministically and answered
+    # straight from telemetry (~1s) — no retrieval, no classify, no LLM tool-round (was 9-19s).
+    # None -> not confidently mappable -> normal pipeline below.
+    if classify_is_machine(user_message):
+        direct = await asyncio.to_thread(sysinfo.answer_machine_question, user_message)
+        if direct:
+            print(direct)
+            log_turn("system", "direct", time.monotonic() - t0, "rest")
+            return direct
 
     # memory retrieval and router classification are independent — overlap them so the turn
     # pays max(retrieve, classify) instead of the sum (classify alone measured 0.3-0.8s)

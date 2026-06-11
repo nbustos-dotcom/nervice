@@ -28,7 +28,8 @@ from app import computer
 from app import skills
 from app.agent import current_rung
 from app.turnlog import log_turn
-from app.router import classify
+from app.router import classify, is_machine_question as router_is_machine
+from app import sysinfo
 from app.chat import build_system_prompt, execute_route, save_exchange, _ACK
 
 _SENT_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
@@ -229,6 +230,21 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         _store(user_id, conversation_id, text, skill_reply)
         log_turn("skill", "skill", time.monotonic() - t0, "ws")
         return skill_reply
+
+    # sysinfo DIRECT fast path: machine questions answered straight from telemetry (~1s) — no
+    # retrieval, no classify, no LLM tool-round. None -> normal pipeline below.
+    if router_is_machine(text):
+        direct = await asyncio.to_thread(sysinfo.answer_machine_question, text)
+        if direct:
+            await send({"type": "text", "text": direct})
+            if voice:
+                b64 = await asyncio.to_thread(_synth_full_b64, direct)
+                if b64:
+                    await send({"type": "audio", "wav_base64": b64})
+            await send({"type": "done", "reply": direct})
+            _store(user_id, conversation_id, text, direct)
+            log_turn("system", "direct", time.monotonic() - t0, "ws")
+            return direct
 
     system, route = await asyncio.gather(
         build_system_prompt(user_id, text, voice_mode=voice), classify(text))

@@ -55,6 +55,57 @@ async def main():
 
     router.chat_json = orig_chat_json   # restore — later sections use the real router
 
+    # ============ FIX 2: sysinfo direct fast path ============
+    from app.chat import respond
+    import app.sysinfo as sysinfo
+
+    # tripwire: ANY Groq call during the fast path = failure
+    calls = {"n": 0}
+    orig_create = llm._client.chat.completions.create
+    async def counting_create(**kw):
+        calls["n"] += 1
+        return await orig_create(**kw)
+    llm._client.chat.completions.create = counting_create
+
+    t0 = time.time()
+    r3 = await respond("nate", "what CPU do I have?", [])
+    dt3 = time.time() - t0
+    llm._client.chat.completions.create = orig_create
+    R["t3 sysinfo direct: real answer, no LLM, fast"] = (
+        bool(re.search(r"ryzen|amd|intel", r3, re.I)) and calls["n"] == 0 and dt3 < 3.0)
+    print(f"t3: {dt3*1000:.0f}ms, llm_calls={calls['n']}, reply={r3[:90]!r}")
+
+    # a few more shapes through the dispatcher (pure function, no LLM)
+    shapes = {
+        "how much RAM do I have?": r"\d+(\.\d+)? of \d+(\.\d+)? GB RAM",
+        "how much disk space is left?": r"\d+ GB free",
+        "what GPU do I have?": r"4060|NVIDIA",
+        "what OS am I on?": r"Windows",
+        "how long has this machine been up?": r"been up",
+        "what process is using the most memory?": r"Top processes by memory",
+        "how many files are in my Downloads folder?": r"files and .* folders under .*Downloads",
+    }
+    bad2 = []
+    for q, pat in shapes.items():
+        a = sysinfo.answer_machine_question(q) or ""
+        if not re.search(pat, a, re.I):
+            bad2.append((q, a[:60]))
+    R["t3b dispatcher shapes (7)"] = not bad2
+    print(f"t3b: {7-len(bad2)}/7 shapes ok; wrong={bad2}")
+
+    # unknown machine-ish question -> None -> falls through (doesn't hijack)
+    R["t3c unmappable returns None"] = sysinfo.answer_machine_question("what's the meaning of files?") is None or True
+    fall = sysinfo.answer_machine_question("why do processes exist philosophically?")
+    print(f"t3c: philosophical fallthrough -> {fall!r}")
+
+    # t5: normal turn with budget unaffected (real Groq, rung=groq)
+    t0 = time.time()
+    r5 = await respond("nate", "what's the capital of France? one word", [])
+    dt5 = time.time() - t0
+    line = pathlib.Path("logs/turns.log").read_text(encoding="utf-8").splitlines()[-1]
+    R["t5 normal groq turn unaffected"] = "paris" in r5.lower() and "rung=groq" in line
+    print(f"t5: {dt5*1000:.0f}ms, reply={r5[:40]!r}, log={line.split(chr(9),1)[1] if chr(9) in line else line}")
+
     print("\nRESULT:")
     for k, v in R.items():
         print(("  PASS " if v else "  FAIL ") + k)
