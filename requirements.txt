@@ -27,5 +27,8 @@ nvidia-cufft-cu12   # onnxruntime CUDA EP (GPU Kokoro) needs cufft+curand — to
 nvidia-curand-cu12
 python-multipart
 psutil
-pvporcupine
-pvrecorder
+openwakeword
+scikit-learn
+scipy
+narwhals
+# note: openwakeword uses the existing onnxruntime-gpu (install it with --no-deps to avoid pulling CPU onnxruntime)

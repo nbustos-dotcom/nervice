@@ -1,24 +1,23 @@
-"""Wake-word loop for the LOCAL always-on brain (the MSI). Dormant -> "Hey Nervice" -> active
+"""Wake-word loop for the LOCAL always-on brain (the MSI). Dormant -> "Hey Jarvis" -> active
 conversation -> back to dormant on a sleep phrase or a quiet follow-up window.
 
-DORMANT is cheap and private: Picovoice Porcupine listens on-device for the custom wake word only —
-NO transcription, no network, ~sub-1% of one CPU core. Nothing is sent anywhere and nothing is
-recognized except the wake word itself. ACTIVE reuses the EXISTING turn pipeline unchanged
-(record -> whisper STT -> junk gate -> respond [memory/persona/ladder/safety] -> Kokoro TTS).
+Engine: openWakeWord (https://github.com/dscripka/openWakeWord) — fully FREE, NO account, NO API
+key, NO network for detection. It runs small ONNX models on-device (via the onnxruntime already
+installed for Kokoro). DORMANT is cheap and private: openWakeWord scores the wake word only — NO
+transcription, nothing leaves the machine, ~6% of one CPU core. ACTIVE reuses the EXISTING turn
+pipeline unchanged (record -> whisper STT -> junk gate -> respond [memory/persona/ladder/safety] ->
+Kokoro TTS).
 
-If PICOVOICE_ACCESS_KEY or the .ppn is missing, this prints a clear setup message and falls back to
-the normal always-listening voice loop, so `python wake.py` always does something useful. The
-existing `python voice.py` (push-to-talk voice) and `python nervice.py` (text) REPLs are untouched.
+WAKE WORD: ships with the bundled **"Hey Jarvis"** model (works today, free). A custom "Hey Nervice"
+model can be trained later with openWakeWord's synthetic-data pipeline (heavier: multi-GB
+augmentation data + a training run) and dropped into models/wakeword/ — see models/wakeword/README.
 
-PHONE wake word is a separate future piece (the phone can't run Porcupine from the PWA without a
-native shell / the Picovoice Web SDK) — not attempted here.
+If no model is present, this prints a clear message and falls back to the normal always-listening
+voice loop, so `python wake.py` always does something useful. `python wake.py --setup` downloads the
+free model (one time). Old REPLs (python voice.py, python nervice.py) are untouched.
 
-  Setup (one time):
-    1) Sign up free at https://console.picovoice.ai and copy your AccessKey.
-    2) Train a custom wake word "Hey Nervice" for the Windows platform; download the .ppn.
-    3) Put it at models/wakeword/hey-nervice.ppn
-    4) Add to .env:  PICOVOICE_ACCESS_KEY=your_key_here
-    5) Run:  python wake.py
+PHONE wake word is a separate future piece (the PWA needs the openWakeWord/TF.js web build or a
+native shell) — not attempted here.
 """
 import os
 import re
@@ -30,22 +29,27 @@ import pathlib
 from dotenv import load_dotenv
 load_dotenv()
 
+import numpy as np
+import sounddevice as sd
+
 from app.chat import respond, greeting
-from app.voice import record_until_silence, transcribe, speak, is_junk_transcript, WHISPER_PATH
+from app.voice import record_until_silence, transcribe, speak, is_junk_transcript, WHISPER_PATH, SAMPLE_RATE
 from nervice import store_exchange
 
 USER = "nate"
-_PPN = pathlib.Path("models/wakeword/hey-nervice.ppn")
+_WAKE_DIR = pathlib.Path("models/wakeword")
+WAKE_THRESHOLD = 0.5          # openWakeWord's recommended default for a positive detection
+_FRAME = 1280                 # 80ms @ 16kHz — openWakeWord's preferred chunk
 
 # Editable: phrases that, while ACTIVE, put Nervice back to sleep.
 SLEEP_WORDS = ["stand by", "standby", "goodbye", "good bye", "talk to you later",
                "talk later", "go to sleep", "that's all", "thats all", "go dormant", "never mind"]
-FOLLOWUP_SECONDS = 6      # after a reply, stay active this long waiting for a natural follow-up
+FOLLOWUP_SECONDS = 6          # after a reply, stay active this long waiting for a natural follow-up
 WAKE_CUE = "Yes?"
 SLEEP_ACK = "Standing by."
 
-_SETUP_MSG = ("Wake word disabled — place hey-nervice.ppn in models/wakeword/ and set "
-              "PICOVOICE_ACCESS_KEY in .env to enable it. Running the normal voice loop instead.")
+_SETUP_MSG = ("Wake word disabled — no model (*.onnx) in models/wakeword/. Run  python wake.py --setup  "
+              "to download the free 'hey jarvis' model (no account, no key). Running the normal voice loop instead.")
 
 
 def _norm(s: str) -> str:
@@ -57,42 +61,52 @@ def _is_sleep(text: str) -> bool:
     return any((" " + sw + " ") in n for sw in SLEEP_WORDS)
 
 
-def init_porcupine():
-    """Return (porcupine, recorder) if the key + .ppn are present and Porcupine inits, else None
-    with a specific logged reason. Never raises — a None just means 'run without wake word'."""
-    key = os.environ.get("PICOVOICE_ACCESS_KEY", "").strip()
-    if not key:
-        print("[wake] PICOVOICE_ACCESS_KEY is not set in .env.", file=sys.stderr)
+def _find_model() -> pathlib.Path | None:
+    """Pick the wake-word model in models/wakeword/: prefer a custom 'nervice', then 'jarvis', else
+    the first *.onnx present. None if the dir has no model."""
+    if not _WAKE_DIR.exists():
         return None
-    if not _PPN.exists():
-        print(f"[wake] wake-word file not found at {_PPN}.", file=sys.stderr)
+    onnx = sorted(p for p in _WAKE_DIR.glob("*.onnx"))
+    if not onnx:
+        return None
+    for key in ("nervice", "jarvis"):
+        for p in onnx:
+            if key in p.name.lower():
+                return p
+    return onnx[0]
+
+
+def init_wakeword():
+    """Load the openWakeWord model from models/wakeword/. Returns (model, name, path) or None with a
+    specific logged reason. No API key, no network at detection time. Never raises."""
+    mp = _find_model()
+    if mp is None:
+        print(f"[wake] no wake-word model (*.onnx) found in {_WAKE_DIR}.", file=sys.stderr)
         return None
     try:
-        import pvporcupine
-        from pvrecorder import PvRecorder
-        pp = pvporcupine.create(access_key=key, keyword_paths=[str(_PPN)])
-        rec = PvRecorder(frame_length=pp.frame_length)
-        return pp, rec
+        from openwakeword.model import Model
+        model = Model(wakeword_models=[str(mp)], inference_framework="onnx")
+        name = list(model.models.keys())[0]
+        return model, name, mp
     except Exception as e:
-        print(f"[wake] Porcupine init failed ({repr(e)[:120]}).", file=sys.stderr)
+        print(f"[wake] openWakeWord init failed ({repr(e)[:140]}).", file=sys.stderr)
         return None
 
 
-def wait_for_wake(pp, rec) -> bool | None:
-    """Block (cheaply) until the wake word fires. Returns True on detection, None on interrupt.
-    On-device only — reads tiny frames and runs Porcupine; no transcription, no network."""
+def wait_for_wake(model) -> bool | None:
+    """Block (cheaply) until the wake word scores past the threshold. Returns True on detection,
+    None on interrupt. Fully on-device — scores the wake word only; no transcription, no network."""
     try:
-        rec.start()
-        while True:
-            if pp.process(rec.read()) >= 0:
-                return True
+        if hasattr(model, "reset"):
+            model.reset()                       # clear any buffered scores from a prior session
+        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=_FRAME) as stream:
+            while True:
+                data, _ = stream.read(_FRAME)
+                scores = model.predict(data[:, 0])
+                if scores and max(scores.values()) >= WAKE_THRESHOLD:
+                    return True
     except KeyboardInterrupt:
         return None
-    finally:
-        try:
-            rec.stop()
-        except Exception:
-            pass
 
 
 def _capture_text() -> str:
@@ -133,46 +147,65 @@ async def active_session(window: list, conversation_id: str, pending: set) -> No
         first = False
 
 
-async def wake_main(pp, rec) -> None:
+async def wake_main(model, name) -> None:
     conversation_id = str(uuid.uuid4())
     window: list = []
     pending: set = set()
-    print(f"Nervice dormant (STT: {WHISPER_PATH}). Say “Hey Nervice” to wake me. Ctrl-C to quit.")
+    print(f"Nervice dormant (wake word: {name}, STT: {WHISPER_PATH}). "
+          "Say the wake word to talk. Ctrl-C to quit.")
     try:
         while True:
-            woke = await asyncio.to_thread(wait_for_wake, pp, rec)
+            woke = await asyncio.to_thread(wait_for_wake, model)
             if woke is None:
                 break                               # interrupted
             await active_session(window, conversation_id, pending)
             print("Nervice dormant.")
     finally:
-        try:
-            pp.delete(); rec.delete()
-        except Exception:
-            pass
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _normal_voice_fallback() -> None:
-    """No wake word configured -> behave like the existing always-listening voice loop so
+    """No wake model present -> behave like the existing always-listening voice loop so
     `python wake.py` still works. Delegates to the untouched root voice.py main()."""
-    import voice as _voiceloop   # the existing local voice REPL (root voice.py)
+    import voice as _voiceloop
     await _voiceloop.main()
 
 
+def setup_models() -> None:
+    """One-time, no account: download the free bundled openWakeWord models and place 'hey_jarvis' in
+    models/wakeword/. Needs network once; detection afterward is fully offline."""
+    import app.net  # noqa  (truststore for the one-time download)
+    import shutil
+    import openwakeword
+    import openwakeword.utils
+    _WAKE_DIR.mkdir(parents=True, exist_ok=True)
+    print("Downloading free openWakeWord models (no account/key)…")
+    openwakeword.utils.download_models(["hey_jarvis"])
+    res = pathlib.Path(openwakeword.__file__).parent / "resources" / "models"
+    src = next(iter(res.glob("hey_jarvis*.onnx")), None)
+    if src:
+        shutil.copy(src, _WAKE_DIR / "hey_jarvis.onnx")
+        print(f"Ready: {_WAKE_DIR / 'hey_jarvis.onnx'}. Now run:  python wake.py")
+    else:
+        print("Download ran but hey_jarvis.onnx wasn't found in the openWakeWord resources.")
+
+
 async def main() -> None:
-    pr = init_porcupine()
-    if pr is None:
+    mw = init_wakeword()
+    if mw is None:
         print(_SETUP_MSG)
         await _normal_voice_fallback()
         return
-    pp, rec = pr
-    await wake_main(pp, rec)
+    model, name, _ = mw
+    await wake_main(model, name)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nLater, Nate.")
+    if "--setup" in sys.argv:
+        setup_models()
+    else:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print("\nLater, Nate.")
