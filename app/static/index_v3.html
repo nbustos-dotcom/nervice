@@ -133,7 +133,7 @@
   /* ---------- the arc reactor ---------- */
   .reactor-wrap{display:flex; flex-direction:column; align-items:center; gap:12px; padding:6px 0 4px;}
   .reactor{--amp:0; position:relative; width:clamp(220px,40vw,330px); aspect-ratio:1; cursor:pointer;
-           touch-action:none; user-select:none; -webkit-user-select:none;}
+           touch-action:manipulation; user-select:none; -webkit-user-select:none;}
   .reactor svg{position:absolute; inset:0; width:100%; height:100%; overflow:visible;}
   .reactor .static-track{fill:none; stroke:var(--line);}
   .ring-ticks line{stroke:var(--accent); stroke-width:1;}
@@ -144,10 +144,17 @@
   .core-fill{fill:var(--accent); opacity:calc(.5 + var(--amp)*.5);
              transform-box:fill-box; transform-origin:center; transform:scale(calc(.34 + var(--amp)*.5));}
   .amp-arc{fill:none; stroke:var(--accent); stroke-width:2; stroke-linecap:round; filter:drop-shadow(0 0 4px var(--accent-soft));}
-  .reactor.listening{--rc:#37e0ff;}  .reactor.speaking{--rc:#ff52d6;}  .reactor.thinking{--rc:#ffd24a;}
+  .reactor.listening{--rc:#37e0ff;}  .reactor.speaking{--rc:#ff8a4c;}  .reactor.thinking{--rc:#ffd24a;}
   .reactor.listening .ring-ticks line,.reactor.listening .core,.reactor.listening .core-fill,.reactor.listening .amp-arc{stroke:#37e0ff;fill:#37e0ff;}
-  .reactor.speaking .ring-ticks line,.reactor.speaking .core,.reactor.speaking .core-fill,.reactor.speaking .amp-arc{stroke:#ff52d6;fill:#ff52d6;}
+  .reactor.speaking .ring-ticks line,.reactor.speaking .core,.reactor.speaking .core-fill,.reactor.speaking .amp-arc{stroke:#ff8a4c;fill:#ff8a4c;}  /* warm */
   .reactor.listening .core-glow,.reactor.speaking .core-glow{fill:var(--rc);}
+  /* distinct calm states. listening/speaking are amplitude-driven via --amp (JS); idle + thinking
+     get gentle CSS loops so each state reads differently. */
+  @keyframes rx-breathe{0%,100%{transform:scale(1);opacity:.12}50%{transform:scale(1.07);opacity:.2}}
+  @keyframes rx-shimmer{0%,100%{opacity:.14}50%{opacity:.44}}
+  .reactor.idle .core-glow{animation:rx-breathe 5s ease-in-out infinite;}      /* slow breathe */
+  .reactor.thinking .core-glow{animation:rx-shimmer 1.25s ease-in-out infinite;}  /* steady shimmer */
+  .reactor.listening.hearing .ring-ticks line{stroke-width:1.7;}                /* VAD: actively hearing speech */
   .mic-label{font-family:var(--mono); font-size:10px; letter-spacing:.22em; text-transform:uppercase; color:var(--dim); min-height:14px;}
   .pill{display:inline-flex; align-items:center; gap:8px; padding:10px 18px; min-height:44px; cursor:pointer;
         font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim);
@@ -228,6 +235,7 @@
     .panel{animation:none !important; opacity:1; transform:none;}
     .gval{transition:none !important;}
     .bub{animation:none !important;}
+    .reactor .core-glow{animation:none !important;}   /* no breathe/shimmer loops */
     *{scroll-behavior:auto !important;}
   }
 </style>
@@ -278,7 +286,7 @@
               <circle class="core-fill" cx="100" cy="100" r="30"/>
             </svg>
           </div>
-          <div class="mic-label" id="micLabel" aria-live="polite">hold to talk</div>
+          <div class="mic-label" id="micLabel" aria-live="polite">tap to talk</div>
           <button class="pill" id="convoBtn" aria-pressed="false">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.1a9 9 0 0 1 0 19.8M7 21.9A9 9 0 0 1 7 2.1M12 7v5l3 2"/></svg>
             <span id="convoLabel">Conversation</span>
@@ -388,7 +396,10 @@ const reactor=$('#reactor'), micLabel=$('#micLabel');
 let orbState='idle', ampActive=false, ampSmooth=0, ampRaf=0;
 function setState(s){
   orbState=s; reactor.className='reactor '+s;
-  micLabel.textContent = s==='listening'?'listening':s==='thinking'?'processing':s==='speaking'?'transmitting':(convoMode?'conversation on':'hold to talk');
+  micLabel.textContent = s==='listening'?(convoMode?'listening':'listening · tap to send')
+                       : s==='thinking'?'processing'
+                       : s==='speaking'?'speaking'
+                       : (convoMode?'conversation on':'tap to talk');
   if(s==='listening'||s==='speaking') startAmp(); else { stopAmp(); reactor.style.setProperty('--amp',0); }
 }
 function startAmp(){ if(REDUCED||ampActive) return; ampActive=true; ampRaf=requestAnimationFrame(ampLoop); }
@@ -398,7 +409,11 @@ function ampLoop(){
   const node = orbState==='speaking' ? analyser : orbState==='listening' ? micAnalyser : null;
   let amp=0;
   if(node){ node.getByteFrequencyData(ampData); let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i]; amp=Math.min(1,Math.sqrt(s/ampData.length)/118); }
-  ampSmooth += (amp-ampSmooth)*0.28;
+  // Smoothing/easing so the pulse never twitches on a single sample. SPEAKING is asymmetric —
+  // fast attack (responds to each phrase) + slow release (doesn't collapse to flat between words),
+  // which reads as calm, confident talking. LISTENING tracks the mic responsively both ways.
+  const ease = orbState==='speaking' ? (amp > ampSmooth ? 0.30 : 0.06) : 0.25;
+  ampSmooth += (amp-ampSmooth)*ease;
   reactor.style.setProperty('--amp', ampSmooth.toFixed(3));
   ampRaf=requestAnimationFrame(ampLoop);
 }
@@ -444,7 +459,7 @@ function drawSpectrum(){
 function hud(t){
   requestAnimationFrame(hud);
   const dt=lastT?Math.min(0.05,(t-lastT)/1000):0.016; lastT=t;
-  const amp=ampSmooth, sp=(orbState==='thinking'?2.2:1)*(1+amp*1.6);
+  const amp=ampSmooth, sp=(orbState==='thinking'?2.0:1)*(1+amp*0.9);   // calmer amp->speed coupling
   aOuter += dt*0.18*sp; aMid -= dt*0.32*sp;
   $('#ringOuter').setAttribute('transform',`rotate(${(aOuter*57.2958).toFixed(2)} 100 100)`);
   $('#ringMid').setAttribute('transform',`rotate(${(aMid*57.2958).toFixed(2)} 100 100)`);
@@ -476,7 +491,7 @@ async function enqueueAudio(b64){
   setState('speaking');
   src.onended=()=>{ scheduled--; if(scheduled<=0){ nextStart=0; onSpeakEnd(); } };
 }
-function onSpeakEnd(){ if(convoMode){ setState('idle'); setTimeout(nextTurn,180);} else setState('idle'); }
+function onSpeakEnd(){ if(recording) return; if(convoMode){ setState('idle'); setTimeout(nextTurn,180);} else setState('idle'); }  // don't clobber a tap-armed listen
 
 /* ================= conversation WebSocket(s) (ported) ================= */
 let voiceWS=null, chatWS=null, curBubble=null;
@@ -502,10 +517,15 @@ function openWS(path){
 async function getVoiceWS(){ if(voiceWS&&voiceWS.readyState===1) return voiceWS; voiceWS=await openWS('/ws/voice'); return voiceWS; }
 async function getChatWS(){ if(chatWS&&chatWS.readyState===1) return chatWS; chatWS=await openWS('/ws/chat'); return chatWS; }
 
-/* ================= push-to-talk + conversation (ported) ================= */
-let micStream=null, micSource=null, recorder=null, chunks=[], recording=false, convoMode=false;
-let vadRAF=0, recStart=0, silenceStart=0;
-const SILENCE=0.015, SIL_MS=1200, MIN_MS=700, MAX_MS=30000;
+/* ================= tap-to-talk + hands-free conversation ================= */
+let micStream=null, micSource=null, recorder=null, chunks=[], recording=false, convoMode=false, _discard=false;
+let vadRAF=0, recStart=0, silenceStart=0, voicedMs=0, heard=false, vadLast=0;
+// VAD tuning (hands-free conversation mode). SILENCE = end-of-speech energy floor; SPEECH = energy
+// that counts as real voice; END_SIL_MS = trailing silence before we send (long enough that a
+// mid-sentence pause won't cut him off, short enough that a real stop sends promptly);
+// MIN_SPEECH_MS = drop clips with less voiced audio than this (blips); NO_SPEECH_MS = give up if he
+// never started; MAX_MS = hard cap.
+const SILENCE=0.018, SPEECH=0.040, END_SIL_MS=1350, MIN_SPEECH_MS=400, NO_SPEECH_MS=6000, MAX_MS=30000;
 function pickMime(){ for(const m of ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus']){ try{ if(MediaRecorder.isTypeSupported(m)) return m; }catch(e){} } return ''; }
 async function startRec(auto){
   if(recording) return; if(!getToken()){ openToken(); return; }
@@ -513,7 +533,7 @@ async function startRec(auto){
   try{ micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}}); }
   catch(e){ toast('Mic permission needed'); if(convoMode) stopConvo(); return; }
   try{ if(micAnalyser){ micSource=audioCtx.createMediaStreamSource(micStream); micSource.connect(micAnalyser); } }catch(e){}
-  chunks=[]; const mime=pickMime();
+  chunks=[]; _discard=false; const mime=pickMime();
   try{ recorder = mime? new MediaRecorder(micStream,{mimeType:mime}) : new MediaRecorder(micStream); }
   catch(e){ recorder=new MediaRecorder(micStream); }
   recorder.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
@@ -521,39 +541,45 @@ async function startRec(auto){
   recorder.start(); recording=true; setState('listening');
   if(auto) startVAD();
 }
-function stopRec(){ if(!recording) return; recording=false; stopVAD(); if(recorder&&recorder.state!=='inactive') recorder.stop(); }
+function stopRec(discard){ if(!recording) return; recording=false; _discard=!!discard; stopVAD(); reactor.classList.remove('hearing'); if(recorder&&recorder.state!=='inactive') recorder.stop(); }
 function releaseMic(){ if(micSource){ try{ micSource.disconnect(); }catch(e){} micSource=null; } if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }
 async function onRecStop(){
   releaseMic();
-  if(!chunks.length){ if(convoMode) setTimeout(nextTurn,150); else setState('idle'); return; }
+  if(_discard || !chunks.length){ _discard=false; if(convoMode) setTimeout(nextTurn,150); else setState('idle'); return; }   // blip/empty -> don't send
   const type=(recorder.mimeType||'audio/webm'); const blob=new Blob(chunks,{type}); setState('thinking');
   try{ const ws=await getVoiceWS(); ws.send(await blob.arrayBuffer()); }
   catch(e){ setState('idle'); if(convoMode) stopConvo(); }
 }
 function startVAD(){
-  recStart=Date.now(); silenceStart=0; if(!micAnalyser) return;
+  recStart=Date.now(); vadLast=recStart; silenceStart=0; voicedMs=0; heard=false; if(!micAnalyser) return;
   (function tick(){
     if(!recording) return; micAnalyser.getByteFrequencyData(ampData);
     let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i];
-    const rms=Math.sqrt(s/ampData.length)/255, el=Date.now()-recStart;
-    if(el>=MAX_MS){ stopRec(); return; }
-    if(el<MIN_MS){ silenceStart=0; }
-    else if(rms<SILENCE){ if(!silenceStart) silenceStart=Date.now(); else if(Date.now()-silenceStart>=SIL_MS){ stopRec(); return; } }
-    else silenceStart=0;
+    const rms=Math.sqrt(s/ampData.length)/255, now=Date.now(), dt=now-vadLast, el=now-recStart; vadLast=now;
+    const hearing = rms>=SPEECH;
+    if(hearing){ voicedMs+=dt; heard=true; silenceStart=0; }      // real voice
+    else if(rms<SILENCE && heard){ if(!silenceStart) silenceStart=now; }   // trailing silence (only after he spoke)
+    else if(rms>=SILENCE){ silenceStart=0; }                     // mid-word dip: hold, not a stop
+    reactor.classList.toggle('hearing', hearing);
+    const lbl = hearing ? 'hearing you…' : (heard ? 'go on…' : 'listening');
+    if(lbl!==micLabel.textContent) micLabel.textContent=lbl;     // change-only (no aria-live spam)
+    if(el>=MAX_MS){ stopRec(voicedMs<MIN_SPEECH_MS); return; }                 // hard cap
+    if(!heard && el>=NO_SPEECH_MS){ stopRec(true); return; }                   // never started -> drop
+    if(silenceStart && now-silenceStart>=END_SIL_MS){ stopRec(voicedMs<MIN_SPEECH_MS); return; }  // done -> send (or drop a blip)
     vadRAF=requestAnimationFrame(tick);
   })();
 }
 function stopVAD(){ if(vadRAF) cancelAnimationFrame(vadRAF); vadRAF=0; }
 function nextTurn(){ if(convoMode && !recording && orbState!=='speaking') startRec(true); }
 function startConvo(){ if(!getToken()){openToken(); return;} unlockAudio(); convoMode=true; const b=$('#convoBtn'); b.classList.add('on'); b.setAttribute('aria-pressed','true'); $('#convoLabel').textContent='Conversation ON'; toast('Conversation on — talk, then pause'); nextTurn(); }
-function stopConvo(){ convoMode=false; const b=$('#convoBtn'); b.classList.remove('on'); b.setAttribute('aria-pressed','false'); $('#convoLabel').textContent='Conversation'; stopRec(); releaseMic(); setState('idle'); }
+function stopConvo(){ convoMode=false; const b=$('#convoBtn'); b.classList.remove('on'); b.setAttribute('aria-pressed','false'); $('#convoLabel').textContent='Conversation'; stopRec(true); releaseMic(); setState('idle'); }
 $('#convoBtn').onclick=()=> convoMode? stopConvo() : startConvo();
-reactor.addEventListener('pointerdown', e=>{ e.preventDefault(); if(convoMode) return; startRec(false); });
-reactor.addEventListener('pointerup', e=>{ e.preventDefault(); if(!convoMode) stopRec(); });
-reactor.addEventListener('pointercancel', ()=>{ if(!convoMode) stopRec(); });
-reactor.addEventListener('pointerleave', ()=>{ if(!convoMode && recording) stopRec(); });
-reactor.addEventListener('keydown', e=>{ if((e.key===' '||e.key==='Enter')&&!convoMode&&!recording){ e.preventDefault(); startRec(false);} });
-reactor.addEventListener('keyup', e=>{ if((e.key===' '||e.key==='Enter')&&!convoMode&&recording){ e.preventDefault(); stopRec();} });
+
+/* TAP-TO-TOGGLE: tap once to arm listening, tap again to stop + send. No holding. The Conversation
+   pill owns the mic when hands-free mode is on, so the reactor tap is inert then. */
+function toggleTalk(){ if(convoMode) return; if(recording) stopRec(false); else startRec(false); }
+reactor.addEventListener('click', e=>{ e.preventDefault(); toggleTalk(); });
+reactor.addEventListener('keydown', e=>{ if((e.key===' '||e.key==='Enter')&&!convoMode){ e.preventDefault(); toggleTalk(); } });
 reactor.addEventListener('contextmenu', e=>e.preventDefault());
 async function sendText(){
   const inp=$('#text'); const msg=inp.value.trim(); if(!msg) return; inp.value='';
