@@ -4,6 +4,7 @@ import os
 import sys
 import asyncio
 import pathlib
+import contextvars
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -94,19 +95,45 @@ async def _ask_one(task: str, system: str | None, name: str, config_dir: pathlib
     return out
 
 
-async def ask_claude(task: str, system: str | None = None) -> str:
-    """Send a hard task to Claude via the account ladder: try each account in CLAUDE_ACCOUNTS
-    (Pro, then Max) in order, advancing on ANY failure. Text in, text out, no tools.
-    Raises AllClaudeExhausted if every account fails.
+# Per-turn Claude context, set by the turn's entry point (chat_with_tools) so the consult TOOL —
+# invoked generically by the tool model with only its synthesized arg — can still thread the SAME
+# system + conversation window the Groq path sees. {system, messages, voice_mode} or None.
+claude_turn_ctx: "contextvars.ContextVar" = contextvars.ContextVar("claude_turn_ctx", default=None)
+
+
+def compose_claude_prompt(messages: list) -> str:
+    """SINGLE source of truth for what a Claude rung sees as the conversation. The Agent SDK takes
+    one prompt string (no messages array), so render the recent window + current user turn — the
+    exact same window the Groq path receives, in order — into a transcript and ask Claude to
+    continue it. This is what kills the mid-conversation amnesia: every rung sends this."""
+    lines = []
+    for m in messages or []:
+        c = (m.get("content") or "").strip()
+        if not c:
+            continue
+        lines.append(("User: " if m.get("role") == "user" else "You (Nervice): ") + c)
+    body = "\n".join(lines)
+    return (body + "\n\nContinue as Nervice: answer the user's latest message in the context of the "
+            "conversation above. The conversation is right here — never claim you lack context.")
+
+
+async def ask_claude(task: str, system: str | None = None, messages: list | None = None) -> str:
+    """Send a task to Claude via the account ladder: try each account in CLAUDE_ACCOUNTS (Pro,
+    then Max) in order, advancing on ANY failure. Raises AllClaudeExhausted if every account fails.
+
+    If `messages` (the recent window + current user turn, same shape the Groq path gets) is given,
+    Claude receives the FULL conversation via compose_claude_prompt; otherwise the bare `task`
+    (grounded synthesis from web sources, or tests, pass a self-contained string and no messages).
 
     HONEST NOTE: the Agent SDK's failure signals for 'out of quota' are not clean, so this is a
     'try Pro; on ANY failure try Max' ladder — it does not reliably distinguish a usage cap from
     an auth glitch or a transient SDK error. That's fine here: the next account is tried regardless,
     and if all fail the caller shows the friendly limit message."""
+    prompt = compose_claude_prompt(messages) if messages else task
     last = None
     for name, config_dir in CLAUDE_ACCOUNTS:
         try:
-            out = await _ask_one(task, system, name, config_dir)
+            out = await _ask_one(prompt, system, name, config_dir)
             if (name, config_dir) != CLAUDE_ACCOUNTS[0]:
                 print(f"[claude ladder] answered via fallback account '{name}'", file=sys.stderr)
             return out

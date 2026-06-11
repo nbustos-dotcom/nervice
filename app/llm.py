@@ -45,12 +45,16 @@ LADDER_EXHAUSTED_MSG = ("I've hit my usage limits for now — they reset shortly
                         "Try me again in a bit.")
 
 
-async def _claude_fallback(prompt: str, system: str | None = None) -> str | None:
+async def _claude_fallback(prompt: str | None = None, system: str | None = None,
+                           messages: list | None = None) -> str | None:
     """Groq is capped on a turn that would normally use it — answer via Claude (the Pro -> Max
-    account ladder) instead of failing. Returns Claude's answer, or None if Claude is ALSO
-    unavailable (the caller then shows LADDER_EXHAUSTED_MSG)."""
+    account ladder) instead of failing. Pass `messages` (the window + current user turn) so Claude
+    gets the SAME conversation context Groq would have, threaded by compose_claude_prompt — this is
+    what prevents mid-conversation amnesia. `prompt` alone (no messages) is for the grounded path,
+    which sends a self-contained sources+question string and must NOT thread the chat window.
+    Returns Claude's answer, or None if Claude is ALSO unavailable (caller shows the limit message)."""
     try:
-        return await ask_claude(prompt, system=system)
+        return await ask_claude(prompt or "", system=system, messages=messages)
     except Exception as e:   # AllClaudeExhausted, or any SDK/auth error
         print(f"[groq->claude fallback unavailable] {repr(e)[:120]}", file=sys.stderr)
         return None
@@ -159,19 +163,25 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
     fall back to Claude (the Pro -> Max account ladder) rather than failing — cheapest-capable
     Groq first, Claude when Groq is out. If a FORCED Claude tool (the hard route) finds every
     account exhausted, return the friendly limit message. Nothing here 500s on a rate limit."""
+    # Publish this turn's context so the consult TOOL (invoked generically by the tool model) threads
+    # the same system + window as everything else. Reset in finally so it never leaks across turns.
+    from app.agent import claude_turn_ctx
+    token = claude_turn_ctx.set({"system": system, "messages": list(messages), "voice_mode": voice_mode})
     try:
         return await _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds,
                                            force_tool, voice_mode)
-    except RateLimitError as e:
-        # Groq is capped — answer the user's turn via Claude instead of dying on the limit.
+    except RateLimitError:
+        # Groq is capped — answer the user's turn via Claude instead of dying on the limit, WITH the
+        # full conversation window (not just the bare last message) so Claude doesn't lose context.
         print("[groq 429 in chat_with_tools -> Claude fallback]", file=sys.stderr)
-        question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        ans = await _claude_fallback(question, system=system)
+        ans = await _claude_fallback(system=system, messages=messages)
         return ans if ans else LADDER_EXHAUSTED_MSG
     except AllClaudeExhausted:
         # the hard route forced Claude and every account is out — friendly, never a crash
         print("[claude ladder exhausted in chat_with_tools]", file=sys.stderr)
         return LADDER_EXHAUSTED_MSG
+    finally:
+        claude_turn_ctx.reset(token)
 
 
 async def _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds=4,

@@ -45,7 +45,7 @@ def groq_restore():
 async def main():
     # ---- t1: Groq 429 on a simple turn -> falls back to Claude, returns a REAL answer ----
     groq_429_on()
-    async def fake_claude(prompt, system=None):
+    async def fake_claude(prompt, system=None, messages=None):
         return "Here's the answer from Claude (fallback worked)."
     llm.ask_claude = fake_claude
     try:
@@ -96,7 +96,7 @@ async def main():
     # return 200 instead of 500 (the endpoints do `reply = await respond(...)`). We stay on the main
     # loop (no TestClient second loop) and prove the reply is synthesizable so voice speaks it.
     groq_429_on()
-    async def all_out(prompt, system=None):
+    async def all_out(prompt, system=None, messages=None):
         raise AllClaudeExhausted("simulated: all accounts out")
     llm.ask_claude = all_out
     try:
@@ -126,7 +126,7 @@ async def main():
     # collector proves the WS path now falls back to Claude on a Groq cap, same as REST. No TestClient
     # (it spins a 2nd event loop and crashes asyncpg) — we stay on the main loop.
     groq_429_on()
-    async def claude_ws(prompt, system=None):
+    async def claude_ws(prompt, system=None, messages=None):
         return "PARIS_VIA_CLAUDE — the fallback answered this streamed turn."
     llm.ask_claude = claude_ws
     frames6 = []
@@ -144,7 +144,7 @@ async def main():
 
     # ---- t7: WS streaming path, EVERYTHING exhausted -> friendly message, no crash (no 500 on WS) ----
     groq_429_on()
-    async def all_out_ws(prompt, system=None):
+    async def all_out_ws(prompt, system=None, messages=None):
         raise AllClaudeExhausted("simulated: all accounts out (ws)")
     llm.ask_claude = all_out_ws
     frames7 = []

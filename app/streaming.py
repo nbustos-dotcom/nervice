@@ -220,10 +220,12 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         except RateLimitError:
             # Groq daily cap hit at the streaming create (before any token/audio went out) — ladder
             # to Claude (Pro -> Max), exactly like the REST path, instead of just announcing the cap.
-            # Claude's answer (or the friendly exhausted message if Claude is ALSO down) is delivered
-            # as one text+audio block below so the phone speaks it. Nothing streamed yet -> no double-speak.
+            # Pass the full window + this user turn so Claude answers WITH conversation context (the
+            # mid-conversation amnesia fix) — not just the bare message. Delivered as one text+audio
+            # block below so the phone speaks it. Nothing streamed yet -> no double-speak.
             print("[groq 429 in stream_reply -> claude ladder]", file=sys.stderr)
-            ans = await llm._claude_fallback(text, system)
+            ans = await llm._claude_fallback(
+                system=system, messages=window + [{"role": "user", "content": text}])
             reply, pivot, rate_limited = (ans or llm.LADDER_EXHAUSTED_MSG), None, True
         if rate_limited:
             pass                          # reply set, streamed stays False -> delivered below

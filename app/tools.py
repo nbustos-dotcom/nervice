@@ -9,7 +9,7 @@ import httpx
 import trafilatura
 from ddgs import DDGS
 
-from app.agent import ask_claude, agent_task, browse_agent
+from app.agent import ask_claude, agent_task, browse_agent, claude_turn_ctx
 import app.agent as agent_mod
 from app import selfmod
 from app import weather as weather_mod
@@ -74,6 +74,12 @@ async def consult_claude(task: str) -> str:
         import os; os.makedirs("logs", exist_ok=True)
         with open("logs/claude_calls.log", "a", encoding="utf-8") as f:
             f.write(f"{ts}\t{task[:300]}\n")
+    # Thread the turn's real system (persona + SYSTEM FACTS + safety floor + memories, + voice
+    # addendum) and conversation window so the hard route answers WITH context, not from the bare
+    # synthesized question. Falls back to the plain task if no turn context is set (e.g. direct call).
+    ctx = claude_turn_ctx.get()
+    if ctx and ctx.get("messages"):
+        return await ask_claude(task, system=ctx.get("system"), messages=ctx.get("messages"))
     return await ask_claude(task)
 
 
