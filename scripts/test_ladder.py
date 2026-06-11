@@ -12,6 +12,7 @@ import app.llm as llm
 import app.agent as agent
 import app.tools as tools
 from app.chat import respond
+from app.streaming import stream_reply
 from app.llm import chat_with_tools, LADDER_EXHAUSTED_MSG
 from app.agent import AllClaudeExhausted
 
@@ -119,6 +120,49 @@ async def main():
     R["t5 normal groq works"] = bool(reply) and LADDER_EXHAUSTED_MSG not in reply and len(reply.split()) > 3
     print(f"t5: reply={reply[:80]!r}")
     print("t5", "PASS" if R["t5 normal groq works"] else "FAIL")
+
+    # ---- t6: WS streaming path, Groq 429 on a SIMPLE turn -> ladders to Claude (the streaming fix) ----
+    # stream_reply is exactly what /ws/chat and /ws/voice call. Driving it directly with a frame
+    # collector proves the WS path now falls back to Claude on a Groq cap, same as REST. No TestClient
+    # (it spins a 2nd event loop and crashes asyncpg) — we stay on the main loop.
+    groq_429_on()
+    async def claude_ws(prompt, system=None):
+        return "PARIS_VIA_CLAUDE — the fallback answered this streamed turn."
+    llm.ask_claude = claude_ws
+    frames6 = []
+    async def send6(f): frames6.append(f)
+    cid6 = "ladder-" + uuid.uuid4().hex[:8]; cids.append(cid6)
+    try:
+        reply6 = await stream_reply("nate", "what's the capital of France?", [], send6, False, cid6)
+    finally:
+        groq_restore()
+    in_frames = any("PARIS_VIA_CLAUDE" in str(f.get("text", "")) or "PARIS_VIA_CLAUDE" in str(f.get("reply", ""))
+                    for f in frames6)
+    R["t6 ws groq429->claude"] = ("PARIS_VIA_CLAUDE" in (reply6 or "") and in_frames)
+    print(f"t6: ws reply={reply6[:54]!r}  spoken_in_frames={in_frames}")
+    print("t6", "PASS" if R["t6 ws groq429->claude"] else "FAIL")
+
+    # ---- t7: WS streaming path, EVERYTHING exhausted -> friendly message, no crash (no 500 on WS) ----
+    groq_429_on()
+    async def all_out_ws(prompt, system=None):
+        raise AllClaudeExhausted("simulated: all accounts out (ws)")
+    llm.ask_claude = all_out_ws
+    frames7 = []
+    async def send7(f): frames7.append(f)
+    cid7 = "ladder-" + uuid.uuid4().hex[:8]; cids.append(cid7)
+    crashed = False
+    try:
+        reply7 = await stream_reply("nate", "hey, are you there?", [], send7, False, cid7)
+    except Exception as e:
+        crashed = True; reply7 = repr(e)
+    finally:
+        groq_restore()
+    done7 = [f for f in frames7 if f.get("type") == "done"]
+    R["t7 ws exhausted->friendly,no500"] = (
+        not crashed and reply7 == LADDER_EXHAUSTED_MSG and bool(done7)
+        and done7[-1].get("reply") == LADDER_EXHAUSTED_MSG)
+    print(f"t7: ws crashed={crashed}  reply={reply7[:40]!r}  done_matches={bool(done7) and done7[-1].get('reply')==LADDER_EXHAUSTED_MSG}")
+    print("t7", "PASS" if R["t7 ws exhausted->friendly,no500"] else "FAIL")
 
     # ---- cleanup ----
     import app.api as api2, app.streaming as streaming
