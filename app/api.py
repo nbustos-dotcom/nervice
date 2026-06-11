@@ -19,6 +19,7 @@ import tempfile
 import datetime
 import importlib
 import threading
+import subprocess
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 
@@ -127,6 +128,14 @@ async def index_v2():
     return FileResponse(str(_STATIC / "index_v2.html"))
 
 
+@app.get("/v3")
+async def index_v3():
+    # JARVIS HUD command center. Like / and /v2, served UNauthenticated (inert without a token);
+    # every data route it calls (/system, /weather, /nervice-stats, /activity, /news, /health,
+    # /ws/*) keeps its Bearer auth.
+    return FileResponse(str(_STATIC / "index_v3.html"))
+
+
 async def auth(authorization: str = Header(None)):
     """Bearer-token gate on every route. Constant-time compare; reject missing/wrong with 401."""
     if not _TOKEN:
@@ -173,11 +182,136 @@ async def health():
 
 @app.get("/weather", dependencies=[Depends(auth)])
 async def weather():
-    """Real current weather for the hardcoded Oswego coords (Open-Meteo, keyless). Reuses the
-    same function the chat tool uses. {available:false} when the upstream call fails."""
-    from app.weather import get_weather_data
-    d = await get_weather_data()
+    """Real current weather + multi-day forecast for the hardcoded Oswego coords (Open-Meteo,
+    keyless). {available:false} when the upstream call fails — never fabricated."""
+    from app.weather import get_forecast
+    d = await get_forecast(7)
     return {"available": bool(d), **(d or {})}
+
+
+# ----------------------------- /system : real machine telemetry -----------------------------
+_net_prev = {"t": None, "sent": 0, "recv": 0}
+
+
+def _gpu_telemetry() -> dict:
+    """RTX 4060 stats via nvidia-smi (CSV). {available:false} if the tool/GPU isn't reachable."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3).stdout.strip().splitlines()[0]
+        u, vu, vt, tp = [x.strip() for x in out.split(",")]
+        return {"available": True, "util": int(u), "vram_used": int(vu), "vram_total": int(vt), "temp": int(tp)}
+    except Exception:
+        return {"available": False}
+
+
+def _system_telemetry() -> dict:
+    """Synchronous psutil snapshot (run in a thread). Per-core CPU over a short real sample; RAM,
+    swap, disk for C:, network up/down RATES (delta since last call), uptime, process count."""
+    import psutil
+    per = psutil.cpu_percent(interval=0.15, percpu=True)
+    vm = psutil.virtual_memory()
+    sw = psutil.swap_memory()
+    du = psutil.disk_usage("C:\\")
+    n = psutil.net_io_counters()
+    now = time.time()
+    up_bps = down_bps = 0.0
+    if _net_prev["t"] is not None:
+        dt = max(0.001, now - _net_prev["t"])
+        up_bps = max(0, n.bytes_sent - _net_prev["sent"]) / dt
+        down_bps = max(0, n.bytes_recv - _net_prev["recv"]) / dt
+    _net_prev.update(t=now, sent=n.bytes_sent, recv=n.bytes_recv)
+    return {
+        "cpu": {"total": round(sum(per) / len(per), 1), "cores": [round(x, 1) for x in per], "count": len(per)},
+        "ram": {"percent": vm.percent, "used": vm.used, "total": vm.total},
+        "swap": {"percent": sw.percent},
+        "disk": {"percent": du.percent, "used": du.used, "total": du.total},
+        "net": {"up_bps": round(up_bps), "down_bps": round(down_bps)},
+        "uptime_s": int(now - psutil.boot_time()),
+        "processes": len(psutil.pids()),
+        "gpu": _gpu_telemetry(),
+    }
+
+
+@app.get("/system", dependencies=[Depends(auth)])
+async def system():
+    """Real machine telemetry — psutil (CPU/RAM/swap/disk/net/uptime/procs) + nvidia-smi (GPU).
+    Cheap to poll every ~2s; the CPU sample blocks ~0.15s in a worker thread, not the loop."""
+    return await asyncio.to_thread(_system_telemetry)
+
+
+@app.get("/nervice-stats", dependencies=[Depends(auth)])
+async def nervice_stats():
+    """Nervice's own real internals: active memory count, total messages stored, today's messages,
+    and the live voice engine + warm state. Only what is genuinely queryable."""
+    from sqlalchemy import select, func
+    from app.db import AsyncSessionLocal
+    from app.models import Memory, Message
+    midnight = datetime.datetime.now(_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as s:
+        memories = (await s.execute(select(func.count()).select_from(Memory).where(
+            Memory.user_id == USER, Memory.is_active == True))).scalar()      # noqa: E712
+        messages = (await s.execute(select(func.count()).select_from(Message).where(
+            Message.user_id == USER))).scalar()
+        today = (await s.execute(select(func.count()).select_from(Message).where(
+            Message.user_id == USER, Message.created_at >= midnight))).scalar()
+    voice = _voice_state["status"]
+    if voice == "warm" and "app.voice" in sys.modules:
+        v = sys.modules["app.voice"]
+        engine, stt = v.TTS_ENGINE, v.WHISPER_PATH
+    else:
+        engine, stt = "kokoro", "faster-whisper base.en"
+    return {"memories": int(memories or 0), "messages": int(messages or 0), "today": int(today or 0),
+            "voice": voice, "engine": engine, "stt": stt}
+
+
+# ----------------------------- /news : optional, BBC RSS, real headlines only -----------------------------
+_news_cache = {"t": 0.0, "items": []}
+
+
+def _rss_age(pubdate: str) -> str:
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(pubdate)
+        s = max(0, int(time.time() - dt.timestamp()))
+        if s < 3600:
+            return f"{s // 60}m"
+        if s < 86400:
+            return f"{s // 3600}h"
+        return f"{s // 86400}d"
+    except Exception:
+        return ""
+
+
+async def _fetch_news() -> list[dict]:
+    if time.time() - _news_cache["t"] < 600 and _news_cache["items"]:
+        return _news_cache["items"]
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=6, follow_redirects=True) as c:
+            r = await c.get("https://feeds.bbci.co.uk/news/rss.xml", headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return _news_cache["items"]
+        items = []
+        for it in re.findall(r"<item>(.*?)</item>", r.text, re.S)[:8]:
+            tm = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", it, re.S)
+            pd = re.search(r"<pubDate>(.*?)</pubDate>", it, re.S)
+            if tm and tm.group(1).strip():
+                items.append({"title": " ".join(tm.group(1).split())[:110],
+                              "ago": _rss_age(pd.group(1) if pd else "")})
+        if items:
+            _news_cache.update(t=time.time(), items=items)
+        return items
+    except Exception:
+        return _news_cache["items"]   # serve last-good on a hiccup; never fabricate
+
+
+@app.get("/news", dependencies=[Depends(auth)])
+async def news():
+    """Real top headlines (BBC News RSS, keyless, cached 10 min). source labels the origin so the
+    UI never implies these are Nervice's words. Empty list on persistent failure — no fake items."""
+    return {"source": "BBC News", "items": await _fetch_news()}
 
 
 # ---- activity feed: REAL recent activity merged from three live sources, newest first ----

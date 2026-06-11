@@ -53,3 +53,35 @@ async def get_weather() -> str | None:
     if not d:
         return None
     return f"{d['temp']}°F and {d['condition']}, high {d['hi']} low {d['lo']}"
+
+
+async def get_forecast(days: int = 7) -> dict | None:
+    """Current conditions + a real multi-day daily forecast (one keyless Open-Meteo call), or None
+    on failure. Shape: {temp, code, condition, hi, lo, forecast:[{date, day, code, condition, hi, lo}]}."""
+    import datetime
+    try:
+        async with httpx.AsyncClient(timeout=6) as client:
+            r = await client.get("https://api.open-meteo.com/v1/forecast", params={
+                "latitude": _LAT, "longitude": _LON,
+                "current": "temperature_2m,weather_code",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+                "temperature_unit": "fahrenheit",
+                "timezone": "America/Chicago",
+                "forecast_days": days,
+            })
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        cur, dl = d["current"], d["daily"]
+        fc = []
+        for i, iso in enumerate(dl["time"]):
+            code = int(dl["weather_code"][i])
+            fc.append({"date": iso, "day": datetime.date.fromisoformat(iso).strftime("%a"),
+                       "code": code, "condition": _code_word(code),
+                       "hi": round(dl["temperature_2m_max"][i]),
+                       "lo": round(dl["temperature_2m_min"][i])})
+        return {"temp": round(cur["temperature_2m"]),
+                "code": int(cur["weather_code"]), "condition": _code_word(int(cur["weather_code"])),
+                "hi": fc[0]["hi"], "lo": fc[0]["lo"], "forecast": fc}
+    except Exception:
+        return None
