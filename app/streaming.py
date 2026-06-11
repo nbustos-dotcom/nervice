@@ -25,6 +25,7 @@ import app.llm as llm
 import app.tools as tools
 from groq import RateLimitError
 from app import computer
+from app import skills
 from app.agent import current_rung
 from app.turnlog import log_turn
 from app.router import classify
@@ -214,6 +215,20 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         _store(user_id, conversation_id, text, pending)
         log_turn("control", "control", time.monotonic() - t0, "ws")
         return pending
+
+    # user-defined skills run BEFORE normal routing (saved trigger -> run; create/list/delete here).
+    # Delivered as one complete text+audio block, like a pending/tool turn.
+    skill_reply = await skills.handle(user_id, text)
+    if skill_reply is not None:
+        await send({"type": "text", "text": skill_reply})
+        if voice:
+            b64 = await asyncio.to_thread(_synth_full_b64, skill_reply)
+            if b64:
+                await send({"type": "audio", "wav_base64": b64})
+        await send({"type": "done", "reply": skill_reply})
+        _store(user_id, conversation_id, text, skill_reply)
+        log_turn("skill", "skill", time.monotonic() - t0, "ws")
+        return skill_reply
 
     system, route = await asyncio.gather(
         build_system_prompt(user_id, text, voice_mode=voice), classify(text))

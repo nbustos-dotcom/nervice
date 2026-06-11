@@ -15,6 +15,7 @@ from app.tools import TOOLS, TOOL_FUNCS
 from app.memory import remember
 from app.weather import get_weather
 from app import computer
+from app import skills
 from app.db import AsyncSessionLocal
 from app.models import Message
 
@@ -90,6 +91,14 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         print(pending)
         log_turn("control", "control", time.monotonic() - t0, "rest")
         return pending
+
+    # user-defined skills run BEFORE normal routing: a saved trigger phrase runs the skill, and
+    # create/list/delete are handled here too. None -> route normally.
+    skill_reply = await skills.handle(user_id, user_message)
+    if skill_reply is not None:
+        print(skill_reply)
+        log_turn("skill", "skill", time.monotonic() - t0, "rest")
+        return skill_reply
 
     # memory retrieval and router classification are independent — overlap them so the turn
     # pays max(retrieve, classify) instead of the sum (classify alone measured 0.3-0.8s)
