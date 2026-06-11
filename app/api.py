@@ -458,6 +458,13 @@ async def voice(audio: UploadFile = File(...), conversation_id: str | None = For
               file=sys.stderr)
         return {"transcript": "", "reply": "(no speech detected)", "conversation_id": cid, "audio_wav_base64": ""}
 
+    if v.is_junk_transcript(transcript):
+        # junk (stray pronoun/filler/half-word) — speak a brief nudge; NO turn, NO memory, NO ladder.
+        nudge = "Didn't catch that — say it again?"
+        print(f"[voice junk-gate] transcript={transcript!r} -> nudge (no turn)", file=sys.stderr)
+        return {"transcript": transcript, "reply": nudge, "conversation_id": cid,
+                "audio_wav_base64": v.synth_to_wav_b64(nudge)}
+
     window = _windows.setdefault(cid, [])
     t0 = time.time()
     try:
@@ -566,6 +573,16 @@ async def ws_voice(ws: WebSocket):
             await send({"type": "transcript", "text": transcript})
             if not transcript.strip():
                 await send({"type": "done", "reply": ""})
+                continue
+            if v.is_junk_transcript(transcript):
+                # junk — speak a brief nudge; NO turn, NO memory, NO ladder, window untouched.
+                nudge = "Didn't catch that — say it again?"
+                print(f"[voice junk-gate] transcript={transcript!r} -> nudge (no turn)", file=sys.stderr)
+                await send({"type": "text", "text": nudge})
+                b64 = await asyncio.to_thread(v.synth_to_wav_b64, nudge)
+                if b64:
+                    await send({"type": "audio", "wav_base64": b64})
+                await send({"type": "done", "reply": nudge})
                 continue
             window = _windows.setdefault(cid, [])
             reply = await stream_reply(USER, transcript, window, send, voice=True,

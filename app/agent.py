@@ -100,6 +100,11 @@ async def _ask_one(task: str, system: str | None, name: str, config_dir: pathlib
 # system + conversation window the Groq path sees. {system, messages, voice_mode} or None.
 claude_turn_ctx: "contextvars.ContextVar" = contextvars.ContextVar("claude_turn_ctx", default=None)
 
+# Which rung answered THIS turn, for the per-turn telemetry line. Entry points reset it to "groq";
+# ask_claude sets it to "claude-<account>" when an account actually answers (consult route OR a
+# Groq-429 fallback). The entry point reads it after the turn to log the escalation.
+current_rung: "contextvars.ContextVar" = contextvars.ContextVar("current_rung", default="groq")
+
 
 def compose_claude_prompt(messages: list) -> str:
     """SINGLE source of truth for what a Claude rung sees as the conversation. The Agent SDK takes
@@ -134,6 +139,7 @@ async def ask_claude(task: str, system: str | None = None, messages: list | None
     for name, config_dir in CLAUDE_ACCOUNTS:
         try:
             out = await _ask_one(prompt, system, name, config_dir)
+            current_rung.set(f"claude-{name}")          # this turn escalated to Claude (which account)
             if (name, config_dir) != CLAUDE_ACCOUNTS[0]:
                 print(f"[claude ladder] answered via fallback account '{name}'", file=sys.stderr)
             return out

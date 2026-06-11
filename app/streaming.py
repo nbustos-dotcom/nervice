@@ -16,6 +16,7 @@ Frame types (all JSON): {type:"transcript"} {type:"ack"} {type:"text"} {type:"au
 import io
 import re
 import sys
+import time
 import wave
 import base64
 import asyncio
@@ -24,6 +25,8 @@ import app.llm as llm
 import app.tools as tools
 from groq import RateLimitError
 from app import computer
+from app.agent import current_rung
+from app.turnlog import log_turn
 from app.router import classify
 from app.chat import build_system_prompt, execute_route, save_exchange, _ACK
 
@@ -196,6 +199,8 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
                        conversation_id: str) -> str:
     """One full streamed turn. `send` is an async callable taking one JSON-able frame dict.
     Returns the final reply; the caller advances its window. Persistence fires here."""
+    t0 = time.monotonic()
+    current_rung.set("groq")             # reset per turn; ask_claude flips it on a Claude escalation
     # A pending local-action confirmation answers the prior RISKY ask — never streamed, never
     # re-classified. Delivered as one complete text+audio reply, same as a tool turn.
     pending = computer.resolve_pending(user_id, text)
@@ -207,6 +212,7 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
                 await send({"type": "audio", "wav_base64": b64})
         await send({"type": "done", "reply": pending})
         _store(user_id, conversation_id, text, pending)
+        log_turn("control", "control", time.monotonic() - t0, "ws")
         return pending
 
     system, route = await asyncio.gather(
@@ -262,4 +268,6 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
 
     await send({"type": "done", "reply": reply or ""})
     _store(user_id, conversation_id, text, reply or "")
+    rung = "exhausted" if reply == llm.LADDER_EXHAUSTED_MSG else current_rung.get()
+    log_turn(route, rung, time.monotonic() - t0, "ws")
     return reply or ""

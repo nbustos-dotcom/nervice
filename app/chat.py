@@ -1,12 +1,15 @@
 import re
 import sys
+import time
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.persona import PERSONA
 from app.retrieval import retrieve
-from app.llm import chat_stream, chat_with_tools, TOOL_TIMEOUTS, TIMEOUT_MSG
+from app.agent import current_rung
+from app.turnlog import log_turn
+from app.llm import chat_stream, chat_with_tools, TOOL_TIMEOUTS, TIMEOUT_MSG, LADDER_EXHAUSTED_MSG
 from app.router import classify
 from app.tools import TOOLS, TOOL_FUNCS
 from app.memory import remember
@@ -77,11 +80,14 @@ async def execute_route(user_id, system, route, user_message, window, voice_mode
 
 
 async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
+    t0 = time.monotonic()
+    current_rung.set("groq")             # reset per turn; ask_claude flips it on a Claude escalation
     # A pending local-action confirmation takes precedence over routing: a "yes"/"no" here answers
     # the prior RISKY ask, never gets classified as a fresh turn.
     pending = computer.resolve_pending(user_id, user_message)
     if pending is not None:
         print(pending)
+        log_turn("control", "control", time.monotonic() - t0, "rest")
         return pending
 
     # memory retrieval and router classification are independent — overlap them so the turn
@@ -98,6 +104,8 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
     reply = await execute_route(user_id, system, route, user_message, window,
                                 voice_mode=voice_mode, on_ack=_ack)
     print(reply)
+    rung = "exhausted" if reply == LADDER_EXHAUSTED_MSG else current_rung.get()
+    log_turn(route, rung, time.monotonic() - t0, "rest")
     return reply
 
 

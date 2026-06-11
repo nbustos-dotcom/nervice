@@ -278,6 +278,57 @@ def transcribe_file(path: str) -> str:
     return "".join(s.text for s in segments).strip()
 
 
+# --- junk-transcript gate (voice) ----------------------------------------------------------------
+# Whisper sometimes emits a stray pronoun/filler from noise or a half-word. Don't spend a full turn
+# (LLM + memory write + the Claude ladder) on it — a garbled clip once spawned a selfmod proposal,
+# and a lone "You" got a confident reply. Conservative: real short commands/confirmations still pass.
+_VOICE_OK = {"yes", "no", "ok", "okay", "yep", "yeah", "nope", "sure", "stop", "go", "wait", "next",
+             "back", "up", "down", "open", "close", "mute", "play", "pause", "hi", "hey", "help",
+             "cancel", "done", "more", "louder", "quieter", "repeat", "again", "now", "off", "on",
+             "left", "right", "skip", "send"}
+_VOICE_FILLER = {"you", "uh", "um", "the", "a", "an", "hmm", "mm", "mhm", "huh", "er", "ah", "oh",
+                 "i", "it", "that", "this", "and", "so", "to", "of", "is", "in", "me", "my", "he",
+                 "she", "they", "we", "us", "your", "like", "well", "yo", "ha", "hm", "but", "or"}
+# Whole-phrase junk: faster-whisper's well-known silence/noise hallucinations (it emits these video
+# sign-offs on near-silence) plus multi-word fillers the per-word rule can't catch. Matched against
+# the normalized transcript. Kept to UNAMBIGUOUS non-commands — real answers like "I don't know" /
+# "I think so" are deliberately NOT here so they still pass.
+_VOICE_JUNK_PHRASES = {
+    "thank you", "thanks", "thank you very much", "thank you so much", "thank you for watching",
+    "thanks for watching", "thanks for watching the video", "please subscribe", "subscribe",
+    "like and subscribe", "you know", "i mean", "bye bye", "okay bye", "see you", "see you next time",
+}
+
+
+def is_junk_transcript(text: str) -> bool:
+    """True if a transcript isn't worth running a turn on. Conservative by design: short REAL
+    commands/confirmations ('yes', 'no', 'stop', 'open notepad') pass. Junk = empty, <3 non-command
+    chars, a known whisper hallucination phrase, or an utterance whose words are ALL fillers."""
+    s = (text or "").strip().lower().strip(".,!?;:").strip()
+    if not s:
+        return True
+    if s in _VOICE_OK:                 # known short command/confirmation -> real
+        return False
+    if s in _VOICE_JUNK_PHRASES:       # known whisper hallucination / multi-word filler
+        return True
+    words = s.split()
+    if len(s) < 3:                     # too short and not a known command
+        return True
+    if words and all(w in _VOICE_FILLER for w in words):   # every word is filler (1+ words)
+        return True
+    return False
+
+
+def synth_to_wav_b64(text: str) -> str:
+    """Synthesize text -> base64-encoded WAV string (for the junk-gate spoken nudge)."""
+    import io, wave, base64
+    pcm, sr = synth_to_pcm(text)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr); w.writeframes(pcm.tobytes())
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def synth_to_pcm(text: str):
     """Synthesize a full reply to one int16 PCM array (+ sample rate) — same engine and cleaning
     as speak(), but rendered to a buffer (for the API to wrap as a WAV) instead of the speakers."""
