@@ -79,12 +79,12 @@
   .hero{display:flex; flex-direction:column; align-items:center; justify-content:center;
         gap:clamp(14px,2.4vh,26px); padding:clamp(8px,3vh,30px) 0;}
 
-  /* ---------- the orb: holographic wireframe globe ---------- */
+  /* ---------- the orb: 3D glowing particle sphere ---------- */
   .orb{--amp:0; position:relative; width:clamp(190px,52vw,290px); height:clamp(190px,52vw,290px);
        display:grid; place-items:center; cursor:pointer; touch-action:none; user-select:none;
        -webkit-user-select:none;}
   .orb>*{grid-area:1/1; pointer-events:none;}
-  /* soft ambient halo behind the globe — the wireframe sits in atmosphere */
+  /* soft ambient halo behind the sphere — the particle cloud sits in atmosphere */
   .orb-glow{width:122%; height:122%; border-radius:50%;
             background:radial-gradient(circle at 50% 50%, rgba(167,139,250,.7) 0%, rgba(139,92,246,.32) 38%, rgba(139,92,246,0) 70%);
             filter:blur(28px);
@@ -92,11 +92,11 @@
             opacity:calc(.45 + var(--amp)*.5);
             animation:breathe 5.5s var(--ease) infinite;
             transition:opacity .12s linear;}
-  /* the rotating 3D wireframe (drawn by JS; hue/scale driven by the same amplitude value) */
+  /* the rotating 3D particle sphere (drawn by JS; hue/scale driven by the same amplitude value) */
   .orb-globe{width:100%; height:100%; border-radius:0;}
   @keyframes breathe{0%,100%{transform:scale(1);}50%{transform:scale(1.06);}}
 
-  /* orb glow-tint states (the wireframe's own hue is driven in JS from orbState) */
+  /* orb glow-tint states (the particle sphere's own hue is driven in JS from orbState) */
   .orb.is-listening .orb-glow{background:radial-gradient(circle at 50% 50%, rgba(96,165,250,.72) 0%, rgba(52,224,232,.32) 40%, rgba(52,224,232,0) 72%);}
   .orb.is-speaking .orb-glow{background:radial-gradient(circle at 50% 50%, rgba(217,70,239,.76) 0%, rgba(167,139,250,.38) 40%, rgba(139,92,246,0) 72%);}
   .orb.is-thinking .orb-glow{animation-duration:2.6s;}
@@ -385,14 +385,17 @@ function ampLoop(){
   rafId=requestAnimationFrame(ampLoop);
 }
 
-/* ================= holographic wireframe globe (canvas) =================
-   A 3D sphere of glowing purple lines — meridians + parallels with node dots — rotating on its
-   vertical axis. Pure 2D-canvas with orthographic projection: precompute unit-sphere points ONCE,
-   rotate around Y each frame, project, draw depth-banded segments (front bright, back dim) with a
-   two-pass fake glow (wide soft stroke + thin bright core, additive). Reads the SAME ampSmooth +
-   orbState the amplitude system already maintains. ~8 parallels x 12 meridians. Reduced-motion:
-   one static frame, no rAF. */
-(function initGlobe(){
+/* ================= 3D glowing particle sphere (canvas) =================
+   A dense cloud of glowing purple particles on a sphere (Fibonacci / golden-spiral distribution,
+   organic + even), rotating with a fixed camera tilt. Pure 2D-canvas perspective projection:
+   positions precomputed ONCE; per frame rotate + project with m = fLen/(fLen - z), then scale BOTH
+   the drawn size AND the alpha by depth — near particles are large/bright with a soft bloom, far
+   ones tiny and dimming into the dark (depth fog), so the back dissolves into atmosphere and the
+   whole thing reads as a real 3D volume. Glow = a pre-rendered radial-gradient SPRITE blitted per
+   particle (near/far variants) — far cheaper than per-particle shadowBlur. Additive ('lighter')
+   compositing on a dark bg means draw order is irrelevant, so NO depth sort. Reads the SAME
+   ampSmooth + orbState the amplitude system already maintains. Reduced-motion: one static frame. */
+(function initParticleSphere(){
   const cv=$('#globe'), ctx=cv.getContext('2d'), DPR=Math.min(window.devicePixelRatio||1,2);
   let W=0,H=0,cx=0,cy=0,R=0;
   function resize(){
@@ -400,69 +403,71 @@ function ampLoop(){
     W=Math.max(120,r.width); H=Math.max(120,r.height);
     cv.width=Math.round(W*DPR); cv.height=Math.round(H*DPR);
     ctx.setTransform(DPR,0,0,DPR,0,0);
-    cx=W/2; cy=H/2; R=Math.min(W,H)*0.40;   // sphere radius (leaves room for the amp pulse)
+    cx=W/2; cy=H/2; R=Math.min(W,H)*0.27;   // sphere screen-radius (leaves room for bloom + amp pulse)
   }
   resize(); window.addEventListener('resize',resize,{passive:true});
 
-  // --- precompute the unit-sphere grid (lat x lon) + poles, ONCE ---
-  const LATS=[-70,-50,-30,-10,10,30,50,70], LON=12;   // 8 parallels, 12 meridians
-  const P=[];                                          // flat points: grid then north, south
-  for(let i=0;i<LATS.length;i++){
-    const la=LATS[i]*Math.PI/180, cl=Math.cos(la), sl=Math.sin(la);
-    for(let j=0;j<LON;j++){ const lo=(j/LON)*6.28318; P.push({x:cl*Math.cos(lo),y:sl,z:cl*Math.sin(lo)}); }
+  // --- Fibonacci sphere, precomputed ONCE (with tiny radius + brightness jitter for a dusty feel) ---
+  const N=640, GA=Math.PI*(3-Math.sqrt(5));
+  const px=new Float32Array(N), py=new Float32Array(N), pz=new Float32Array(N), pb=new Float32Array(N);
+  for(let i=0;i<N;i++){
+    const y=1-(i/(N-1))*2, rr=Math.sqrt(Math.max(0,1-y*y)), th=i*GA, jit=0.95+Math.random()*0.1;
+    px[i]=Math.cos(th)*rr*jit; py[i]=y*jit; pz[i]=Math.sin(th)*rr*jit;
+    pb[i]=0.7+Math.random()*0.45;                       // per-particle brightness sparkle
   }
-  const NI=LATS.length*LON, SI=NI+1; P.push({x:0,y:1,z:0},{x:0,y:-1,z:0});
-  const id=(i,j)=>i*LON+j;
-  const segs=[];                                       // [aIdx,bIdx] connectivity, computed once
-  for(let i=0;i<LATS.length;i++) for(let j=0;j<LON;j++){
-    segs.push(id(i,j), id(i,(j+1)%LON));               // parallel ring
-    if(i<LATS.length-1) segs.push(id(i,j), id(i+1,j)); // meridian rung
-  }
-  for(let j=0;j<LON;j++){ segs.push(NI,id(LATS.length-1,j)); segs.push(SI,id(0,j)); } // pole caps
 
-  const BANDS=6;
-  const lb=[], nb=[];                                  // reusable depth buckets (no per-frame GC)
-  for(let b=0;b<BANDS;b++){ lb.push([]); nb.push([]); }
-  const sx=new Float32Array(P.length), sy=new Float32Array(P.length), sz=new Float32Array(P.length);
+  // --- glow sprites: pre-rendered radial gradients (the bloom). Rebuilt only when the hue shifts. ---
+  function sprite(size,h,light,sat,coreA){
+    const c=document.createElement('canvas'); c.width=c.height=size; const g=c.getContext('2d');
+    const grd=g.createRadialGradient(size/2,size/2,0,size/2,size/2,size/2);
+    grd.addColorStop(0,`hsla(${h},${sat}%,${light}%,${coreA})`);
+    grd.addColorStop(0.45,`hsla(${h},${sat}%,${(light-14)|0}%,${(coreA*0.4).toFixed(3)})`);
+    grd.addColorStop(1,`hsla(${h},${sat}%,${(light-22)|0}%,0)`);
+    g.fillStyle=grd; g.fillRect(0,0,size,size); return c;
+  }
+  let spriteHue=-999, spNear=null, spFar=null;
+  function ensureSprites(h){
+    if(Math.abs(h-spriteHue)<4) return; spriteHue=h;
+    spNear=sprite(42, h-10, 85, 96, 0.96);              // front: cooler, brighter, soft bloom
+    spFar =sprite(30, h+8, 52, 78, 0.6);                // back: deeper violet, dimmer
+  }
+
+  const TILT=0.42, ct=Math.cos(TILT), st=Math.sin(TILT);   // fixed camera tilt
   let angle=0, lastT=0, hue=265;
-  const hueFor=s=> s==='listening'?188 : s==='speaking'?288 : 265;   // cyan / magenta-violet / violet
+  const hueFor=s=> s==='listening'?190 : s==='speaking'?290 : 265;   // cyan / magenta-violet / violet
 
   function render(){
-    const amp=ampSmooth, rad=R*(1+amp*0.16), bright=0.55+amp*0.45;
-    hue += (hueFor(orbState)-hue)*0.08;
-    const h=hue|0, ca=Math.cos(angle), sa=Math.sin(angle);
-    for(let m=0;m<P.length;m++){ const p=P[m]; const X=p.x*ca+p.z*sa; sz[m]=-p.x*sa+p.z*ca; sx[m]=cx+X*rad; sy[m]=cy-p.y*rad; }
-    for(let b=0;b<BANDS;b++){ lb[b].length=0; nb[b].length=0; }
-    for(let s=0;s<segs.length;s+=2){ const a=segs[s],c=segs[s+1]; let bi=(((sz[a]+sz[c])*0.25+0.5)*(BANDS-1))|0; if(bi<0)bi=0; else if(bi>=BANDS)bi=BANDS-1; lb[bi].push(a,c); }
-    for(let m=0;m<NI;m++){ let bi=((sz[m]*0.5+0.5)*(BANDS-1))|0; if(bi<0)bi=0; else if(bi>=BANDS)bi=BANDS-1; nb[bi].push(m); }
-    ctx.clearRect(0,0,W,H); ctx.lineCap='round'; ctx.lineJoin='round'; ctx.globalCompositeOperation='lighter';
-    for(let b=0;b<BANDS;b++){
-      const arr=lb[b]; if(!arr.length) continue;
-      const a=b/(BANDS-1), alpha=(0.07+a*0.9)*bright;
-      ctx.beginPath();
-      for(let m=0;m<arr.length;m+=2){ ctx.moveTo(sx[arr[m]],sy[arr[m]]); ctx.lineTo(sx[arr[m+1]],sy[arr[m+1]]); }
-      ctx.strokeStyle=`hsla(${h},90%,72%,${(alpha*0.20).toFixed(3)})`; ctx.lineWidth=3.4; ctx.stroke();   // glow
-      ctx.strokeStyle=`hsla(${h},96%,${(64+a*22)|0}%,${alpha.toFixed(3)})`; ctx.lineWidth=1; ctx.stroke(); // core
+    const amp=ampSmooth;
+    hue += (hueFor(orbState)-hue)*0.08; const h=hue|0; ensureSprites(h);
+    const Rw=R*(1+amp*0.13);                  // world radius (amp pulse)
+    const fLen=R*2.7;                          // focal length: perspective that keeps it on-canvas
+    const bright=0.66+amp*0.4;
+    const ca=Math.cos(angle), sa=Math.sin(angle);
+    ctx.clearRect(0,0,W,H);
+    ctx.globalCompositeOperation='lighter';
+    for(let i=0;i<N;i++){
+      const X=px[i]*ca + pz[i]*sa, Z=-px[i]*sa + pz[i]*ca;   // rotate around Y (animated)
+      const Y=py[i]*ct - Z*st, Zt=py[i]*st + Z*ct;           // fixed tilt around X
+      const wz=Zt*Rw, m=fLen/(fLen-wz);                      // perspective: near (wz>0) -> m>1
+      const depth=(Zt+1)*0.5;                                // 0 back .. 1 front
+      let a=(0.025 + depth*depth*0.8)*bright*pb[i];          // back dissolves into the dark (depth^2 fog)
+      if(a<=0.01) continue;
+      const d=(1.7 + depth*depth*8.5)*(0.6+0.4*m);           // drawn diameter: strong depth + perspective
+      const sxp=cx + X*Rw*m, syp=cy - Y*Rw*m, hd=d*0.5;
+      ctx.globalAlpha=a>1?1:a;
+      ctx.drawImage(Zt>=0?spNear:spFar, sxp-hd, syp-hd, d, d);
     }
-    for(let b=0;b<BANDS;b++){
-      const arr=nb[b]; if(!arr.length) continue;
-      const a=b/(BANDS-1), rr=1+a*1.5+amp*1.3;
-      ctx.fillStyle=`hsla(${h},100%,${(72+a*16)|0}%,${((0.12+a*0.85)*bright).toFixed(3)})`;
-      ctx.beginPath();
-      for(let m=0;m<arr.length;m++){ ctx.moveTo(sx[arr[m]]+rr,sy[arr[m]]); ctx.arc(sx[arr[m]],sy[arr[m]],rr,0,6.28318); }
-      ctx.fill();
-    }
-    ctx.globalCompositeOperation='source-over';
+    ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over';
   }
   function frame(t){
     requestAnimationFrame(frame);
     const dt=lastT?Math.min(0.05,(t-lastT)/1000):0.016; lastT=t;
-    const spd=(orbState==='thinking'?0.55:0.30)*(1+ampSmooth*0.9);   // base + amplitude (faster while thinking)
+    const spd=(orbState==='thinking'?0.5:0.26)*(1+ampSmooth*0.9);   // base + amplitude (faster while thinking)
     angle+=spd*dt; if(angle>6.28318) angle-=6.28318;
     render();
   }
-  if(REDUCED){ angle=0.6; render(); }                 // static wireframe globe, no rotation
-  else requestAnimationFrame(frame);
+  angle=0.5; render();                       // paint one frame synchronously (never a blank flash)
+  if(!REDUCED) requestAnimationFrame(frame); // else: static depth-shaded sphere, no rotation
 })();
 
 /* ================= Web Audio: playback + analysers ================= */
