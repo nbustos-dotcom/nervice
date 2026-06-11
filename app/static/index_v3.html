@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#04070b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nervice">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="/static/manifest.json">
+<title>NERVICE · HUD</title>
+<!--
+  ============================ JARVIS HUD — LAYOUT PLAN ============================
+  Near-black command center. Instrumentation, not cards. One bg canvas draws a faint grid +
+  circuit traces once. Every datum is REAL (sourced below); nothing decorative is a number.
+
+  DESKTOP (>=1080px) — 3 columns around the center reactor:
+    HEADER (full):  NERVICE wordmark | SYS status (/health) | UPTIME (/system) | new-chat | gear
+    LEFT  rail:  [SYSTEM]   CPU·RAM·GPU·DISK ring gauges (/system) + readouts (net↑↓,proc,temp,swap,vram)
+                 [ACTIVITY] real feed (/activity)
+    CENTER:      [CLOCK ruler]  local time + 7-day date ticks
+                 [REACTOR]      concentric tick rings + inner amplitude arc + breathing core (voice-reactive)
+                 [SPECTRUM]     live AnalyserNode frequency bars (flat when idle)
+                 mic-label + Conversation pill
+                 [CONVERSATION] transcript readout + composer (/ws/voice + /ws/chat)
+    RIGHT rail:  [WEATHER]  current + 7-day forecast column (/weather, Open-Meteo)
+                 [CORE]     memories·messages·today·engine·online (/nervice-stats + /health)
+                 [NEWS]     BBC headlines (/news, real, labeled source)
+  MOBILE: single column, priority — reactor+pill, clock, system, weather, core, conversation,
+          activity, news. Reactor outer tick-ring hidden to save frames.
+  Source map -> see the REPORT. Accent flip: change --accent (one line). Reduced-motion: no sweeps.
+  ================================================================================ -->
+<style>
+  :root{
+    --accent:#19e3e3;                         /* flip to purple in ONE line: e.g. #a855f7 */
+    --accent-soft:rgba(25,227,227,.55);
+    --line:rgba(25,227,227,.16);
+    --line-soft:rgba(25,227,227,.09);
+    --bg:#04070b; --bg2:#060b11;
+    --text:#cfe9ec; --dim:#8aa6ac; --faint:#6d8d93;   /* --faint lifted to >=4.5:1 on the near-black bg */
+    --warn:#ffb23e; --crit:#ff4d62; --ok:#19e3e3;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono","Consolas","Liberation Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --gap:clamp(10px,1.3vw,16px);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;margin:0;}
+  body{
+    background:radial-gradient(1200px 800px at 50% 36%, #0a141c 0%, var(--bg) 60%, #02040700 100%), var(--bg);
+    color:var(--text); font-family:var(--sans); min-height:100dvh; overflow-x:hidden;
+    -webkit-font-smoothing:antialiased; font-size:14px; line-height:1.4; overscroll-behavior:none;
+  }
+  #bg{position:fixed; inset:0; width:100%; height:100%; z-index:0; pointer-events:none;}
+  .shell{position:relative; z-index:1; min-height:100dvh; display:flex; flex-direction:column;
+         padding:calc(env(safe-area-inset-top) + 10px) clamp(10px,1.6vw,22px) calc(env(safe-area-inset-bottom) + 12px);}
+
+  /* ---------- header ---------- */
+  header{display:flex; align-items:center; gap:14px; padding-bottom:10px; margin-bottom:var(--gap);
+         border-bottom:1px solid var(--line);}
+  .brand{font-family:var(--mono); font-weight:600; font-size:17px; letter-spacing:.34em; color:var(--text);}
+  .brand b{color:var(--accent); text-shadow:0 0 12px var(--accent-soft);}
+  .brand .v{font-size:9px; letter-spacing:.2em; color:var(--faint); margin-left:.5em; vertical-align:2px;}
+  .hsep{width:1px; height:20px; background:var(--line);}
+  .stat{font-family:var(--mono); font-size:11px; letter-spacing:.12em; color:var(--dim); display:flex; align-items:center; gap:7px; text-transform:uppercase;}
+  .stat b{color:var(--text); font-weight:600;}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--faint); box-shadow:0 0 0 0 transparent; transition:.3s;}
+  .dot.on{background:var(--ok); box-shadow:0 0 9px 1px var(--accent-soft);}
+  .dot.warn{background:var(--warn); box-shadow:0 0 8px 1px rgba(255,178,62,.5);}
+  .dot.off{background:var(--crit);}
+  .spacer{flex:1;}
+  .ibtn{width:40px; height:40px; border:1px solid var(--line); background:transparent; color:var(--dim);
+        display:grid; place-items:center; cursor:pointer; transition:.18s;}
+  .ibtn:hover{color:var(--accent); border-color:var(--accent-soft);}
+  .ibtn:active{transform:translateY(1px);}
+  .ibtn svg{width:16px; height:16px;}
+
+  /* ---------- the command grid ---------- */
+  .grid{flex:1; display:grid; gap:var(--gap); grid-template-columns:1fr; align-content:start;}
+  @media (min-width:1080px){
+    .grid{grid-template-columns:300px minmax(0,1fr) 300px; align-items:start;}
+  }
+  @media (min-width:1480px){ .grid{grid-template-columns:340px minmax(0,1fr) 340px;} }
+  .col{display:flex; flex-direction:column; gap:var(--gap); min-width:0;}
+
+  /* ---------- HUD panel (thin frame + corner brackets, NOT glass) ---------- */
+  .panel{position:relative; border:1px solid var(--line); background:linear-gradient(180deg, rgba(13,24,32,.5), rgba(6,11,17,.35));
+         padding:12px 13px 13px; min-width:0;
+         opacity:0; transform:translateY(8px); animation:boot .5s var(--ease,cubic-bezier(.2,.7,.3,1)) forwards;}
+  .panel::before,.panel::after{content:""; position:absolute; width:11px; height:11px; pointer-events:none;}
+  .panel::before{top:-1px; left:-1px; border-top:1px solid var(--accent); border-left:1px solid var(--accent);}
+  .panel::after{bottom:-1px; right:-1px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent);}
+  @keyframes boot{to{opacity:1; transform:none;}}
+  .ph{display:flex; align-items:center; gap:8px; margin:0 0 11px; font-family:var(--mono); font-size:10px;
+      letter-spacing:.22em; text-transform:uppercase; color:var(--accent);}
+  .ph .ln{flex:1; height:1px; background:linear-gradient(90deg,var(--line),transparent);}
+  .ph .n{color:var(--faint); letter-spacing:.1em;}
+
+  /* ---------- system gauges ---------- */
+  .gauges{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .gauge{position:relative; display:flex; flex-direction:column; align-items:center; gap:3px;}
+  .gauge svg{width:100%; height:auto; display:block; overflow:visible;}
+  .gtrack{fill:none; stroke:var(--line); stroke-width:3;}
+  .gval{fill:none; stroke:var(--accent); stroke-width:3; stroke-linecap:round;
+        transition:stroke-dashoffset .8s cubic-bezier(.2,.7,.3,1), stroke .4s;
+        filter:drop-shadow(0 0 3px var(--accent-soft));}
+  .gtick{stroke:var(--line); stroke-width:1;}
+  .gnum{font-family:var(--mono); font-weight:600; font-size:15px; fill:var(--text); text-anchor:middle; font-variant-numeric:tabular-nums;}
+  .gunit{font-family:var(--mono); font-size:7px; letter-spacing:.1em; fill:var(--faint); text-anchor:middle;}
+  .glab{font-family:var(--mono); font-size:9px; letter-spacing:.16em; color:var(--dim); text-transform:uppercase;}
+
+  /* readout rows */
+  .rd{display:grid; grid-template-columns:1fr auto; gap:4px 10px; margin-top:12px; padding-top:11px; border-top:1px solid var(--line-soft);}
+  .rd .k{font-size:11px; letter-spacing:.06em; color:var(--dim); text-transform:uppercase; font-family:var(--mono);}
+  .rd .x{font-family:var(--mono); font-weight:600; font-size:12px; color:var(--text); text-align:right; font-variant-numeric:tabular-nums;}
+
+  /* ---------- center: clock ruler ---------- */
+  .clockpanel{text-align:center; padding-top:14px;}
+  .clock{font-family:var(--mono); font-weight:600; font-size:clamp(34px,5.4vw,58px); letter-spacing:.04em;
+         line-height:1; font-variant-numeric:tabular-nums; color:var(--text);}
+  .clock .s{font-size:.4em; color:var(--accent); margin-left:.18em;}
+  .clock .ap{font-size:.32em; color:var(--dim); margin-left:.2em; letter-spacing:.1em;}
+  .ruler{display:flex; justify-content:center; gap:0; margin-top:12px; flex-wrap:nowrap;}
+  .rk{flex:1 1 0; min-width:0; max-width:64px; text-align:center; padding:6px 2px 4px; border-top:1px solid var(--line);
+      position:relative; font-family:var(--mono);}
+  .rk::before{content:""; position:absolute; top:-1px; left:50%; width:1px; height:6px; background:var(--line);}
+  .rk.now{border-top-color:var(--accent);}
+  .rk.now::before{background:var(--accent); box-shadow:0 0 6px var(--accent-soft);}
+  .rk .d{font-size:9px; letter-spacing:.14em; color:var(--faint); text-transform:uppercase;}
+  .rk .dd{font-size:13px; font-weight:600; color:var(--dim); margin-top:1px; font-variant-numeric:tabular-nums;}
+  .rk.now .d,.rk.now .dd{color:var(--accent);}
+
+  /* ---------- the arc reactor ---------- */
+  .reactor-wrap{display:flex; flex-direction:column; align-items:center; gap:12px; padding:6px 0 4px;}
+  .reactor{--amp:0; position:relative; width:clamp(220px,40vw,330px); aspect-ratio:1; cursor:pointer;
+           touch-action:none; user-select:none; -webkit-user-select:none;}
+  .reactor svg{position:absolute; inset:0; width:100%; height:100%; overflow:visible;}
+  .reactor .static-track{fill:none; stroke:var(--line);}
+  .ring-ticks line{stroke:var(--accent); stroke-width:1;}
+  .core-glow{fill:var(--accent); opacity:calc(.10 + var(--amp)*.5); filter:blur(10px);
+             transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + var(--amp)*.7)); transition:opacity .1s linear;}
+  .core{fill:none; stroke:var(--accent); stroke-width:1.4;
+        transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + var(--amp)*.16));}
+  .core-fill{fill:var(--accent); opacity:calc(.5 + var(--amp)*.5);
+             transform-box:fill-box; transform-origin:center; transform:scale(calc(.34 + var(--amp)*.5));}
+  .amp-arc{fill:none; stroke:var(--accent); stroke-width:2; stroke-linecap:round; filter:drop-shadow(0 0 4px var(--accent-soft));}
+  .reactor.listening{--rc:#37e0ff;}  .reactor.speaking{--rc:#ff52d6;}  .reactor.thinking{--rc:#ffd24a;}
+  .reactor.listening .ring-ticks line,.reactor.listening .core,.reactor.listening .core-fill,.reactor.listening .amp-arc{stroke:#37e0ff;fill:#37e0ff;}
+  .reactor.speaking .ring-ticks line,.reactor.speaking .core,.reactor.speaking .core-fill,.reactor.speaking .amp-arc{stroke:#ff52d6;fill:#ff52d6;}
+  .reactor.listening .core-glow,.reactor.speaking .core-glow{fill:var(--rc);}
+  .mic-label{font-family:var(--mono); font-size:10px; letter-spacing:.22em; text-transform:uppercase; color:var(--dim); min-height:14px;}
+  .pill{display:inline-flex; align-items:center; gap:8px; padding:10px 18px; min-height:44px; cursor:pointer;
+        font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim);
+        border:1px solid var(--line); background:transparent; transition:.2s;}
+  .pill svg{width:14px; height:14px;}
+  .pill:hover{color:var(--accent); border-color:var(--accent-soft);}
+  .pill.on{color:#021014; background:var(--accent); border-color:var(--accent); box-shadow:0 0 16px var(--accent-soft);}
+
+  /* ---------- audio spectrum ---------- */
+  .spectrum{width:100%; max-width:560px; height:64px; margin:2px auto 0; display:block;}
+
+  /* ---------- conversation ---------- */
+  .convo{display:flex; flex-direction:column; min-height:0;}
+  .msgs{display:flex; flex-direction:column; gap:7px; overflow-y:auto; min-height:120px; max-height:min(34vh,300px);
+        padding-right:2px; margin-bottom:11px; font-size:13.5px;}
+  .msgs::-webkit-scrollbar{width:0;}
+  .bub{max-width:88%; padding:7px 11px; line-height:1.4; white-space:pre-wrap; word-wrap:break-word; border:1px solid var(--line-soft); animation:pop .3s ease;}
+  .bub.you{align-self:flex-end; color:var(--text); border-color:var(--accent-soft); background:rgba(25,227,227,.07);}
+  .bub.nervice{align-self:flex-start; color:var(--dim); background:rgba(255,255,255,.018);}
+  @keyframes pop{from{opacity:0; transform:translateY(4px);}to{opacity:1;}}
+  .convo-empty{margin:auto; text-align:center; color:var(--faint); font-size:12px; font-family:var(--mono); letter-spacing:.06em; padding:14px;}
+  .composer{display:flex; gap:8px;}
+  .composer input{flex:1; min-height:40px; background:rgba(0,0,0,.3); border:1px solid var(--line); color:var(--text);
+                  padding:9px 12px; font-size:16px; outline:none; font-family:var(--mono);}
+  .composer input:focus{border-color:var(--accent-soft);}
+  .composer button{min-height:40px; padding:0 14px; cursor:pointer; font-family:var(--mono); font-size:11px; letter-spacing:.12em;
+                   text-transform:uppercase; color:var(--accent); background:transparent; border:1px solid var(--line);}
+  .composer button:hover{border-color:var(--accent-soft);}
+
+  /* ---------- weather ---------- */
+  .wx-now{display:flex; align-items:center; gap:13px; padding-bottom:11px; border-bottom:1px solid var(--line-soft); margin-bottom:8px;}
+  .wx-ico{width:42px; height:42px; color:var(--accent); flex:none;}
+  .wx-ico svg{width:100%; height:100%;}
+  .wx-t{font-family:var(--mono); font-weight:600; font-size:32px; line-height:1; font-variant-numeric:tabular-nums;}
+  .wx-c{font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim); margin-top:3px; font-family:var(--mono);}
+  .fc{display:grid; grid-template-columns:1fr auto 2.4em 2.4em; gap:8px 10px; align-items:center;}
+  .fc .fd{font-family:var(--mono); font-size:11px; letter-spacing:.08em; color:var(--dim); text-transform:uppercase;}
+  .fc .fi{width:18px; height:18px; color:var(--accent-soft);}
+  .fc .fi svg{width:100%;height:100%;}
+  .fc .fh{font-family:var(--mono); font-weight:600; font-size:12px; text-align:right; font-variant-numeric:tabular-nums;}
+  .fc .fl{font-family:var(--mono); font-size:12px; color:var(--faint); text-align:right; font-variant-numeric:tabular-nums;}
+
+  /* ---------- core stats ---------- */
+  .stats{display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line-soft); border:1px solid var(--line-soft);}
+  .stat-cell{background:var(--bg2); padding:11px 12px;}
+  .stat-cell .v{font-family:var(--mono); font-weight:600; font-size:21px; color:var(--text); font-variant-numeric:tabular-nums; letter-spacing:.02em;}
+  .stat-cell .v.sm{font-size:13px;}
+  .stat-cell .l{font-family:var(--mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint); margin-top:3px;}
+
+  /* ---------- activity + news feeds ---------- */
+  .feed{display:flex; flex-direction:column; max-height:min(30vh,260px); overflow-y:auto; margin:-2px -4px; padding:2px 4px;}
+  .feed::-webkit-scrollbar{width:0;}
+  .frow{display:flex; gap:9px; padding:7px 2px; border-bottom:1px solid var(--line-soft); align-items:baseline;}
+  .frow:last-child{border-bottom:none;}
+  .frow .mk{font-family:var(--mono); font-size:10px; color:var(--accent-soft); flex:none; width:13px; text-align:center;}
+  .frow .tx{flex:1; font-size:12.5px; color:var(--text); line-height:1.35; word-break:break-word;}
+  .frow .ag{font-family:var(--mono); font-size:10px; color:var(--faint); flex:none; font-variant-numeric:tabular-nums;}
+  .news .frow .tx{color:var(--dim);}
+  .empty{font-family:var(--mono); font-size:11px; letter-spacing:.04em; color:var(--faint); padding:8px 2px;}
+
+  /* ---------- token modal + toast ---------- */
+  .overlay{position:fixed; inset:0; z-index:40; display:none; align-items:center; justify-content:center; padding:24px; background:rgba(2,4,7,.78); backdrop-filter:blur(3px);}
+  .overlay.show{display:flex;}
+  .modal{width:100%; max-width:380px; border:1px solid var(--accent-soft); background:var(--bg2); padding:24px; position:relative;}
+  .modal::before{content:""; position:absolute; top:-1px; left:-1px; width:14px; height:14px; border-top:1px solid var(--accent); border-left:1px solid var(--accent);}
+  .modal h2{margin:0 0 6px; font-family:var(--mono); font-size:15px; letter-spacing:.16em; text-transform:uppercase; color:var(--accent);}
+  .modal p{margin:0 0 15px; color:var(--dim); font-size:12.5px; line-height:1.5;}
+  .modal input{width:100%; min-height:44px; background:rgba(0,0,0,.35); border:1px solid var(--line); color:var(--text); padding:12px; font-size:16px; outline:none; font-family:var(--mono); margin-bottom:13px;}
+  .modal input:focus{border-color:var(--accent-soft);}
+  .modal button{width:100%; min-height:46px; border:1px solid var(--accent); background:var(--accent); color:#021014; cursor:pointer; font-family:var(--mono); font-size:12px; letter-spacing:.16em; text-transform:uppercase; font-weight:600;}
+  #toast{position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 22px); transform:translateX(-50%) translateY(8px); z-index:50;
+         border:1px solid var(--line); background:var(--bg2); color:var(--text); padding:9px 15px; font-family:var(--mono); font-size:12px;
+         letter-spacing:.04em; opacity:0; pointer-events:none; transition:.25s; max-width:84%;}
+  #toast.show{opacity:1; transform:translateX(-50%);}
+
+  @media (max-width:1079px){ .reactor .ring-outer{display:none;} }   /* mobile: drop the outer tick ring */
+  @media (prefers-reduced-motion:reduce){
+    .panel{animation:none !important; opacity:1; transform:none;}
+    .gval{transition:none !important;}
+    .bub{animation:none !important;}
+    *{scroll-behavior:auto !important;}
+  }
+</style>
+</head>
+<body>
+  <canvas id="bg" aria-hidden="true"></canvas>
+  <div class="shell">
+    <header>
+      <span class="brand">NER<b>VICE</b><span class="v">HUD&nbsp;v3</span></span>
+      <span class="hsep"></span>
+      <span class="stat"><span class="dot" id="sysDot"></span><span id="sysStat">linking</span></span>
+      <span class="hsep"></span>
+      <span class="stat">UPTIME&nbsp;<b id="upStat">--</b></span>
+      <span class="spacer"></span>
+      <button class="ibtn" id="newBtn" aria-label="New chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+      <button class="ibtn" id="gearBtn" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg></button>
+    </header>
+
+    <main class="grid">
+      <!-- LEFT RAIL -->
+      <section class="col" style="animation:none">
+        <div class="panel" style="animation-delay:.04s">
+          <h3 class="ph">SYSTEM <span class="ln"></span><span class="n" id="hostTag">·</span></h3>
+          <div class="gauges" id="gauges"></div>
+          <div class="rd" id="sysReadout"></div>
+        </div>
+        <div class="panel" style="animation-delay:.22s">
+          <h3 class="ph">ACTIVITY <span class="ln"></span><span class="n">LIVE</span></h3>
+          <div class="feed" id="feed"><div class="empty">acquiring…</div></div>
+        </div>
+      </section>
+
+      <!-- CENTER STAGE -->
+      <section class="col">
+        <div class="panel clockpanel" style="animation-delay:.02s">
+          <div class="clock" id="clock">--:--</div>
+          <div class="ruler" id="ruler"></div>
+        </div>
+        <div class="reactor-wrap">
+          <div class="reactor idle" id="reactor" role="button" tabindex="0" aria-label="Hold to talk to Nervice">
+            <svg viewBox="0 0 200 200">
+              <g class="ring-outer" id="ringOuter"></g>
+              <g class="ring-mid" id="ringMid"></g>
+              <circle class="static-track" cx="100" cy="100" r="58" stroke-width="1" opacity=".5"/>
+              <path class="amp-arc" id="ampArc" d=""/>
+              <circle class="core-glow" cx="100" cy="100" r="26"/>
+              <circle class="core" cx="100" cy="100" r="30"/>
+              <circle class="core-fill" cx="100" cy="100" r="30"/>
+            </svg>
+          </div>
+          <div class="mic-label" id="micLabel" aria-live="polite">hold to talk</div>
+          <button class="pill" id="convoBtn" aria-pressed="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.1a9 9 0 0 1 0 19.8M7 21.9A9 9 0 0 1 7 2.1M12 7v5l3 2"/></svg>
+            <span id="convoLabel">Conversation</span>
+          </button>
+          <canvas class="spectrum" id="spectrum" width="560" height="64" aria-hidden="true"></canvas>
+        </div>
+        <div class="panel convo" style="animation-delay:.12s">
+          <h3 class="ph">CONVERSATION <span class="ln"></span><span class="n">/ws</span></h3>
+          <div class="msgs" id="msgs"><div class="convo-empty">// hold the reactor to talk · or type ↓</div></div>
+          <div class="composer">
+            <input id="text" type="text" placeholder="message nervice…" autocomplete="off" enterkeyhint="send">
+            <button id="send">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT RAIL -->
+      <section class="col">
+        <div class="panel" style="animation-delay:.06s">
+          <h3 class="ph">WEATHER <span class="ln"></span><span class="n">OSWEGO IL</span></h3>
+          <div id="wxNow"><div class="empty">acquiring…</div></div>
+          <div class="fc" id="forecast"></div>
+        </div>
+        <div class="panel" style="animation-delay:.16s">
+          <h3 class="ph">NERVICE CORE <span class="ln"></span><span class="n" id="engineTag">--</span></h3>
+          <div class="stats" id="coreStats"></div>
+        </div>
+        <div class="panel news" id="newsPanel" style="animation-delay:.26s; display:none">
+          <h3 class="ph">SIGNAL <span class="ln"></span><span class="n" id="newsSrc">BBC</span></h3>
+          <div class="feed" id="news"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="overlay" id="tokenModal">
+    <div class="modal">
+      <h2>// AUTH REQUIRED</h2>
+      <p>Paste your API token. Stored only in this browser — fine for a private, single-user tailnet HUD.</p>
+      <input id="tokenInput" type="password" placeholder="NERVICE_API_TOKEN" autocomplete="off">
+      <button id="tokenSave">Connect</button>
+    </div>
+  </div>
+  <div id="toast"></div>
+
+<script>
+/* Token lives in localStorage, sent as Bearer / first WS frame. Acceptable: private tailnet,
+   single user, zero third-party code. Every byte inline — no external requests. */
+const TOKEN_KEY='nervice_token', CID_KEY='nervice_cid';
+const $=s=>document.querySelector(s);
+const getToken=()=>localStorage.getItem(TOKEN_KEY)||'';
+function getCID(){let c=localStorage.getItem(CID_KEY); if(!c){c=(crypto.randomUUID?crypto.randomUUID():String(Date.now())); localStorage.setItem(CID_KEY,c);} return c;}
+const REDUCED=window.matchMedia('(prefers-reduced-motion:reduce)').matches;
+const wsBase=()=> (location.protocol.charAt(4)==='s' ? 'wss://' : 'ws://') + location.host;
+let toastT; function toast(m){const t=$('#toast'); t.textContent=m; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2800);}
+
+/* ---- token modal ---- */
+function openToken(){$('#tokenInput').value=getToken(); $('#tokenModal').classList.add('show'); setTimeout(()=>$('#tokenInput').focus(),120);}
+function closeToken(){$('#tokenModal').classList.remove('show');}
+$('#tokenSave').onclick=()=>{const t=$('#tokenInput').value.trim(); if(!t){toast('Enter a token'); return;} localStorage.setItem(TOKEN_KEY,t); closeToken(); toast('// LINK ESTABLISHED'); refreshAll();};
+$('#gearBtn').onclick=openToken;
+$('#newBtn').onclick=()=>{localStorage.removeItem(CID_KEY); getCID(); $('#msgs').innerHTML='<div class="convo-empty">// new session</div>'; toast('New session');};
+
+/* ---- authed fetch ---- */
+async function api(path){
+  const token=getToken(); if(!token){openToken(); throw new Error('no token');}
+  const r=await fetch(path,{headers:{'Authorization':'Bearer '+token}});
+  if(r.status===401){toast('Invalid token'); openToken(); throw new Error('401');}
+  if(!r.ok) throw new Error('http '+r.status);
+  return r.json();
+}
+
+/* ================= background grid + circuit traces (drawn once) ================= */
+(function bg(){
+  const cv=$('#bg'), ctx=cv.getContext('2d'); const DPR=Math.min(devicePixelRatio||1,2);
+  function draw(){
+    const W=innerWidth, H=innerHeight; cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
+    ctx.clearRect(0,0,W,H);
+    const acc='25,227,227';
+    // faint grid
+    ctx.strokeStyle=`rgba(${acc},0.035)`; ctx.lineWidth=1; const step=46;
+    ctx.beginPath();
+    for(let x=step;x<W;x+=step){ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,H);}
+    for(let y=step;y<H;y+=step){ctx.moveTo(0,y+.5);ctx.lineTo(W,y+.5);}
+    ctx.stroke();
+    // starfield
+    let seed=20260610;
+    const rnd=()=>{seed=(seed*16807)%2147483647; return seed/2147483647;};
+    ctx.fillStyle=`rgba(${acc},0.5)`;
+    for(let i=0;i<70;i++){const x=rnd()*W,y=rnd()*H,s=rnd()*1.3; ctx.globalAlpha=0.08+rnd()*0.22; ctx.fillRect(x,y,s,s);}
+    ctx.globalAlpha=1;
+    // circuit traces: a few right-angled paths with node dots
+    ctx.strokeStyle=`rgba(${acc},0.10)`; ctx.lineWidth=1; ctx.fillStyle=`rgba(${acc},0.30)`;
+    function trace(x,y,segs){ ctx.beginPath(); ctx.moveTo(x,y); let cx=x,cy=y;
+      for(const[dx,dy]of segs){cx+=dx;cy+=dy;ctx.lineTo(cx,cy);} ctx.stroke();
+      ctx.fillRect(cx-1.5,cy-1.5,3,3); ctx.fillRect(x-1.5,y-1.5,3,3); }
+    trace(0,H*0.30,[[W*0.16,0],[0,-40],[60,0]]);
+    trace(W,H*0.62,[[-W*0.15,0],[0,46],[-50,0]]);
+    trace(W*0.5,0,[[0,40],[-90,0],[0,30]]);
+    trace(W*0.5,H,[[0,-46],[110,0],[0,-26]]);
+  }
+  draw(); addEventListener('resize',draw,{passive:true});
+})();
+
+/* ================= amplitude system (ported from v2 — the working analyser rAF) ================= */
+const reactor=$('#reactor'), micLabel=$('#micLabel');
+let orbState='idle', ampActive=false, ampSmooth=0, ampRaf=0;
+function setState(s){
+  orbState=s; reactor.className='reactor '+s;
+  micLabel.textContent = s==='listening'?'listening':s==='thinking'?'processing':s==='speaking'?'transmitting':(convoMode?'conversation on':'hold to talk');
+  if(s==='listening'||s==='speaking') startAmp(); else { stopAmp(); reactor.style.setProperty('--amp',0); }
+}
+function startAmp(){ if(REDUCED||ampActive) return; ampActive=true; ampRaf=requestAnimationFrame(ampLoop); }
+function stopAmp(){ ampActive=false; if(ampRaf) cancelAnimationFrame(ampRaf); ampRaf=0; ampSmooth=0; }
+function ampLoop(){
+  if(!ampActive) return;
+  const node = orbState==='speaking' ? analyser : orbState==='listening' ? micAnalyser : null;
+  let amp=0;
+  if(node){ node.getByteFrequencyData(ampData); let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i]; amp=Math.min(1,Math.sqrt(s/ampData.length)/118); }
+  ampSmooth += (amp-ampSmooth)*0.28;
+  reactor.style.setProperty('--amp', ampSmooth.toFixed(3));
+  ampRaf=requestAnimationFrame(ampLoop);
+}
+
+/* ================= the reactor rings + amplitude arc + spectrum : ONE continuous rAF ================= */
+(function buildReactor(){
+  // outer tick ring (long ticks) + mid ring (short ticks), as SVG lines around center 100,100
+  function ticks(g, count, r1, r2, w){
+    let s=''; for(let i=0;i<count;i++){ const a=i/count*6.28318, c=Math.cos(a), sn=Math.sin(a);
+      s+=`<line x1="${(100+c*r1).toFixed(1)}" y1="${(100+sn*r1).toFixed(1)}" x2="${(100+c*r2).toFixed(1)}" y2="${(100+sn*r2).toFixed(1)}" stroke-width="${w}"/>`; }
+    g.innerHTML=s;
+  }
+  const outer=$('#ringOuter'), mid=$('#ringMid');
+  outer.classList.add('ring-ticks'); mid.classList.add('ring-ticks');
+  ticks(outer, 60, 88, 94, 1);      // 60 fine ticks
+  ticks(mid, 24, 70, 78, 1.4);      // 24 bolder ticks
+})();
+const ampArc=$('#ampArc');
+const spec=$('#spectrum'), sctx=spec.getContext('2d');
+let aOuter=0, aMid=0, lastT=0;
+function arcPath(frac){ // amplitude arc on r=64, from top, clockwise, fraction 0..1
+  frac=Math.max(0.001,Math.min(1,frac)); const r=64, a0=-Math.PI/2, a1=a0+frac*6.28318;
+  const x0=100+r*Math.cos(a0), y0=100+r*Math.sin(a0), x1=100+r*Math.cos(a1), y1=100+r*Math.sin(a1);
+  const large=frac>0.5?1:0; return `M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`;
+}
+function drawSpectrum(){
+  const W=spec.width, H=spec.height; sctx.clearRect(0,0,W,H);
+  const node = orbState==='speaking'?analyser : orbState==='listening'?micAnalyser : null;
+  const bars=48, bw=W/bars, css=getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()||'#19e3e3';
+  let live=false;
+  if(node && audioCtx){ node.getByteFrequencyData(ampData); live=true; }
+  sctx.fillStyle=css;
+  for(let i=0;i<bars;i++){
+    let v;
+    if(live){ const idx=(i*ampData.length/bars)|0; v=ampData[idx]/255; }
+    else { v=0.022; }   // idle: a flat baseline — no signal, drawn flat (honest)
+    const bh=Math.max(1.5, v*H*0.92), x=i*bw+1, y=(H-bh)/2;
+    sctx.globalAlpha=live?(0.35+v*0.65):0.5;
+    sctx.fillRect(x, y, bw-2, bh);
+  }
+  sctx.globalAlpha=1;
+}
+function hud(t){
+  requestAnimationFrame(hud);
+  const dt=lastT?Math.min(0.05,(t-lastT)/1000):0.016; lastT=t;
+  const amp=ampSmooth, sp=(orbState==='thinking'?2.2:1)*(1+amp*1.6);
+  aOuter += dt*0.18*sp; aMid -= dt*0.32*sp;
+  $('#ringOuter').setAttribute('transform',`rotate(${(aOuter*57.2958).toFixed(2)} 100 100)`);
+  $('#ringMid').setAttribute('transform',`rotate(${(aMid*57.2958).toFixed(2)} 100 100)`);
+  ampArc.setAttribute('d', arcPath(0.06 + amp*0.9));   // inner arc = live audio level (real signal)
+  drawSpectrum();
+}
+// one synchronous render so the arc + spectrum are never blank before the rAF kicks in;
+// under reduced-motion this IS the final frame (no rAF -> no rotation, static instrument).
+ampArc.setAttribute('d', arcPath(0.16)); drawSpectrum();
+if(!REDUCED) requestAnimationFrame(hud);
+
+/* ================= Web Audio: playback + analysers (ported) ================= */
+let audioCtx=null, analyser=null, ampData=null, micAnalyser=null, nextStart=0, scheduled=0;
+function initAudio(){
+  if(audioCtx) return;
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  analyser=audioCtx.createAnalyser(); analyser.fftSize=256; analyser.smoothingTimeConstant=.7;
+  ampData=new Uint8Array(analyser.frequencyBinCount); analyser.connect(audioCtx.destination);
+  micAnalyser=audioCtx.createAnalyser(); micAnalyser.fftSize=256; micAnalyser.smoothingTimeConstant=.7;
+}
+function unlockAudio(){ initAudio(); if(audioCtx.state==='suspended') audioCtx.resume(); }
+function b64ToBuf(b64){const bin=atob(b64); const a=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i); return a.buffer;}
+async function enqueueAudio(b64){
+  initAudio(); try{await audioCtx.resume();}catch(e){}
+  let buf; try{ buf=await audioCtx.decodeAudioData(b64ToBuf(b64)); }catch(e){ return; }
+  const src=audioCtx.createBufferSource(); src.buffer=buf; src.connect(analyser);
+  const now=audioCtx.currentTime; const start=Math.max(now,nextStart);
+  src.start(start); nextStart=start+buf.duration; scheduled++;
+  setState('speaking');
+  src.onended=()=>{ scheduled--; if(scheduled<=0){ nextStart=0; onSpeakEnd(); } };
+}
+function onSpeakEnd(){ if(convoMode){ setState('idle'); setTimeout(nextTurn,180);} else setState('idle'); }
+
+/* ================= conversation WebSocket(s) (ported) ================= */
+let voiceWS=null, chatWS=null, curBubble=null;
+function host(){ const m=$('#msgs'); const e=m.querySelector('.convo-empty'); if(e) e.remove(); return m; }
+function addBubble(role,text){ const m=host(); const d=document.createElement('div'); d.className='bub '+role; d.textContent=text; m.appendChild(d); m.scrollTop=m.scrollHeight; return d; }
+function appendNervice(text){ const m=host(); if(!curBubble){ curBubble=document.createElement('div'); curBubble.className='bub nervice'; curBubble.textContent=text; m.appendChild(curBubble);} else { curBubble.textContent += (curBubble.textContent?' ':'')+text; } m.scrollTop=m.scrollHeight; }
+function handleFrame(f){
+  if(f.type==='transcript'){ if(f.text) addBubble('you',f.text); setState('thinking'); }
+  else if(f.type==='ack'||f.type==='text'){ appendNervice(f.text); }
+  else if(f.type==='audio'){ enqueueAudio(f.wav_base64); }
+  else if(f.type==='done'){ curBubble=null; if(scheduled<=0 && orbState!=='speaking'){ if(convoMode) setTimeout(nextTurn,180); else setState('idle'); } setTimeout(loadActivity,800); setTimeout(loadStats,800); }
+}
+function openWS(path){
+  return new Promise((resolve,reject)=>{
+    const token=getToken(); if(!token){openToken(); reject(new Error('no token')); return;}
+    const ws=new WebSocket(wsBase()+path); let ready=false;
+    ws.onopen=()=> ws.send(JSON.stringify({token, conversation_id:getCID(), audio: path.indexOf('chat')>=0?false:true}));
+    ws.onmessage=(e)=>{ let f; try{f=JSON.parse(e.data);}catch(_){return;} if(!ready && f.type==='ready'){ ready=true; resolve(ws); return;} handleFrame(f); };
+    ws.onclose=(e)=>{ if(path.indexOf('voice')>=0) voiceWS=null; else chatWS=null; if(e.code===1008){ toast('Invalid token'); openToken(); } if(!ready) reject(new Error('closed')); };
+    ws.onerror=()=>{};
+  });
+}
+async function getVoiceWS(){ if(voiceWS&&voiceWS.readyState===1) return voiceWS; voiceWS=await openWS('/ws/voice'); return voiceWS; }
+async function getChatWS(){ if(chatWS&&chatWS.readyState===1) return chatWS; chatWS=await openWS('/ws/chat'); return chatWS; }
+
+/* ================= push-to-talk + conversation (ported) ================= */
+let micStream=null, micSource=null, recorder=null, chunks=[], recording=false, convoMode=false;
+let vadRAF=0, recStart=0, silenceStart=0;
+const SILENCE=0.015, SIL_MS=1200, MIN_MS=700, MAX_MS=30000;
+function pickMime(){ for(const m of ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus']){ try{ if(MediaRecorder.isTypeSupported(m)) return m; }catch(e){} } return ''; }
+async function startRec(auto){
+  if(recording) return; if(!getToken()){ openToken(); return; }
+  unlockAudio();
+  try{ micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}}); }
+  catch(e){ toast('Mic permission needed'); if(convoMode) stopConvo(); return; }
+  try{ if(micAnalyser){ micSource=audioCtx.createMediaStreamSource(micStream); micSource.connect(micAnalyser); } }catch(e){}
+  chunks=[]; const mime=pickMime();
+  try{ recorder = mime? new MediaRecorder(micStream,{mimeType:mime}) : new MediaRecorder(micStream); }
+  catch(e){ recorder=new MediaRecorder(micStream); }
+  recorder.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+  recorder.onstop=onRecStop;
+  recorder.start(); recording=true; setState('listening');
+  if(auto) startVAD();
+}
+function stopRec(){ if(!recording) return; recording=false; stopVAD(); if(recorder&&recorder.state!=='inactive') recorder.stop(); }
+function releaseMic(){ if(micSource){ try{ micSource.disconnect(); }catch(e){} micSource=null; } if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }
+async function onRecStop(){
+  releaseMic();
+  if(!chunks.length){ if(convoMode) setTimeout(nextTurn,150); else setState('idle'); return; }
+  const type=(recorder.mimeType||'audio/webm'); const blob=new Blob(chunks,{type}); setState('thinking');
+  try{ const ws=await getVoiceWS(); ws.send(await blob.arrayBuffer()); }
+  catch(e){ setState('idle'); if(convoMode) stopConvo(); }
+}
+function startVAD(){
+  recStart=Date.now(); silenceStart=0; if(!micAnalyser) return;
+  (function tick(){
+    if(!recording) return; micAnalyser.getByteFrequencyData(ampData);
+    let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i];
+    const rms=Math.sqrt(s/ampData.length)/255, el=Date.now()-recStart;
+    if(el>=MAX_MS){ stopRec(); return; }
+    if(el<MIN_MS){ silenceStart=0; }
+    else if(rms<SILENCE){ if(!silenceStart) silenceStart=Date.now(); else if(Date.now()-silenceStart>=SIL_MS){ stopRec(); return; } }
+    else silenceStart=0;
+    vadRAF=requestAnimationFrame(tick);
+  })();
+}
+function stopVAD(){ if(vadRAF) cancelAnimationFrame(vadRAF); vadRAF=0; }
+function nextTurn(){ if(convoMode && !recording && orbState!=='speaking') startRec(true); }
+function startConvo(){ if(!getToken()){openToken(); return;} unlockAudio(); convoMode=true; const b=$('#convoBtn'); b.classList.add('on'); b.setAttribute('aria-pressed','true'); $('#convoLabel').textContent='Conversation ON'; toast('Conversation on — talk, then pause'); nextTurn(); }
+function stopConvo(){ convoMode=false; const b=$('#convoBtn'); b.classList.remove('on'); b.setAttribute('aria-pressed','false'); $('#convoLabel').textContent='Conversation'; stopRec(); releaseMic(); setState('idle'); }
+$('#convoBtn').onclick=()=> convoMode? stopConvo() : startConvo();
+reactor.addEventListener('pointerdown', e=>{ e.preventDefault(); if(convoMode) return; startRec(false); });
+reactor.addEventListener('pointerup', e=>{ e.preventDefault(); if(!convoMode) stopRec(); });
+reactor.addEventListener('pointercancel', ()=>{ if(!convoMode) stopRec(); });
+reactor.addEventListener('pointerleave', ()=>{ if(!convoMode && recording) stopRec(); });
+reactor.addEventListener('keydown', e=>{ if((e.key===' '||e.key==='Enter')&&!convoMode&&!recording){ e.preventDefault(); startRec(false);} });
+reactor.addEventListener('keyup', e=>{ if((e.key===' '||e.key==='Enter')&&!convoMode&&recording){ e.preventDefault(); stopRec();} });
+reactor.addEventListener('contextmenu', e=>e.preventDefault());
+async function sendText(){
+  const inp=$('#text'); const msg=inp.value.trim(); if(!msg) return; inp.value='';
+  addBubble('you',msg); setState('thinking');
+  try{ const ws=await getChatWS(); ws.send(JSON.stringify({text:msg})); }
+  catch(e){ setState('idle'); }
+}
+$('#send').onclick=sendText;
+$('#text').addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.isComposing){ e.preventDefault(); sendText(); } });
+
+/* ================= instruments ================= */
+/* ---- clock + 7-day ruler ---- */
+function tickClock(){
+  const d=new Date(); let h=d.getHours(); const ap=h>=12?'PM':'AM'; h=h%12||12;
+  const mm=String(d.getMinutes()).padStart(2,'0'), ss=String(d.getSeconds()).padStart(2,'0');
+  $('#clock').innerHTML=`${h}:${mm}<span class="s">${ss}</span><span class="ap">${ap}</span>`;
+}
+function buildRuler(){
+  const r=$('#ruler'), today=new Date(); let s='';
+  for(let i=0;i<7;i++){ const d=new Date(today); d.setDate(today.getDate()+i);
+    s+=`<div class="rk ${i===0?'now':''}"><div class="d">${d.toLocaleDateString(undefined,{weekday:'short'})}</div><div class="dd">${d.getDate()}</div></div>`; }
+  r.innerHTML=s;
+}
+setInterval(tickClock,1000); tickClock(); buildRuler();
+
+/* ---- system gauges (built once, updated from /system) ---- */
+const GAUGES=[ {k:'cpu',l:'CPU'},{k:'ram',l:'RAM'},{k:'gpu',l:'GPU'},{k:'disk',l:'DISK'} ];
+const C=2*Math.PI*42;
+function buildGauges(){
+  const wrap=$('#gauges'); let html='';
+  for(const g of GAUGES){
+    let ticks=''; for(let i=0;i<24;i++){ const a=i/24*6.28318, c=Math.cos(a), sn=Math.sin(a);
+      ticks+=`<line class="gtick" x1="${(50+c*48).toFixed(1)}" y1="${(50+sn*48).toFixed(1)}" x2="${(50+c*46).toFixed(1)}" y2="${(50+sn*46).toFixed(1)}"/>`; }
+    html+=`<div class="gauge"><svg viewBox="0 0 100 100">${ticks}
+      <circle class="gtrack" cx="50" cy="50" r="42"/>
+      <circle class="gval" id="g-${g.k}" cx="50" cy="50" r="42" transform="rotate(-90 50 50)" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${C.toFixed(1)}"/>
+      <text class="gnum" id="gn-${g.k}" x="50" y="49">--</text>
+      <text class="gunit" id="gu-${g.k}" x="50" y="61">%</text></svg>
+      <div class="glab">${g.l}</div></div>`;
+  }
+  wrap.innerHTML=html;
+}
+function setGauge(k,pct,num,unit){
+  pct=Math.max(0,Math.min(100,pct));
+  const v=$('#g-'+k); if(v) v.style.strokeDashoffset=(C*(1-pct/100)).toFixed(1);
+  const n=$('#gn-'+k); if(n) n.textContent=num;
+  const u=$('#gu-'+k); if(u && unit!==undefined) u.textContent=unit;
+  if(v){ const col = pct>=88?'var(--crit)':pct>=68?'var(--warn)':'var(--accent)'; v.style.stroke=col; }
+}
+function fmtBytes(b){ if(b<1024)return b+' B'; if(b<1048576)return (b/1024).toFixed(0)+' K'; if(b<1073741824)return (b/1048576).toFixed(1)+' M'; return (b/1073741824).toFixed(1)+' G'; }
+function fmtUptime(s){ const d=s/86400|0, h=(s%86400)/3600|0, m=(s%3600)/60|0; return d?`${d}d ${h}h`:`${h}h ${m}m`; }
+async function loadSystem(){
+  try{ const s=await api('/system');
+    setGauge('cpu', s.cpu.total, Math.round(s.cpu.total), '%');
+    setGauge('ram', s.ram.percent, Math.round(s.ram.percent), '%');
+    setGauge('disk', s.disk.percent, Math.round(s.disk.percent), '%');
+    if(s.gpu.available){ setGauge('gpu', s.gpu.util, s.gpu.util, '%'); }
+    else { setGauge('gpu', 0, 'N/A', ''); }
+    $('#hostTag').textContent = s.gpu.available ? (s.gpu.name||'GPU') : 'NO GPU';   // real model, never hardcoded
+    $('#upStat').textContent=fmtUptime(s.uptime_s);
+    const net=v=> v==null ? '—' : fmtBytes(v)+'/s';   // null = no baseline yet (first poll), not a fake 0
+    const g=s.gpu, rows=[
+      ['NET ↓', net(s.net.down_bps)],
+      ['NET ↑', net(s.net.up_bps)],
+      ['PROCS', s.processes],
+      ['RAM', fmtBytes(s.ram.used)+' / '+fmtBytes(s.ram.total)],
+      ['DISK', (s.disk.used/1e9).toFixed(0)+' / '+(s.disk.total/1e9).toFixed(0)+' GB'],
+      ['SWAP', s.swap.percent+' %'],
+    ];
+    if(g.available){ rows.push(['VRAM', g.vram_used+' / '+g.vram_total+' MB']); rows.push(['GPU °C', g.temp+'°']); }
+    $('#sysReadout').innerHTML=rows.map(r=>`<div class="k">${r[0]}</div><div class="x">${r[1]}</div>`).join('');
+  }catch(e){ if(String(e.message).indexOf('401')<0){} }
+}
+
+/* ---- weather + forecast ---- */
+const WX={ clear:'<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M4.6 19.4 6 18M18 6l1.4-1.4"/>',
+  cloudy:'<path d="M7 18h9a4 4 0 0 0 .4-7.98A5.5 5.5 0 0 0 5.6 9.2 3.6 3.6 0 0 0 7 18z"/>',
+  rain:'<path d="M7 15h9a4 4 0 0 0 .4-7.98A5.5 5.5 0 0 0 5.6 6.2 3.6 3.6 0 0 0 7 15z"/><path d="M8 19l-1 2M12 19l-1 2M16 19l-1 2"/>',
+  snow:'<path d="M7 15h9a4 4 0 0 0 .4-7.98A5.5 5.5 0 0 0 5.6 6.2 3.6 3.6 0 0 0 7 15z"/><path d="M9 19h.01M12.5 20h.01M15 19h.01"/>',
+  fog:'<path d="M5 9h11a4 4 0 0 0-7.4-2.5A3.6 3.6 0 0 0 5 9z"/><path d="M4 13h16M6 17h12"/>',
+  storm:'<path d="M7 14h9a4 4 0 0 0 .4-7.98A5.5 5.5 0 0 0 5.6 5.2 3.6 3.6 0 0 0 7 14z"/><path d="M12 13l-2 4h3l-2 4"/>' };
+function wxSvg(c){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${WX[c]||WX.clear}</svg>`; }
+async function loadWeather(){
+  try{ const w=await api('/weather'); if(!w.available){ $('#wxNow').innerHTML='<div class="empty">unavailable</div>'; return; }
+    $('#wxNow').innerHTML=`<div class="wx-now"><div class="wx-ico">${wxSvg(w.condition)}</div>`+
+      `<div><div class="wx-t">${w.temp}&deg;</div><div class="wx-c">${w.condition}</div></div></div>`;
+    $('#forecast').innerHTML=(w.forecast||[]).slice(0,7).map((d,i)=>
+      `<div class="fd">${i===0?'TODAY':d.day.toUpperCase()}</div><div class="fi">${wxSvg(d.condition)}</div>`+
+      `<div class="fh">${d.hi}&deg;</div><div class="fl">${d.lo}&deg;</div>`).join('');
+  }catch(e){ if(String(e.message).indexOf('401')<0) $('#wxNow').innerHTML='<div class="empty">unavailable</div>'; }
+}
+
+/* ---- nervice core stats + health ---- */
+async function loadStats(){
+  try{ const s=await api('/nervice-stats');
+    $('#engineTag').textContent=(s.engine||'').split('/')[0].toUpperCase()||'--';
+    const cells=[ ['MEMORIES', s.memories, ''],['MESSAGES', s.messages, ''],['TODAY', s.today, ''],
+      ['ENGINE', (s.engine||'kokoro').split('/')[0], 'sm'] ];
+    $('#coreStats').innerHTML=cells.map(c=>`<div class="stat-cell"><div class="v ${c[2]}">${c[1]}</div><div class="l">${c[0]}</div></div>`).join('');
+  }catch(e){}
+}
+async function loadHealth(){
+  const dot=$('#sysDot'), st=$('#sysStat');
+  try{ const h=await api('/health'); const warm=h.voice==='warm';
+    dot.className='dot '+(warm?'on':'warn'); st.textContent= warm?'system online':'warming core';
+  }catch(e){ dot.className='dot off'; st.textContent= String(e.message).indexOf('401')>=0?'no token':'offline'; }
+}
+
+/* ---- activity feed ---- */
+const ACTMK={ open:'▸', screenshot:'▣', browse:'◈', build:'⚒', selfmod:'✦', think:'◉', ask:'›', do:'●' };
+function esc(s){const d=document.createElement('div'); d.textContent=s; return d.innerHTML;}
+async function loadActivity(){
+  try{ const j=await api('/activity'); const f=$('#feed'); const items=(j&&j.items)||[];
+    if(!items.length){ f.innerHTML='<div class="empty">no recent activity</div>'; return; }
+    f.innerHTML=items.map(it=>`<div class="frow"><span class="mk">${ACTMK[it.kind]||'●'}</span><span class="tx">${esc(it.text)}</span><span class="ag">${esc(it.ago)}</span></div>`).join('');
+  }catch(e){ if(String(e.message).indexOf('401')<0) $('#feed').innerHTML='<div class="empty">unavailable</div>'; }
+}
+
+/* ---- news (only shows if real items return) ---- */
+async function loadNews(){
+  try{ const j=await api('/news'); const items=j.items||[];
+    if(!items.length){ $('#newsPanel').style.display='none'; return; }
+    $('#newsSrc').textContent=(j.source||'RSS').toUpperCase();
+    $('#newsPanel').style.display='';
+    $('#news').innerHTML=items.map(it=>`<div class="frow"><span class="tx">${esc(it.title)}</span><span class="ag">${esc(it.ago)}</span></div>`).join('');
+  }catch(e){ $('#newsPanel').style.display='none'; }
+}
+
+/* ================= boot ================= */
+function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); }
+buildGauges();
+setInterval(loadSystem, 2000);
+setInterval(loadHealth, 15000);
+setInterval(loadStats, 30000);
+setInterval(loadActivity, 30000);
+setInterval(loadWeather, 600000);
+setInterval(loadNews, 600000);
+getCID();
+if(!getToken()) openToken(); else refreshAll();
+</script>
+</body>
+</html>

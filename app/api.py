@@ -194,14 +194,18 @@ _net_prev = {"t": None, "sent": 0, "recv": 0}
 
 
 def _gpu_telemetry() -> dict:
-    """RTX 4060 stats via nvidia-smi (CSV). {available:false} if the tool/GPU isn't reachable."""
+    """GPU stats via nvidia-smi (CSV) incl. the real model name. {available:false} if the tool/GPU
+    isn't reachable — no fabricated numbers and no hardcoded model when there's no GPU."""
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,name",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=3).stdout.strip().splitlines()[0]
-        u, vu, vt, tp = [x.strip() for x in out.split(",")]
-        return {"available": True, "util": int(u), "vram_used": int(vu), "vram_total": int(vt), "temp": int(tp)}
+        parts = [x.strip() for x in out.split(",")]
+        u, vu, vt, tp = parts[:4]
+        name = ",".join(parts[4:]).strip() or "GPU"      # real driver-reported model string
+        return {"available": True, "util": int(u), "vram_used": int(vu), "vram_total": int(vt),
+                "temp": int(tp), "name": name}
     except Exception:
         return {"available": False}
 
@@ -216,18 +220,19 @@ def _system_telemetry() -> dict:
     du = psutil.disk_usage("C:\\")
     n = psutil.net_io_counters()
     now = time.time()
-    up_bps = down_bps = 0.0
-    if _net_prev["t"] is not None:
+    primed = _net_prev["t"] is not None          # first poll has no baseline -> report null, not a fake 0
+    up_bps = down_bps = None
+    if primed:
         dt = max(0.001, now - _net_prev["t"])
-        up_bps = max(0, n.bytes_sent - _net_prev["sent"]) / dt
-        down_bps = max(0, n.bytes_recv - _net_prev["recv"]) / dt
+        up_bps = round(max(0, n.bytes_sent - _net_prev["sent"]) / dt)
+        down_bps = round(max(0, n.bytes_recv - _net_prev["recv"]) / dt)
     _net_prev.update(t=now, sent=n.bytes_sent, recv=n.bytes_recv)
     return {
         "cpu": {"total": round(sum(per) / len(per), 1), "cores": [round(x, 1) for x in per], "count": len(per)},
         "ram": {"percent": vm.percent, "used": vm.used, "total": vm.total},
         "swap": {"percent": sw.percent},
         "disk": {"percent": du.percent, "used": du.used, "total": du.total},
-        "net": {"up_bps": round(up_bps), "down_bps": round(down_bps)},
+        "net": {"up_bps": up_bps, "down_bps": down_bps},
         "uptime_s": int(now - psutil.boot_time()),
         "processes": len(psutil.pids()),
         "gpu": _gpu_telemetry(),
