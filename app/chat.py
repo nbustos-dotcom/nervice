@@ -17,6 +17,7 @@ from app.memory import remember
 from app.weather import get_weather
 from app import computer
 from app import skills
+from app import music
 from app.db import AsyncSessionLocal
 from app.models import Message
 
@@ -100,6 +101,14 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         print(skill_reply)
         log_turn("skill", "skill", time.monotonic() - t0, "rest")
         return skill_reply
+
+    # favorite-artists management ("my favorite artists are...", add/remove/list) — deterministic,
+    # works on any rung. None -> route normally.
+    music_reply = music.handle(user_message)
+    if music_reply is not None:
+        print(music_reply)
+        log_turn("music", "direct", time.monotonic() - t0, "rest")
+        return music_reply
 
     # sysinfo DIRECT fast path: machine questions are identified deterministically and answered
     # straight from telemetry (~1s) — no retrieval, no classify, no LLM tool-round (was 9-19s).

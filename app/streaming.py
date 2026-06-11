@@ -26,6 +26,7 @@ import app.tools as tools
 from groq import RateLimitError
 from app import computer
 from app import skills
+from app import music
 from app.agent import current_rung
 from app.turnlog import log_turn
 from app.router import classify, is_machine_question as router_is_machine
@@ -230,6 +231,19 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         _store(user_id, conversation_id, text, skill_reply)
         log_turn("skill", "skill", time.monotonic() - t0, "ws")
         return skill_reply
+
+    # favorite-artists management — deterministic, one text+audio block, works on any rung.
+    music_reply = music.handle(text)
+    if music_reply is not None:
+        await send({"type": "text", "text": music_reply})
+        if voice:
+            b64 = await asyncio.to_thread(_synth_full_b64, music_reply)
+            if b64:
+                await send({"type": "audio", "wav_base64": b64})
+        await send({"type": "done", "reply": music_reply})
+        _store(user_id, conversation_id, text, music_reply)
+        log_turn("music", "direct", time.monotonic() - t0, "ws")
+        return music_reply
 
     # sysinfo DIRECT fast path: machine questions answered straight from telemetry (~1s) — no
     # retrieval, no classify, no LLM tool-round. None -> normal pipeline below.

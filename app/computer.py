@@ -258,8 +258,8 @@ _PLAY_RE = re.compile(r"^\s*(?:please\s+|hey\s+|actually\s+|can\s+you\s+|could\s
 _PLAY_BARE = {"it", "that", "this", "something", "anything", "music", "some music", "a song",
               "a video", "me a song", "me something", "me some music", "songs", "some songs",
               "something good", "whatever", "some tunes", "tunes"}
-_MUSIC_QUERIES = ["lofi hip hop radio", "classic rock greatest hits", "top hits 2026 playlist",
-                  "relaxing jazz piano", "best of 80s music mix", "chill electronic mix"]
+# Bare plays draw from Nate's STORED favorite artists (set by voice — app/music.py), never a
+# hardcoded list. Empty list -> an honest ask, not generic music.
 
 
 def _resolve_youtube(query: str):
@@ -277,12 +277,17 @@ def _resolve_youtube(query: str):
 
 def play_youtube(query: str) -> str:
     """Resolve a real video and open its watch URL (auto-plays) in the default browser. Honest on
-    every failure path — never claims playback without a resolved video AND a real launch."""
-    import random
+    every failure path — never claims playback without a resolved video AND a real launch.
+    Bare plays ("play some music"/"play it") pick a random artist from Nate's voice-set favorites."""
     q = (query or "").strip().strip(".!?,")
     q = re.sub(r"\s+on\s+(?:youtube|yt)\s*$", "", q, flags=re.I).strip()
     if not q or q.lower() in _PLAY_BARE:
-        q = random.choice(_MUSIC_QUERIES)
+        from app import music
+        artist = music.random_artist()
+        if not artist:
+            return ("I don't have your favorite artists yet — tell me who you like "
+                    "(\"my favorite artists are X, Y, and Z\") and I'll play from them.")
+        q = f"{artist} songs mix"
     try:
         vid, title = _resolve_youtube(q)
     except Exception as e:
