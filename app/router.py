@@ -3,6 +3,7 @@ import sys
 
 from app.llm import chat_json
 from app import computer   # leaf module — its verb/risk vocabularies are the single source of truth
+from app import ollama_client as ollama   # local classify rung when Groq is capped
 
 ROUTER_SYSTEM = """Classify the user's message into exactly one route. Output ONLY JSON: {"route":"hard"} or {"route":"build"} or {"route":"selfmod"} or {"route":"browse"} or {"route":"control"} or {"route":"normal"}.
 The key test for selfmod/build/browse is whether the user is making an EXPLICIT ACTION REQUEST, not merely discussing, asking an opinion, or asking how something could be done. Discussion routes to normal.
@@ -88,8 +89,18 @@ async def classify(user_message: str) -> str:
         route = out.get("route")
         return route if route in ("hard", "build", "selfmod", "browse", "control") else "normal"
     except Exception:
-        # LLM router unavailable (Groq capped/down) — deterministic keyword routing instead of a
-        # blanket "normal", so voice machine-control keeps working in the capped state.
+        # Groq router unavailable (capped/down). Try the LOCAL model first — qwen3.5:4b classifies
+        # with the same prompt in ~1s and is smarter than keywords (it can route hard/build/browse,
+        # which keywords can't). Keywords remain the deterministic final net, so machine control
+        # NEVER silently dies even with Ollama down too.
+        try:
+            out = await ollama.chat_json(ROUTER_SYSTEM, user_message)
+            route = out.get("route")
+            if route in ("hard", "build", "selfmod", "browse", "control", "normal"):
+                print(f"[router fallback] groq down -> ollama route '{route}'", file=sys.stderr)
+                return route
+        except Exception:
+            pass
         r = _keyword_route(msg)
-        print(f"[router fallback] llm router unavailable -> keyword route '{r}'", file=sys.stderr)
+        print(f"[router fallback] llm+ollama unavailable -> keyword route '{r}'", file=sys.stderr)
         return r

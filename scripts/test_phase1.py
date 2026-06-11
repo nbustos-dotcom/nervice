@@ -167,6 +167,42 @@ async def main():
     print(f"t7: rung={last_rung()} ollama_called={flag['called']} "
           f"{'(genuine transient 429 — ladder fired correctly)' if transient else ''} reply={r7[:30]!r}")
 
+    # ============ t8: router through Ollama when Groq is capped ============
+    orig_cj = router.chat_json
+    async def cj_boom(system, user):
+        raise groq_429()
+    router.chat_json = cj_boom
+    used = {"ollama": 0}
+    orig_ocj = router.ollama.chat_json
+    async def spy_ocj(system, user):
+        used["ollama"] += 1
+        return await orig_ocj(system, user)
+    router.ollama.chat_json = spy_ocj
+    try:
+        r8a = await router.classify("open notepad")
+        r8b = await router.classify("ask claude to prove that sqrt 2 is irrational")
+        r8c = await router.classify("how's your day going?")
+    finally:
+        router.chat_json = orig_cj
+        router.ollama.chat_json = orig_ocj
+    R["t8 capped router via ollama"] = (r8a == "control" and r8b == "hard" and r8c == "normal"
+                                        and used["ollama"] >= 3)
+    print(f"t8: open notepad={r8a} ask-claude-proof={r8b} smalltalk={r8c} (ollama used {used['ollama']}x)")
+
+    # t8b: groq AND ollama down -> keyword net still routes control
+    router.chat_json = cj_boom
+    async def ocj_down(system, user):
+        raise oc.OllamaUnavailable("simulated down")
+    router.ollama.chat_json = ocj_down
+    try:
+        r8d = await router.classify("open notepad")
+        r8e = await router.classify("take a screenshot")
+    finally:
+        router.chat_json = orig_cj
+        router.ollama.chat_json = orig_ocj
+    R["t8b both down -> keyword net"] = r8d == "control" and r8e == "control"
+    print(f"t8b: open notepad={r8d} screenshot={r8e}")
+
     print("\nRESULT:")
     for k, v in R.items():
         print(("  PASS " if v else "  FAIL ") + k)
