@@ -56,6 +56,12 @@
     -webkit-font-smoothing:antialiased; font-size:14px; line-height:1.4; overscroll-behavior:none;
   }
   #bg{position:fixed; inset:0; width:100%; height:100%; z-index:0; pointer-events:none;}
+  /* near layer of the depth field: directional vignette pulling focus to the reactor.
+     pure CSS radial-gradient — composited once, zero per-frame cost. */
+  #vig{position:fixed; inset:0; z-index:0; pointer-events:none;
+       background:radial-gradient(ellipse 130% 95% at 50% 36%, transparent 48%, rgba(2,4,7,.42) 76%, rgba(2,4,7,.85) 100%);}
+  #fxBtn{font-family:var(--mono); font-size:10px; letter-spacing:.12em; font-weight:600;}
+  #fxBtn[aria-pressed="false"]{opacity:.4;}
   .shell{position:relative; z-index:1; min-height:100dvh; display:flex; flex-direction:column;
          padding:calc(env(safe-area-inset-top) + 10px) clamp(10px,1.6vw,22px) calc(env(safe-area-inset-bottom) + 12px);}
 
@@ -283,6 +289,7 @@
 </head>
 <body>
   <canvas id="bg" aria-hidden="true"></canvas>
+  <div id="vig" aria-hidden="true"></div>
   <div class="shell">
     <header>
       <span class="brand">NER<b>VICE</b><span class="v">HUD&nbsp;v3</span></span>
@@ -291,6 +298,7 @@
       <span class="hsep"></span>
       <span class="stat">UPTIME&nbsp;<b id="upStat">--</b></span>
       <span class="spacer"></span>
+      <button class="ibtn" id="fxBtn" aria-label="Toggle visual effects" aria-pressed="true">FX</button>
       <button class="ibtn" id="newBtn" aria-label="New chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
       <button class="ibtn" id="gearBtn" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg></button>
     </header>
@@ -435,26 +443,102 @@ async function api(path){
   return r.json();
 }
 
-/* ================= background grid + circuit traces (drawn once) ================= */
-(function bg(){
-  const cv=$('#bg'), ctx=cv.getContext('2d'); const DPR=Math.min(devicePixelRatio||1,2);
-  function draw(){
-    const W=innerWidth, H=innerHeight; cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
+/* ================= DEPTH FIELD: 3-layer background + FX core =================
+   far  = perspective grid (offscreen canvas, redrawn at reduced rate, blitted each frame)
+   mid  = particle dust (flat-array pool, pre-baked glow sprites, z-continuum)
+   near = CSS vignette (#vig — painted once by the compositor, zero per-frame cost)
+   ONE clock: hud() calls FX.frame(t,dt). FX only READS app state (orbState) — it never
+   touches data fetches, WS, or the audio pipeline. Flat mode (toggle off / reduced motion)
+   is the original v3 static draw, kept verbatim in drawFlat(). Perf: DPR cap (2 desktop,
+   1.5 narrow), document.hidden pauses the whole clock (see hud), rolling-avg auto-throttle
+   ladder with hysteresis. No shadowBlur/filters anywhere in the per-frame path. */
+const FX_KEY='nervice_fx';
+const FX=(function(){
+  const cv=$('#bg'), ctx=cv.getContext('2d');
+  const phone=()=>innerWidth<700;
+  let W=0,H=0,dpr=1;
+  let on=!REDUCED && localStorage.getItem(FX_KEY)!=='off';
+  let tier=0, gridEvery=2, frameN=0;
+  let avgMs=16.7, hotN=0, coolN=0;          // throttle ladder w/ hysteresis
+  let px=0,py=0,tx=0,ty=0;                  // eased pointer-parallax vector
+  const DUST_MAX=60;
+  const dX=new Float32Array(DUST_MAX), dY=new Float32Array(DUST_MAX),
+        dZ=new Float32Array(DUST_MAX), dPh=new Float32Array(DUST_MAX);
+  let dustN=DUST_MAX;
+  let spr=[];                               // [band 0..2] {p:purpleSprite, c:cyanSprite, s:px}
+  let grid=null, gctx=null, drift=0;        // offscreen grid layer
+  const STATE_MULT={idle:1, listening:1.25, speaking:1.6, thinking:2.2};
+  let seed=20260610;
+  const rnd=()=>{seed=(seed*16807)%2147483647; return seed/2147483647;};
+
+  function bakeSprites(){
+    // glow = pre-rendered radial gradients; far band fog-lerped toward the bg (depth cue).
+    // The hot loop only ever drawImage()s these — no gradients, no blur per frame.
+    spr=[];
+    const bands=[ {s:10, core:.5, fog:.62}, {s:16, core:.7, fog:.3}, {s:22, core:.95, fog:0} ];
+    const mix=(a,b,t)=>Math.round(a+(b-a)*t);
+    for(const b of bands){
+      const make=(r,g,bl)=>{
+        const c=document.createElement('canvas'); c.width=c.height=b.s;
+        const x=c.getContext('2d'), h=b.s/2;
+        const fr=mix(r,4,b.fog), fg=mix(g,7,b.fog), fb=mix(bl,11,b.fog);   // fog toward #04070b
+        const g2=x.createRadialGradient(h,h,0,h,h,h);
+        g2.addColorStop(0,`rgba(${fr},${fg},${fb},${b.core})`);
+        g2.addColorStop(.45,`rgba(${fr},${fg},${fb},${b.core*.35})`);
+        g2.addColorStop(1,`rgba(${fr},${fg},${fb},0)`);
+        x.fillStyle=g2; x.fillRect(0,0,b.s,b.s); return c;
+      };
+      spr.push({p:make(176,124,255), c:make(25,227,227), s:b.s});
+    }
+  }
+  function spawnDust(i, anywhere){
+    dZ[i]=rnd();                                       // z continuum: 0 far .. 1 near
+    dX[i]=rnd()*W;
+    dY[i]=anywhere? rnd()*H : H + 8 + rnd()*30;        // respawn enters from below, offscreen
+    dPh[i]=rnd()*6.28318;
+  }
+  function drawGrid(){
+    // perspective floor+ceiling receding to a vanishing point behind the reactor.
+    // alpha = (1-z)^2 distance fade — the fade IS the depth. ~30 strokes, off-main-rate.
+    const g=gctx; g.clearRect(0,0,W,H);
+    const hy=H*0.42 + py*0.15, vx=W/2 + px*0.15;
+    const ROWS=11, COLS=13;
+    for(let i=0;i<ROWS;i++){
+      const z=((i/ROWS)+drift)%1;                      // 0 = horizon, 1 = near edge
+      const fall=Math.pow(z,2.4);
+      const a=0.028+ (z*z)*0.115;
+      g.strokeStyle=`rgba(176,124,255,${a.toFixed(3)})`; g.lineWidth=1;
+      const yF=hy + (H-hy)*fall;                       // floor rung
+      g.beginPath(); g.moveTo(0,yF); g.lineTo(W,yF); g.stroke();
+      const yC=hy - hy*fall*0.62;                      // fainter ceiling mirror
+      g.globalAlpha=0.55; g.beginPath(); g.moveTo(0,yC); g.lineTo(W,yC); g.stroke(); g.globalAlpha=1;
+    }
+    g.strokeStyle='rgba(176,124,255,0.045)';
+    for(let j=0;j<COLS;j++){
+      const xb=(j/(COLS-1))*W*1.5 - W*0.25;            // radial spokes from the VP, clipped
+      const t0=0.22;                                   // start away from the VP (no dense hub)
+      g.beginPath();
+      g.moveTo(vx+(xb-vx)*t0, hy+(H-hy)*Math.pow(t0,2.4));
+      g.lineTo(xb, H); g.stroke();
+      g.globalAlpha=0.5;
+      g.beginPath();
+      g.moveTo(vx+(xb-vx)*t0, hy - hy*Math.pow(t0,2.4)*0.62);
+      g.lineTo(xb, 0); g.stroke(); g.globalAlpha=1;
+    }
+  }
+  function drawFlat(){
+    // the original v3 static background, verbatim — flat mode + reduced-motion fallback
     ctx.clearRect(0,0,W,H);
-    const acc='176,124,255';   /* circuit traces + grid = structure = Nervice purple */
-    // faint grid
+    const acc='176,124,255';
     ctx.strokeStyle=`rgba(${acc},0.035)`; ctx.lineWidth=1; const step=46;
     ctx.beginPath();
     for(let x=step;x<W;x+=step){ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,H);}
     for(let y=step;y<H;y+=step){ctx.moveTo(0,y+.5);ctx.lineTo(W,y+.5);}
     ctx.stroke();
-    // starfield
-    let seed=20260610;
-    const rnd=()=>{seed=(seed*16807)%2147483647; return seed/2147483647;};
+    let s0=20260610; const r0=()=>{s0=(s0*16807)%2147483647; return s0/2147483647;};
     ctx.fillStyle=`rgba(${acc},0.5)`;
-    for(let i=0;i<70;i++){const x=rnd()*W,y=rnd()*H,s=rnd()*1.3; ctx.globalAlpha=0.08+rnd()*0.22; ctx.fillRect(x,y,s,s);}
+    for(let i=0;i<70;i++){const x=r0()*W,y=r0()*H,s=r0()*1.3; ctx.globalAlpha=0.08+r0()*0.22; ctx.fillRect(x,y,s,s);}
     ctx.globalAlpha=1;
-    // circuit traces: a few right-angled paths with node dots
     ctx.strokeStyle=`rgba(${acc},0.10)`; ctx.lineWidth=1; ctx.fillStyle=`rgba(${acc},0.30)`;
     function trace(x,y,segs){ ctx.beginPath(); ctx.moveTo(x,y); let cx=x,cy=y;
       for(const[dx,dy]of segs){cx+=dx;cy+=dy;ctx.lineTo(cx,cy);} ctx.stroke();
@@ -464,8 +548,68 @@ async function api(path){
     trace(W*0.5,0,[[0,40],[-90,0],[0,30]]);
     trace(W*0.5,H,[[0,-46],[110,0],[0,-26]]);
   }
-  draw(); addEventListener('resize',draw,{passive:true});
+  function applyTier(){
+    const base=phone()? [30,18,10] : [60,30,15];
+    dustN=Math.min(DUST_MAX, base[tier]); gridEvery=[2,3,4][tier];
+    window.__fxTier=tier;
+  }
+  function resize(){
+    W=innerWidth; H=innerHeight; dpr=Math.min(devicePixelRatio||1, phone()?1.5:2);
+    cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+    if(!grid){ grid=document.createElement('canvas'); gctx=grid.getContext('2d'); }
+    grid.width=W*dpr; grid.height=H*dpr; gctx.setTransform(dpr,0,0,dpr,0,0);
+    bakeSprites();
+    for(let i=0;i<DUST_MAX;i++) spawnDust(i,true);
+    applyTier();
+    if(on) drawGrid(); else drawFlat();
+  }
+  function frame(t,dtMs){
+    if(!on) return;
+    // --- auto-throttle: rolling avg + hysteresis; tiers shrink loop bounds, never realloc
+    avgMs=avgMs*0.95+dtMs*0.05; window.__fps=Math.round(1000/avgMs);
+    if(avgMs>22){ if(++hotN>60 && tier<2){ tier++; applyTier(); hotN=0; } }
+    else hotN=0;
+    if(avgMs<14){ if(++coolN>120 && tier>0){ tier--; applyTier(); coolN=0; } }
+    else coolN=0;
+    // --- parallax easing + state-coupled drift
+    px+=(tx-px)*0.06; py+=(ty-py)*0.06;
+    const mult=STATE_MULT[orbState]||1;
+    drift=(drift + dtMs*0.0000115*mult)%1;
+    if(frameN++%gridEvery===0) drawGrid();
+    // --- composite: grid blit, then dust
+    ctx.clearRect(0,0,W,H);
+    ctx.drawImage(grid,0,0,W,H);
+    const dt=Math.min(50,dtMs);
+    for(let i=0;i<dustN;i++){
+      const z=dZ[i], sp=(0.10+z*0.42)*mult;
+      dY[i]-=sp*dt*0.022;
+      dX[i]+=Math.sin(t*0.0004+dPh[i])*0.07;
+      if(dY[i]<-12) spawnDust(i,false);
+      const band=z<0.34?0 : z<0.72?1 : 2;
+      const s=spr[band], sz=s.s*(0.55+z*0.75);
+      const twk=0.5+0.5*Math.abs(Math.sin(t*0.0011+i));    // phase-offset twinkle, no RNG
+      ctx.globalAlpha=(0.30+z*0.55)*twk;
+      const fx=dX[i]+px*(0.3+z*0.7), fy=dY[i]+py*(0.3+z*0.7);
+      ctx.drawImage(i%8===0? s.c : s.p, fx-sz/2, fy-sz/2, sz, sz);
+    }
+    ctx.globalAlpha=1;
+  }
+  function setOn(v){
+    on=v && !REDUCED;
+    localStorage.setItem(FX_KEY, v?'on':'off');
+    const b=$('#fxBtn'); if(b) b.setAttribute('aria-pressed', String(on));
+    if(!on) drawFlat(); else drawGrid();
+  }
+  // pointer parallax: desktop hover devices only; handlers only set a target (eased in frame)
+  if(matchMedia('(hover:hover)').matches){
+    addEventListener('pointermove',e=>{ tx=(e.clientX/innerWidth-0.5)*16; ty=(e.clientY/innerHeight-0.5)*10; },{passive:true});
+  }
+  let rsT; addEventListener('resize',()=>{ clearTimeout(rsT); rsT=setTimeout(resize,150); },{passive:true});
+  resize();
+  return { frame, setOn, isOn:()=>on };
 })();
+$('#fxBtn').setAttribute('aria-pressed', String(FX.isOn()));
+$('#fxBtn').onclick=()=>{ FX.setOn(!FX.isOn()); toast(FX.isOn()?'Effects on':'Effects off — flat mode'); };
 
 /* ================= amplitude system (ported from v2 — the working analyser rAF) ================= */
 const reactor=$('#reactor'), micLabel=$('#micLabel');
@@ -545,9 +689,11 @@ function drawSpectrum(){
   }
   sctx.globalAlpha=1;
 }
+let hudRaf=0;
 function hud(t){
-  requestAnimationFrame(hud);
+  hudRaf=requestAnimationFrame(hud);
   const dt=lastT?Math.min(0.05,(t-lastT)/1000):0.016; lastT=t;
+  FX.frame(t, dt*1000);                                // depth field shares this ONE clock
   const amp=ampSmooth, sp=(orbState==='thinking'?2.0:1)*(1+amp*0.9);   // calmer amp->speed coupling
   aOuter += dt*0.18*sp; aMid -= dt*0.32*sp;
   $('#ringOuter').setAttribute('transform',`rotate(${(aOuter*57.2958).toFixed(2)} 100 100)`);
@@ -558,7 +704,13 @@ function hud(t){
 // one synchronous render so the arc + spectrum are never blank before the rAF kicks in;
 // under reduced-motion this IS the final frame (no rAF -> no rotation, static instrument).
 ampArc.setAttribute('d', arcPath(0.16)); drawSpectrum();
-if(!REDUCED) requestAnimationFrame(hud);
+if(!REDUCED) hudRaf=requestAnimationFrame(hud);
+// hidden tab: stop the entire visual clock (background, rings, spectrum). Data pollers are
+// untouched. lastT resets so the first resumed frame gets a sane dt instead of a huge jump.
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){ if(hudRaf) cancelAnimationFrame(hudRaf); hudRaf=0; }
+  else if(!REDUCED && !hudRaf){ lastT=0; hudRaf=requestAnimationFrame(hud); }
+});
 
 /* ================= Web Audio: playback + analysers (ported) ================= */
 let audioCtx=null, analyser=null, ampData=null, micAnalyser=null, nextStart=0, scheduled=0;
