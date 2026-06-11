@@ -181,6 +181,30 @@
   /* ---------- audio spectrum ---------- */
   .spectrum{width:100%; max-width:560px; height:64px; margin:2px auto 0; display:block;}
 
+  /* ---------- live brain + response-time strip (real /last-turn telemetry) ---------- */
+  .brainstrip{display:flex; align-items:center; justify-content:center; gap:10px; margin-top:4px;
+              font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase;}
+  .brainstrip .bs-k{color:var(--faint); font-size:9px; letter-spacing:.2em;}
+  .brainstrip .bs-v{font-weight:600; font-variant-numeric:tabular-nums; color:var(--text);}
+  .brainstrip .bs-sep{width:1px; height:12px; background:var(--line);}
+  .bs-v.groq{color:var(--accent2);}            /* Groq = cyan (fast data) */
+  .bs-v.ollama{color:var(--accent);}           /* Ollama local = Nervice purple */
+  .bs-v.claude{color:#ff8a4c;}                 /* Claude = warm */
+  .bs-v.instant{color:var(--text);}
+  .bs-v.limited{color:var(--crit);}
+
+  /* ---------- recent updates (real git history) ---------- */
+  .upd{display:flex; flex-direction:column; max-height:min(26vh,220px); overflow-y:auto;}
+  .upd::-webkit-scrollbar{width:0;}
+  .upd .urow{display:flex; gap:9px; padding:6px 2px; border-bottom:1px solid var(--line-soft); align-items:baseline;}
+  .upd .urow:last-child{border-bottom:none;}
+  .upd .ud{font-family:var(--mono); font-size:10px; color:var(--accent-soft); flex:none; width:46px;}
+  .upd .us{flex:1; font-size:12px; color:var(--dim); line-height:1.35; word-break:break-word;}
+
+  /* per-reply meta (brain · time) on transcript bubbles — subtle */
+  .bub .meta{display:block; margin-top:4px; font-family:var(--mono); font-size:9px;
+             letter-spacing:.12em; text-transform:uppercase; color:var(--faint);}
+
   /* ---------- conversation ---------- */
   .convo{display:flex; flex-direction:column; min-height:0;}
   .msgs{display:flex; flex-direction:column; gap:7px; overflow-y:auto; min-height:120px; max-height:min(34vh,300px);
@@ -283,6 +307,10 @@
           <h3 class="ph">ACTIVITY <span class="ln"></span><span class="n">LIVE</span></h3>
           <div class="feed" id="feed"><div class="empty">acquiring…</div></div>
         </div>
+        <div class="panel" id="updPanel" style="animation-delay:.3s; display:none">
+          <h3 class="ph">RECENT UPDATES <span class="ln"></span><span class="n">GIT</span></h3>
+          <div class="upd" id="updList"></div>
+        </div>
       </section>
 
       <!-- CENTER STAGE -->
@@ -317,6 +345,11 @@
             <span id="convoLabel">Conversation</span>
           </button>
           <canvas class="spectrum" id="spectrum" width="560" height="64" aria-hidden="true"></canvas>
+          <div class="brainstrip" id="brainStrip" style="display:none">
+            <span class="bs-k">BRAIN</span><span class="bs-v" id="bsBrain">—</span>
+            <span class="bs-sep"></span>
+            <span class="bs-k">LAST</span><span class="bs-v" id="bsTime">—</span>
+          </div>
         </div>
         <div class="panel convo" style="animation-delay:.12s">
           <h3 class="ph">CONVERSATION <span class="ln"></span><span class="n">/ws</span></h3>
@@ -420,12 +453,19 @@ async function api(path){
 /* ================= amplitude system (ported from v2 — the working analyser rAF) ================= */
 const reactor=$('#reactor'), micLabel=$('#micLabel');
 let orbState='idle', ampActive=false, ampSmooth=0, ampRaf=0;
+let _thinkInt=0;
 function setState(s){
   orbState=s; reactor.className='reactor '+s;
   micLabel.textContent = s==='listening'?(convoMode?'listening':'listening · tap to send')
                        : s==='thinking'?'processing'
                        : s==='speaking'?'speaking'
                        : (convoMode?'conversation on':'tap to talk');
+  // live "thinking… Ns" ticker while a turn is processing (real elapsed time, not an estimate)
+  if(_thinkInt){ clearInterval(_thinkInt); _thinkInt=0; }
+  if(s==='thinking'){
+    const t0=Date.now();
+    _thinkInt=setInterval(()=>{ micLabel.textContent=`thinking… ${((Date.now()-t0)/1000).toFixed(1)}s`; }, 250);
+  }
   if(s==='listening'||s==='speaking') startAmp(); else { stopAmp(); reactor.style.setProperty('--amp',0); }
 }
 function startAmp(){ if(REDUCED||ampActive) return; ampActive=true; ampRaf=requestAnimationFrame(ampLoop); }
@@ -534,7 +574,7 @@ function handleFrame(f){
   if(f.type==='transcript'){ if(f.text) addBubble('you',f.text); setState('thinking'); }
   else if(f.type==='ack'||f.type==='text'){ appendNervice(f.text); }
   else if(f.type==='audio'){ enqueueAudio(f.wav_base64); }
-  else if(f.type==='done'){ curBubble=null; if(scheduled<=0 && orbState!=='speaking'){ if(convoMode) setTimeout(nextTurn,180); else setState('idle'); } setTimeout(loadActivity,800); setTimeout(loadStats,800); }
+  else if(f.type==='done'){ const doneBubble=curBubble; curBubble=null; if(scheduled<=0 && orbState!=='speaking'){ if(convoMode) setTimeout(nextTurn,180); else setState('idle'); } setTimeout(loadActivity,800); setTimeout(loadStats,800); setTimeout(()=>loadLastTurn(doneBubble),500); }
 }
 function openWS(path){
   return new Promise((resolve,reject)=>{
@@ -779,8 +819,36 @@ function requestLocation(explicit){
 }
 $('#useLocBtn').onclick=()=>{ closeToken(); requestLocation(true); };
 
+/* ---- live brain + last-response readout (real /last-turn telemetry, never estimated) ---- */
+const BRAIN_MAP={ groq:["Groq","groq"], ollama:["Ollama (local)","ollama"],
+  "claude-pro":["Claude","claude"], "claude-max":["Claude","claude"],
+  direct:["Instant","instant"], extractive:["Instant","instant"], skill:["Instant","instant"],
+  control:["Instant","instant"], exhausted:["Limited","limited"] };
+async function loadLastTurn(bubble){
+  try{ const lt=await api('/last-turn'); if(!lt.available) return;
+    const [label, cls]=BRAIN_MAP[lt.rung]||[lt.rung,"instant"];
+    const strip=$('#brainStrip'); strip.style.display='';
+    const b=$('#bsBrain'); b.textContent=label; b.className='bs-v '+cls;
+    $('#bsTime').textContent=lt.seconds.toFixed(1)+'s';
+    if(bubble && !bubble.querySelector('.meta')){
+      const m=document.createElement('span'); m.className='meta';
+      m.textContent=`${label} · ${lt.seconds.toFixed(1)}s`; bubble.appendChild(m);
+    }
+  }catch(e){}
+}
+
+/* ---- recent updates: real git history ---- */
+async function loadUpdates(){
+  try{ const j=await api('/updates'); const items=(j&&j.items)||[];
+    if(!items.length){ $('#updPanel').style.display='none'; return; }
+    $('#updPanel').style.display='';
+    $('#updList').innerHTML=items.map(u=>
+      `<div class="urow"><span class="ud">${esc(u.date)}</span><span class="us">${esc(u.summary)}</span></div>`).join('');
+  }catch(e){ $('#updPanel').style.display='none'; }
+}
+
 /* ================= boot ================= */
-function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); requestLocation(false); }
+function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); loadUpdates(); loadLastTurn(); requestLocation(false); }
 buildGauges();
 setInterval(loadSystem, 2000);
 setInterval(loadHealth, 15000);
@@ -788,6 +856,8 @@ setInterval(loadStats, 30000);
 setInterval(loadActivity, 30000);
 setInterval(loadWeather, 600000);
 setInterval(loadNews, 600000);
+setInterval(loadLastTurn, 4000);
+setInterval(loadUpdates, 300000);
 getCID();
 if(!getToken()) openToken(); else refreshAll();
 </script>

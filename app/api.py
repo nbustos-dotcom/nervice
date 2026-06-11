@@ -223,6 +223,66 @@ async def system():
     return await asyncio.to_thread(system_telemetry)
 
 
+# --------------- /updates : real git history (what's changed about Nervice) ---------------
+_REPO_DIR = pathlib.Path(__file__).resolve().parent.parent
+_updates_cache = {"t": 0.0, "items": []}
+_COMMIT_PREFIX = re.compile(r"^[\w()./,-]{1,24}:\s+")   # strip "ui(v3): " / "router: " prefixes
+
+
+@app.get("/updates", dependencies=[Depends(auth)])
+async def updates():
+    """Last ~8 commits as {date, summary} — REAL git log only (cached 120s). Empty list (panel
+    hides) if git is unavailable. No hashes, no fabricated changelog."""
+    if time.time() - _updates_cache["t"] < 120 and _updates_cache["items"]:
+        return {"items": _updates_cache["items"]}
+    def _git():
+        try:
+            out = subprocess.run(
+                ["git", "log", "-8", "--date=format:%b %d", "--format=%ad|%s"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=5, cwd=str(_REPO_DIR)).stdout   # git emits UTF-8; never decode with the locale codepage
+            items = []
+            for line in out.splitlines():
+                if "|" not in line:
+                    continue
+                date, summary = line.split("|", 1)
+                summary = _COMMIT_PREFIX.sub("", summary).strip()
+                items.append({"date": date.strip(), "summary": summary[:90]})
+            return items
+        except Exception:
+            return []
+    items = await asyncio.to_thread(_git)
+    if items:
+        _updates_cache.update(t=time.time(), items=items)
+    return {"items": items}
+
+
+# --------------- /last-turn : which brain answered + how long (from turns.log) ---------------
+_TURNS_LOG = _REPO_DIR / "logs" / "turns.log"
+_TURN_LINE = re.compile(r"^(\S+ \S+)\troute=(\S+)\trung=(\S+)\t([\d.]+)s\tpath=(\S+)")
+
+
+@app.get("/last-turn", dependencies=[Depends(auth)])
+async def last_turn():
+    """The most recent turn's REAL telemetry from logs/turns.log: which rung answered, the route,
+    and the wall-clock seconds. {available:false} when no turn has been logged yet."""
+    def _tail():
+        try:
+            with open(_TURNS_LOG, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 4096))
+                lines = f.read().decode("utf-8", "replace").strip().splitlines()
+            for line in reversed(lines):
+                m = _TURN_LINE.match(line.strip())
+                if m:
+                    return {"available": True, "ts": m.group(1), "route": m.group(2),
+                            "rung": m.group(3), "seconds": float(m.group(4)), "path": m.group(5)}
+        except Exception:
+            pass
+        return {"available": False}
+    return await asyncio.to_thread(_tail)
+
+
 @app.get("/nervice-stats", dependencies=[Depends(auth)])
 async def nervice_stats():
     """Nervice's own real internals: active memory count, total messages stored, today's messages,
