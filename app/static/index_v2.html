@@ -79,52 +79,27 @@
   .hero{display:flex; flex-direction:column; align-items:center; justify-content:center;
         gap:clamp(14px,2.4vh,26px); padding:clamp(8px,3vh,30px) 0;}
 
-  /* ---------- the orb ---------- */
+  /* ---------- the orb: holographic wireframe globe ---------- */
   .orb{--amp:0; position:relative; width:clamp(190px,52vw,290px); height:clamp(190px,52vw,290px);
        display:grid; place-items:center; cursor:pointer; touch-action:none; user-select:none;
        -webkit-user-select:none;}
-  .orb>*{grid-area:1/1; border-radius:50%; pointer-events:none;}
-  .orb-glow{width:118%; height:118%;
-            background:radial-gradient(circle at 50% 50%, rgba(167,139,250,.85) 0%, rgba(139,92,246,.4) 38%, rgba(139,92,246,0) 70%);
-            filter:blur(26px);
-            transform:scale(calc(1 + var(--amp)*.55));
-            opacity:calc(.5 + var(--amp)*.5);
+  .orb>*{grid-area:1/1; pointer-events:none;}
+  /* soft ambient halo behind the globe — the wireframe sits in atmosphere */
+  .orb-glow{width:122%; height:122%; border-radius:50%;
+            background:radial-gradient(circle at 50% 50%, rgba(167,139,250,.7) 0%, rgba(139,92,246,.32) 38%, rgba(139,92,246,0) 70%);
+            filter:blur(28px);
+            transform:scale(calc(1 + var(--amp)*.5));
+            opacity:calc(.45 + var(--amp)*.5);
             animation:breathe 5.5s var(--ease) infinite;
             transition:opacity .12s linear;}
-  .orb-core{width:78%; height:78%; overflow:hidden; position:relative;
-            background:
-              radial-gradient(circle at 34% 30%, #c4b5fd 0%, #8b5cf6 26%, #6d28d9 56%, #3b1d8f 82%, #25104f 100%);
-            box-shadow:inset 0 0 40px rgba(20,8,48,.7), inset 8px 10px 30px rgba(255,255,255,.18),
-                       0 18px 50px -10px rgba(124,58,237,.6);
-            transform:scale(calc(1 + var(--amp)*.13));
-            transition:transform .1s linear, box-shadow .3s;}
-  .orb-swirl{position:absolute; inset:-12%; border-radius:50%;
-             background:conic-gradient(from 0deg,
-               rgba(217,70,239,.0) 0deg, rgba(217,70,239,.55) 70deg, rgba(52,224,232,.0) 150deg,
-               rgba(167,139,250,.5) 220deg, rgba(217,70,239,0) 300deg, rgba(217,70,239,.0) 360deg);
-             mix-blend-mode:screen; filter:blur(6px); opacity:.75;
-             animation:spin 9s linear infinite;}
-  .orb-sheen{position:absolute; width:46%; height:38%; left:18%; top:14%; border-radius:50%;
-             background:radial-gradient(circle at 40% 40%, rgba(255,255,255,.7), rgba(255,255,255,0) 70%);
-             filter:blur(3px); opacity:.7;}
-  .orb-grain{position:absolute; inset:0; border-radius:50%; background-size:90px 90px;
-             mix-blend-mode:soft-light; opacity:.35;}
-  .orb-ring{width:96%; height:96%; border-radius:50%; opacity:0;
-            background:conic-gradient(from 0deg, transparent 0deg, rgba(52,224,232,.9) 40deg, transparent 110deg, transparent 360deg);
-            -webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
-            mask:radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
-            animation:spin 3.4s linear infinite; transition:opacity .35s;}
-  @keyframes spin{to{transform:rotate(360deg);}}
-  @keyframes breathe{0%,100%{transform:scale(1);}50%{transform:scale(1.05);}}
+  /* the rotating 3D wireframe (drawn by JS; hue/scale driven by the same amplitude value) */
+  .orb-globe{width:100%; height:100%; border-radius:0;}
+  @keyframes breathe{0%,100%{transform:scale(1);}50%{transform:scale(1.06);}}
 
-  /* orb states */
-  .orb.is-listening .orb-glow{background:radial-gradient(circle at 50% 50%, rgba(96,165,250,.9) 0%, rgba(52,224,232,.4) 40%, rgba(52,224,232,0) 72%);}
-  .orb.is-listening .orb-core{background:radial-gradient(circle at 34% 30%, #a5f3fc 0%, #38bdf8 26%, #6366f1 58%, #3b1d8f 86%, #1f1147 100%);}
-  .orb.is-thinking .orb-ring{opacity:.95; animation-duration:1.5s;}
-  .orb.is-thinking .orb-swirl{animation-duration:3.5s; opacity:.95;}
-  .orb.is-thinking .orb-glow{animation-duration:2.4s;}
-  .orb.is-speaking .orb-glow{background:radial-gradient(circle at 50% 50%, rgba(217,70,239,.9) 0%, rgba(167,139,250,.45) 40%, rgba(139,92,246,0) 72%);}
-  .orb.is-speaking .orb-swirl{opacity:1; animation-duration:5s;}
+  /* orb glow-tint states (the wireframe's own hue is driven in JS from orbState) */
+  .orb.is-listening .orb-glow{background:radial-gradient(circle at 50% 50%, rgba(96,165,250,.72) 0%, rgba(52,224,232,.32) 40%, rgba(52,224,232,0) 72%);}
+  .orb.is-speaking .orb-glow{background:radial-gradient(circle at 50% 50%, rgba(217,70,239,.76) 0%, rgba(167,139,250,.38) 40%, rgba(139,92,246,0) 72%);}
+  .orb.is-thinking .orb-glow{animation-duration:2.6s;}
 
   .mic-label{font-size:13px; color:var(--text-dim); letter-spacing:.02em; min-height:18px; font-variant:all-small-caps; letter-spacing:.08em;}
   .convo-pill{display:inline-flex; align-items:center; gap:9px; padding:11px 20px; min-height:44px;
@@ -265,10 +240,8 @@
   /* ---------- reduced motion: kill drift + rotation, static gradient orb ---------- */
   @media (prefers-reduced-motion:reduce){
     .blob{animation:none !important;}
-    .orb-glow,.orb-swirl,.orb-ring{animation:none !important;}
-    .orb-core{transform:none !important;}
-    .orb-glow{transform:none !important; opacity:.6 !important;}
-    .orb-ring{opacity:0 !important;}
+    /* the globe canvas renders one static frame (JS checks REDUCED); pin the halo too */
+    .orb-glow{animation:none !important; transform:none !important; opacity:.6 !important;}
     .card{animation:none !important; opacity:1; transform:none;}
     .bubble{animation:none !important;}
     *{scroll-behavior:auto !important;}
@@ -297,12 +270,7 @@
       <section class="hero">
         <div class="orb is-idle" id="orb" role="button" tabindex="0" aria-label="Hold to talk to Nervice">
           <div class="orb-glow"></div>
-          <div class="orb-core">
-            <div class="orb-swirl"></div>
-            <div class="orb-sheen"></div>
-            <div class="orb-grain" id="orbGrain"></div>
-          </div>
-          <div class="orb-ring"></div>
+          <canvas class="orb-globe" id="globe"></canvas>
         </div>
         <div>
           <div class="clock" id="clock">--:--</div>
@@ -376,8 +344,7 @@ function makeNoise(size,alpha){
   for(let i=0;i<img.data.length;i+=4){const v=(Math.random()*255)|0; img.data[i]=img.data[i+1]=img.data[i+2]=v; img.data[i+3]=alpha;}
   ctx.putImageData(img,0,0); return cv.toDataURL('image/png');
 }
-(function(){ const g=makeNoise(140,26); $('#grain').style.backgroundImage=`url(${g})`;
-  $('#orbGrain').style.backgroundImage=`url(${makeNoise(90,40)})`; })();
+(function(){ $('#grain').style.backgroundImage=`url(${makeNoise(140,26)})`; })();
 
 /* ---- toast ---- */
 let toastT; function toast(m){const t=$('#toast'); t.textContent=m; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2800);}
@@ -417,6 +384,86 @@ function ampLoop(){
   orb.style.setProperty('--amp', ampSmooth.toFixed(3));
   rafId=requestAnimationFrame(ampLoop);
 }
+
+/* ================= holographic wireframe globe (canvas) =================
+   A 3D sphere of glowing purple lines — meridians + parallels with node dots — rotating on its
+   vertical axis. Pure 2D-canvas with orthographic projection: precompute unit-sphere points ONCE,
+   rotate around Y each frame, project, draw depth-banded segments (front bright, back dim) with a
+   two-pass fake glow (wide soft stroke + thin bright core, additive). Reads the SAME ampSmooth +
+   orbState the amplitude system already maintains. ~8 parallels x 12 meridians. Reduced-motion:
+   one static frame, no rAF. */
+(function initGlobe(){
+  const cv=$('#globe'), ctx=cv.getContext('2d'), DPR=Math.min(window.devicePixelRatio||1,2);
+  let W=0,H=0,cx=0,cy=0,R=0;
+  function resize(){
+    const r=cv.getBoundingClientRect();
+    W=Math.max(120,r.width); H=Math.max(120,r.height);
+    cv.width=Math.round(W*DPR); cv.height=Math.round(H*DPR);
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    cx=W/2; cy=H/2; R=Math.min(W,H)*0.40;   // sphere radius (leaves room for the amp pulse)
+  }
+  resize(); window.addEventListener('resize',resize,{passive:true});
+
+  // --- precompute the unit-sphere grid (lat x lon) + poles, ONCE ---
+  const LATS=[-70,-50,-30,-10,10,30,50,70], LON=12;   // 8 parallels, 12 meridians
+  const P=[];                                          // flat points: grid then north, south
+  for(let i=0;i<LATS.length;i++){
+    const la=LATS[i]*Math.PI/180, cl=Math.cos(la), sl=Math.sin(la);
+    for(let j=0;j<LON;j++){ const lo=(j/LON)*6.28318; P.push({x:cl*Math.cos(lo),y:sl,z:cl*Math.sin(lo)}); }
+  }
+  const NI=LATS.length*LON, SI=NI+1; P.push({x:0,y:1,z:0},{x:0,y:-1,z:0});
+  const id=(i,j)=>i*LON+j;
+  const segs=[];                                       // [aIdx,bIdx] connectivity, computed once
+  for(let i=0;i<LATS.length;i++) for(let j=0;j<LON;j++){
+    segs.push(id(i,j), id(i,(j+1)%LON));               // parallel ring
+    if(i<LATS.length-1) segs.push(id(i,j), id(i+1,j)); // meridian rung
+  }
+  for(let j=0;j<LON;j++){ segs.push(NI,id(LATS.length-1,j)); segs.push(SI,id(0,j)); } // pole caps
+
+  const BANDS=6;
+  const lb=[], nb=[];                                  // reusable depth buckets (no per-frame GC)
+  for(let b=0;b<BANDS;b++){ lb.push([]); nb.push([]); }
+  const sx=new Float32Array(P.length), sy=new Float32Array(P.length), sz=new Float32Array(P.length);
+  let angle=0, lastT=0, hue=265;
+  const hueFor=s=> s==='listening'?188 : s==='speaking'?288 : 265;   // cyan / magenta-violet / violet
+
+  function render(){
+    const amp=ampSmooth, rad=R*(1+amp*0.16), bright=0.55+amp*0.45;
+    hue += (hueFor(orbState)-hue)*0.08;
+    const h=hue|0, ca=Math.cos(angle), sa=Math.sin(angle);
+    for(let m=0;m<P.length;m++){ const p=P[m]; const X=p.x*ca+p.z*sa; sz[m]=-p.x*sa+p.z*ca; sx[m]=cx+X*rad; sy[m]=cy-p.y*rad; }
+    for(let b=0;b<BANDS;b++){ lb[b].length=0; nb[b].length=0; }
+    for(let s=0;s<segs.length;s+=2){ const a=segs[s],c=segs[s+1]; let bi=(((sz[a]+sz[c])*0.25+0.5)*(BANDS-1))|0; if(bi<0)bi=0; else if(bi>=BANDS)bi=BANDS-1; lb[bi].push(a,c); }
+    for(let m=0;m<NI;m++){ let bi=((sz[m]*0.5+0.5)*(BANDS-1))|0; if(bi<0)bi=0; else if(bi>=BANDS)bi=BANDS-1; nb[bi].push(m); }
+    ctx.clearRect(0,0,W,H); ctx.lineCap='round'; ctx.lineJoin='round'; ctx.globalCompositeOperation='lighter';
+    for(let b=0;b<BANDS;b++){
+      const arr=lb[b]; if(!arr.length) continue;
+      const a=b/(BANDS-1), alpha=(0.07+a*0.9)*bright;
+      ctx.beginPath();
+      for(let m=0;m<arr.length;m+=2){ ctx.moveTo(sx[arr[m]],sy[arr[m]]); ctx.lineTo(sx[arr[m+1]],sy[arr[m+1]]); }
+      ctx.strokeStyle=`hsla(${h},90%,72%,${(alpha*0.20).toFixed(3)})`; ctx.lineWidth=3.4; ctx.stroke();   // glow
+      ctx.strokeStyle=`hsla(${h},96%,${(64+a*22)|0}%,${alpha.toFixed(3)})`; ctx.lineWidth=1; ctx.stroke(); // core
+    }
+    for(let b=0;b<BANDS;b++){
+      const arr=nb[b]; if(!arr.length) continue;
+      const a=b/(BANDS-1), rr=1+a*1.5+amp*1.3;
+      ctx.fillStyle=`hsla(${h},100%,${(72+a*16)|0}%,${((0.12+a*0.85)*bright).toFixed(3)})`;
+      ctx.beginPath();
+      for(let m=0;m<arr.length;m++){ ctx.moveTo(sx[arr[m]]+rr,sy[arr[m]]); ctx.arc(sx[arr[m]],sy[arr[m]],rr,0,6.28318); }
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation='source-over';
+  }
+  function frame(t){
+    requestAnimationFrame(frame);
+    const dt=lastT?Math.min(0.05,(t-lastT)/1000):0.016; lastT=t;
+    const spd=(orbState==='thinking'?0.55:0.30)*(1+ampSmooth*0.9);   // base + amplitude (faster while thinking)
+    angle+=spd*dt; if(angle>6.28318) angle-=6.28318;
+    render();
+  }
+  if(REDUCED){ angle=0.6; render(); }                 // static wireframe globe, no rotation
+  else requestAnimationFrame(frame);
+})();
 
 /* ================= Web Audio: playback + analysers ================= */
 let audioCtx=null, analyser=null, ampData=null, micAnalyser=null, nextStart=0, scheduled=0;
