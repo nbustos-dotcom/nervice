@@ -8,9 +8,16 @@ transcription, nothing leaves the machine, ~6% of one CPU core. ACTIVE reuses th
 pipeline unchanged (record -> whisper STT -> junk gate -> respond [memory/persona/ladder/safety] ->
 Kokoro TTS).
 
-WAKE WORD: ships with the bundled **"Hey Jarvis"** model (works today, free). A custom "Hey Nervice"
-model can be trained later with openWakeWord's synthetic-data pipeline (heavier: multi-GB
-augmentation data + a training run) and dropped into models/wakeword/ — see models/wakeword/README.
+WAKE WORD: ships with the bundled "Hey Jarvis" model as a fallback. For the custom "Hey Nervice"
+word, the least-painful free path is openWakeWord's official training Colab (free Google T4 GPU,
+~10-30 min, only a normal Google account):
+    https://colab.research.google.com/github/dscripka/openWakeWord/blob/main/notebooks/automatic_model_training.ipynb
+In the config cell set  config["target_phrase"] = ["hey nervice"]  (and model_name "hey_nervice"),
+run the cells (install -> download data -> generate -> augment -> train -> export), then download
+my_custom_model/hey_nervice.onnx into models/wakeword/. wake.py auto-prefers any *nervice*.onnx
+over jarvis — no code change. Tune WAKE_THRESHOLD below if it's too eager/deaf. Full walkthrough:
+models/wakeword/README. (Local training on this box is NOT recommended — multi-GB augmentation
+downloads + a torch training stack that fights Python 3.14/Windows; the Colab path avoids all of it.)
 
 If no model is present, this prints a clear message and falls back to the normal always-listening
 voice loop, so `python wake.py` always does something useful. `python wake.py --setup` downloads the
