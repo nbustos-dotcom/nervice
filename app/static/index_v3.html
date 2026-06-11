@@ -33,10 +33,14 @@
   ================================================================================ -->
 <style>
   :root{
-    --accent:#19e3e3;                         /* flip to purple in ONE line: e.g. #a855f7 */
-    --accent-soft:rgba(25,227,227,.55);
-    --line:rgba(25,227,227,.16);
-    --line-soft:rgba(25,227,227,.09);
+    /* TWO-TONE SYSTEM: purple = Nervice's IDENTITY (structure, headers, borders, brand, controls);
+       cyan = live DATA (gauge fills, readout numbers, spectrum, status, timestamps). */
+    --accent:#b07cff;                         /* Nervice purple — ~6.9:1 on the near-black bg (AA) */
+    --accent-soft:rgba(176,124,255,.55);
+    --accent2:#19e3e3;                        /* cyan — live data (~12.6:1, AA) */
+    --accent2-soft:rgba(25,227,227,.5);
+    --line:rgba(176,124,255,.20);
+    --line-soft:rgba(176,124,255,.11);
     --bg:#04070b; --bg2:#060b11;
     --text:#cfe9ec; --dim:#8aa6ac; --faint:#6d8d93;   /* --faint lifted to >=4.5:1 on the near-black bg */
     --warn:#ffb23e; --crit:#ff4d62; --ok:#19e3e3;
@@ -65,7 +69,7 @@
   .stat{font-family:var(--mono); font-size:11px; letter-spacing:.12em; color:var(--dim); display:flex; align-items:center; gap:7px; text-transform:uppercase;}
   .stat b{color:var(--text); font-weight:600;}
   .dot{width:7px; height:7px; border-radius:50%; background:var(--faint); box-shadow:0 0 0 0 transparent; transition:.3s;}
-  .dot.on{background:var(--ok); box-shadow:0 0 9px 1px var(--accent-soft);}
+  .dot.on{background:var(--ok); box-shadow:0 0 9px 1px var(--accent2-soft);}   /* status = data = cyan */
   .dot.warn{background:var(--warn); box-shadow:0 0 8px 1px rgba(255,178,62,.5);}
   .dot.off{background:var(--crit);}
   .spacer{flex:1;}
@@ -84,7 +88,7 @@
   .col{display:flex; flex-direction:column; gap:var(--gap); min-width:0;}
 
   /* ---------- HUD panel (thin frame + corner brackets, NOT glass) ---------- */
-  .panel{position:relative; border:1px solid var(--line); background:linear-gradient(180deg, rgba(13,24,32,.5), rgba(6,11,17,.35));
+  .panel{position:relative; border:1px solid var(--line); background:rgba(11,14,24,.45);   /* flat — no gradient panels */
          padding:12px 13px 13px; min-width:0;
          opacity:0; transform:translateY(8px); animation:boot .5s var(--ease,cubic-bezier(.2,.7,.3,1)) forwards;}
   .panel::before,.panel::after{content:""; position:absolute; width:11px; height:11px; pointer-events:none;}
@@ -93,7 +97,7 @@
   @keyframes boot{to{opacity:1; transform:none;}}
   .ph{display:flex; align-items:center; gap:8px; margin:0 0 11px; font-family:var(--mono); font-size:10px;
       letter-spacing:.22em; text-transform:uppercase; color:var(--accent);}
-  .ph .ln{flex:1; height:1px; background:linear-gradient(90deg,var(--line),transparent);}
+  .ph .ln{flex:1; height:1px; background:var(--line-soft);}
   .ph .n{color:var(--faint); letter-spacing:.1em;}
 
   /* ---------- system gauges ---------- */
@@ -101,18 +105,18 @@
   .gauge{position:relative; display:flex; flex-direction:column; align-items:center; gap:3px;}
   .gauge svg{width:100%; height:auto; display:block; overflow:visible;}
   .gtrack{fill:none; stroke:var(--line); stroke-width:3;}
-  .gval{fill:none; stroke:var(--accent); stroke-width:3; stroke-linecap:round;
+  .gval{fill:none; stroke:var(--accent2); stroke-width:3; stroke-linecap:round;   /* live value = data = cyan (JS swaps in the purple->cyan sweep) */
         transition:stroke-dashoffset .8s cubic-bezier(.2,.7,.3,1), stroke .4s;
-        filter:drop-shadow(0 0 3px var(--accent-soft));}
+        filter:drop-shadow(0 0 3px var(--accent2-soft));}
   .gtick{stroke:var(--line); stroke-width:1;}
-  .gnum{font-family:var(--mono); font-weight:600; font-size:15px; fill:var(--text); text-anchor:middle; font-variant-numeric:tabular-nums;}
+  .gnum{font-family:var(--mono); font-weight:600; font-size:15px; fill:var(--accent2); text-anchor:middle; font-variant-numeric:tabular-nums;}
   .gunit{font-family:var(--mono); font-size:7px; letter-spacing:.1em; fill:var(--faint); text-anchor:middle;}
   .glab{font-family:var(--mono); font-size:9px; letter-spacing:.16em; color:var(--dim); text-transform:uppercase;}
 
   /* readout rows */
   .rd{display:grid; grid-template-columns:1fr auto; gap:4px 10px; margin-top:12px; padding-top:11px; border-top:1px solid var(--line-soft);}
   .rd .k{font-size:11px; letter-spacing:.06em; color:var(--dim); text-transform:uppercase; font-family:var(--mono);}
-  .rd .x{font-family:var(--mono); font-weight:600; font-size:12px; color:var(--text); text-align:right; font-variant-numeric:tabular-nums;}
+  .rd .x{font-family:var(--mono); font-weight:600; font-size:12px; color:var(--accent2); text-align:right; font-variant-numeric:tabular-nums;}
 
   /* ---------- center: clock ruler ---------- */
   .clockpanel{text-align:center; padding-top:14px;}
@@ -132,22 +136,29 @@
 
   /* ---------- the arc reactor ---------- */
   .reactor-wrap{display:flex; flex-direction:column; align-items:center; gap:12px; padding:6px 0 4px;}
+  /* overflow:hidden + circle clip = the core can NEVER paint outside the orb container, whatever
+     the amplitude does (the overdrive safeguard). */
   .reactor{--amp:0; position:relative; width:clamp(220px,40vw,330px); aspect-ratio:1; cursor:pointer;
+           overflow:hidden; border-radius:50%;
            touch-action:manipulation; user-select:none; -webkit-user-select:none;}
-  .reactor svg{position:absolute; inset:0; width:100%; height:100%; overflow:visible;}
+  .reactor svg{position:absolute; inset:0; width:100%; height:100%; overflow:hidden;}
   .reactor .static-track{fill:none; stroke:var(--line);}
+  /* THE one hero gradient: purple identity at the core -> cyan data energy at the rings. */
   .ring-ticks line{stroke:var(--accent); stroke-width:1;}
-  .core-glow{fill:var(--accent); opacity:calc(.10 + var(--amp)*.5); filter:blur(10px);
-             transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + var(--amp)*.7)); transition:opacity .1s linear;}
+  #ringOuter line{stroke:var(--accent2);}                    /* outer energy ring = cyan */
+  /* amplitude is clamped twice: JS normalizes to [0,1], and min(var(--amp),1) bounds the CSS map.
+     core 1.0-1.12, fill <=0.74, glow <=1.2 of r26 (~31+blur) — always inside the r58 inner ring. */
+  .core-glow{fill:var(--accent); opacity:calc(.10 + min(var(--amp),1)*.4); filter:blur(10px);
+             transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + min(var(--amp),1)*.2)); transition:opacity .1s linear;}
   .core{fill:none; stroke:var(--accent); stroke-width:1.4;
-        transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + var(--amp)*.16));}
-  .core-fill{fill:var(--accent); opacity:calc(.5 + var(--amp)*.5);
-             transform-box:fill-box; transform-origin:center; transform:scale(calc(.34 + var(--amp)*.5));}
-  .amp-arc{fill:none; stroke:var(--accent); stroke-width:2; stroke-linecap:round; filter:drop-shadow(0 0 4px var(--accent-soft));}
-  .reactor.listening{--rc:#37e0ff;}  .reactor.speaking{--rc:#ff8a4c;}  .reactor.thinking{--rc:#ffd24a;}
-  .reactor.listening .ring-ticks line,.reactor.listening .core,.reactor.listening .core-fill,.reactor.listening .amp-arc{stroke:#37e0ff;fill:#37e0ff;}
-  .reactor.speaking .ring-ticks line,.reactor.speaking .core,.reactor.speaking .core-fill,.reactor.speaking .amp-arc{stroke:#ff8a4c;fill:#ff8a4c;}  /* warm */
-  .reactor.listening .core-glow,.reactor.speaking .core-glow{fill:var(--rc);}
+        transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + min(var(--amp),1)*.12));}
+  .core-fill{fill:url(#coreGrad); opacity:calc(.5 + min(var(--amp),1)*.5);
+             transform-box:fill-box; transform-origin:center; transform:scale(calc(.34 + min(var(--amp),1)*.4));}
+  .amp-arc{fill:none; stroke:url(#reactorGrad); stroke-width:2; stroke-linecap:round; filter:drop-shadow(0 0 4px var(--accent-soft));}
+  .reactor.listening{--rc:#37e0ff;}  .reactor.speaking{--rc:#ff8a4c;}  .reactor.thinking{--rc:#cf9bff;}  /* violet shimmer */
+  .reactor.listening .ring-ticks line,.reactor.listening #ringOuter line,.reactor.listening .core,.reactor.listening .core-fill,.reactor.listening .amp-arc{stroke:#37e0ff;fill:#37e0ff;}
+  .reactor.speaking .ring-ticks line,.reactor.speaking #ringOuter line,.reactor.speaking .core,.reactor.speaking .core-fill,.reactor.speaking .amp-arc{stroke:#ff8a4c;fill:#ff8a4c;}  /* warm */
+  .reactor.listening .core-glow,.reactor.speaking .core-glow,.reactor.thinking .core-glow{fill:var(--rc);}
   /* distinct calm states. listening/speaking are amplitude-driven via --amp (JS); idle + thinking
      get gentle CSS loops so each state reads differently. */
   @keyframes rx-breathe{0%,100%{transform:scale(1);opacity:.12}50%{transform:scale(1.07);opacity:.2}}
@@ -172,7 +183,7 @@
         padding-right:2px; margin-bottom:11px; font-size:13.5px;}
   .msgs::-webkit-scrollbar{width:0;}
   .bub{max-width:88%; padding:7px 11px; line-height:1.4; white-space:pre-wrap; word-wrap:break-word; border:1px solid var(--line-soft); animation:pop .3s ease;}
-  .bub.you{align-self:flex-end; color:var(--text); border-color:var(--accent-soft); background:rgba(25,227,227,.07);}
+  .bub.you{align-self:flex-end; color:var(--text); border-color:var(--accent-soft); background:rgba(176,124,255,.08);}
   .bub.nervice{align-self:flex-start; color:var(--dim); background:rgba(255,255,255,.018);}
   @keyframes pop{from{opacity:0; transform:translateY(4px);}to{opacity:1;}}
   .convo-empty{margin:auto; text-align:center; color:var(--faint); font-size:12px; font-family:var(--mono); letter-spacing:.06em; padding:14px;}
@@ -186,13 +197,13 @@
 
   /* ---------- weather ---------- */
   .wx-now{display:flex; align-items:center; gap:13px; padding-bottom:11px; border-bottom:1px solid var(--line-soft); margin-bottom:8px;}
-  .wx-ico{width:42px; height:42px; color:var(--accent); flex:none;}
+  .wx-ico{width:42px; height:42px; color:var(--accent2); flex:none;}   /* live conditions = data */
   .wx-ico svg{width:100%; height:100%;}
-  .wx-t{font-family:var(--mono); font-weight:600; font-size:32px; line-height:1; font-variant-numeric:tabular-nums;}
+  .wx-t{font-family:var(--mono); font-weight:600; font-size:32px; line-height:1; font-variant-numeric:tabular-nums; color:var(--accent2);}
   .wx-c{font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim); margin-top:3px; font-family:var(--mono);}
   .fc{display:grid; grid-template-columns:1fr auto 2.4em 2.4em; gap:8px 10px; align-items:center;}
   .fc .fd{font-family:var(--mono); font-size:11px; letter-spacing:.08em; color:var(--dim); text-transform:uppercase;}
-  .fc .fi{width:18px; height:18px; color:var(--accent-soft);}
+  .fc .fi{width:18px; height:18px; color:var(--accent2-soft);}   /* forecast conditions = data */
   .fc .fi svg{width:100%;height:100%;}
   .fc .fh{font-family:var(--mono); font-weight:600; font-size:12px; text-align:right; font-variant-numeric:tabular-nums;}
   .fc .fl{font-family:var(--mono); font-size:12px; color:var(--faint); text-align:right; font-variant-numeric:tabular-nums;}
@@ -200,7 +211,7 @@
   /* ---------- core stats ---------- */
   .stats{display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line-soft); border:1px solid var(--line-soft);}
   .stat-cell{background:var(--bg2); padding:11px 12px;}
-  .stat-cell .v{font-family:var(--mono); font-weight:600; font-size:21px; color:var(--text); font-variant-numeric:tabular-nums; letter-spacing:.02em;}
+  .stat-cell .v{font-family:var(--mono); font-weight:600; font-size:21px; color:var(--accent2); font-variant-numeric:tabular-nums; letter-spacing:.02em;}
   .stat-cell .v.sm{font-size:13px;}
   .stat-cell .l{font-family:var(--mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint); margin-top:3px;}
 
@@ -211,7 +222,7 @@
   .frow:last-child{border-bottom:none;}
   .frow .mk{font-family:var(--mono); font-size:10px; color:var(--accent-soft); flex:none; width:13px; text-align:center;}
   .frow .tx{flex:1; font-size:12.5px; color:var(--text); line-height:1.35; word-break:break-word;}
-  .frow .ag{font-family:var(--mono); font-size:10px; color:var(--faint); flex:none; font-variant-numeric:tabular-nums;}
+  .frow .ag{font-family:var(--mono); font-size:10px; color:var(--accent2); opacity:.75; flex:none; font-variant-numeric:tabular-nums;}   /* timestamps = data */
   .news .frow .tx{color:var(--dim);}
   .empty{font-family:var(--mono); font-size:11px; letter-spacing:.04em; color:var(--faint); padding:8px 2px;}
 
@@ -279,6 +290,14 @@
         <div class="reactor-wrap">
           <div class="reactor idle" id="reactor" role="button" tabindex="0" aria-label="Hold to talk to Nervice">
             <svg viewBox="0 0 200 200">
+              <defs>
+                <radialGradient id="coreGrad">
+                  <stop offset="0%" style="stop-color:var(--accent)"/><stop offset="55%" style="stop-color:var(--accent)"/><stop offset="100%" style="stop-color:var(--accent2)"/>
+                </radialGradient>
+                <linearGradient id="reactorGrad" x1="0" y1="1" x2="1" y2="0">
+                  <stop offset="0%" style="stop-color:var(--accent)"/><stop offset="100%" style="stop-color:var(--accent2)"/>
+                </linearGradient>
+              </defs>
               <g class="ring-outer" id="ringOuter"></g>
               <g class="ring-mid" id="ringMid"></g>
               <circle class="static-track" cx="100" cy="100" r="58" stroke-width="1" opacity=".5"/>
@@ -368,7 +387,7 @@ async function api(path){
   function draw(){
     const W=innerWidth, H=innerHeight; cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
     ctx.clearRect(0,0,W,H);
-    const acc='25,227,227';
+    const acc='176,124,255';   /* circuit traces + grid = structure = Nervice purple */
     // faint grid
     ctx.strokeStyle=`rgba(${acc},0.035)`; ctx.lineWidth=1; const step=46;
     ctx.beginPath();
@@ -411,7 +430,13 @@ function ampLoop(){
   if(!ampActive) return;
   const node = orbState==='speaking' ? analyser : orbState==='listening' ? micAnalyser : null;
   let amp=0;
-  if(node){ node.getByteFrequencyData(ampData); let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i]; amp=Math.min(1,Math.sqrt(s/ampData.length)/118); }
+  if(node){
+    node.getByteFrequencyData(ampData); let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i];
+    // mic runs far hotter than reply audio — normalize each path separately so normal speech is a
+    // gentle pulse, then HARD-clamp to [0,1] (CSS additionally bounds the visual map with min()).
+    const div = orbState==='listening' ? 190 : 118;
+    amp = Math.max(0, Math.min(1, Math.sqrt(s/ampData.length)/div));
+  }
   // Smoothing/easing so the pulse never twitches on a single sample. SPEAKING is asymmetric —
   // fast attack (responds to each phrase) + slow release (doesn't collapse to flat between words),
   // which reads as calm, confident talking. LISTENING tracks the mic responsively both ways.
@@ -445,7 +470,7 @@ function arcPath(frac){ // amplitude arc on r=64, from top, clockwise, fraction 
 function drawSpectrum(){
   const W=spec.width, H=spec.height; sctx.clearRect(0,0,W,H);
   const node = orbState==='speaking'?analyser : orbState==='listening'?micAnalyser : null;
-  const bars=48, bw=W/bars, css=getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()||'#19e3e3';
+  const bars=48, bw=W/bars, css=getComputedStyle(document.documentElement).getPropertyValue('--accent2').trim()||'#19e3e3';   /* spectrum = data = cyan */
   let live=false;
   if(node && audioCtx){ node.getByteFrequencyData(ampData); live=true; }
   sctx.fillStyle=css;
@@ -616,7 +641,10 @@ function buildGauges(){
   for(const g of GAUGES){
     let ticks=''; for(let i=0;i<24;i++){ const a=i/24*6.28318, c=Math.cos(a), sn=Math.sin(a);
       ticks+=`<line class="gtick" x1="${(50+c*48).toFixed(1)}" y1="${(50+sn*48).toFixed(1)}" x2="${(50+c*46).toFixed(1)}" y2="${(50+sn*46).toFixed(1)}"/>`; }
-    html+=`<div class="gauge"><svg viewBox="0 0 100 100">${ticks}
+    html+=`<div class="gauge"><svg viewBox="0 0 100 100">
+      <defs><linearGradient id="gg-${g.k}" x1="0" y1="1" x2="0" y2="0">
+        <stop offset="0%" style="stop-color:var(--accent)"/><stop offset="100%" style="stop-color:var(--accent2)"/>
+      </linearGradient></defs>${ticks}
       <circle class="gtrack" cx="50" cy="50" r="42"/>
       <circle class="gval" id="g-${g.k}" cx="50" cy="50" r="42" transform="rotate(-90 50 50)" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${C.toFixed(1)}"/>
       <text class="gnum" id="gn-${g.k}" x="50" y="49">--</text>
@@ -630,7 +658,7 @@ function setGauge(k,pct,num,unit){
   const v=$('#g-'+k); if(v) v.style.strokeDashoffset=(C*(1-pct/100)).toFixed(1);
   const n=$('#gn-'+k); if(n) n.textContent=num;
   const u=$('#gu-'+k); if(u && unit!==undefined) u.textContent=unit;
-  if(v){ const col = pct>=88?'var(--crit)':pct>=68?'var(--warn)':'var(--accent)'; v.style.stroke=col; }
+  if(v){ const col = pct>=88?'var(--crit)':pct>=68?'var(--warn)':`url(#gg-${k})`; v.style.stroke=col; }   /* purple(low)->cyan(high) sweep; warn/crit stay flat */
 }
 function fmtBytes(b){ if(b<1024)return b+' B'; if(b<1048576)return (b/1024).toFixed(0)+' K'; if(b<1073741824)return (b/1048576).toFixed(1)+' M'; return (b/1073741824).toFixed(1)+' G'; }
 function fmtUptime(s){ const d=s/86400|0, h=(s%86400)/3600|0, m=(s%3600)/60|0; return d?`${d}d ${h}h`:`${h}h ${m}m`; }
