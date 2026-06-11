@@ -298,12 +298,25 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
                     await send({"type": "audio", "wav_base64": b64})
         reply = await execute_route(user_id, system, route, text, window, voice_mode=voice, on_ack=on_ack)
 
-    if not streamed and reply:            # complete-reply paths deliver text then audio as one
+    if not streamed and reply:
+        # Complete-reply paths (tool turns + the capped fallback rungs): text lands at once, but
+        # audio is SENTENCE-PIPELINED like the streaming path — the phone starts speaking after
+        # the first sentence's synth (~0.8s) instead of waiting for the whole reply's audio
+        # (~1-3s saved on the local rung). Frames are sent in order; the client schedules them
+        # back-to-back, so playback is seamless and complete.
         await send({"type": "text", "text": reply})
         if voice:
-            b64 = await asyncio.to_thread(_synth_full_b64, reply)
-            if b64:
-                await send({"type": "audio", "wav_base64": b64})
+            sents = [s.strip() for s in _SENT_BOUNDARY.split(reply)
+                     if s.strip() and re.search(r"[A-Za-z0-9]", s)]
+            if len(sents) <= 1:
+                b64 = await asyncio.to_thread(_synth_full_b64, reply)
+                if b64:
+                    await send({"type": "audio", "wav_base64": b64})
+            else:
+                for s in sents:
+                    b64 = await asyncio.to_thread(_synth_sentence_b64, s)
+                    if b64:
+                        await send({"type": "audio", "wav_base64": b64})
 
     await send({"type": "done", "reply": reply or ""})
     _store(user_id, conversation_id, text, reply or "")
