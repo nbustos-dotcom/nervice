@@ -247,7 +247,54 @@ def _split_browser(target: str) -> tuple[str, str | None]:
 
 
 # What Nervice can actually do — quoted in every honest refusal so the boundary is always clear.
-_CAPS = "I can only open apps and websites, take screenshots, and switch windows"
+_CAPS = ("I can only open apps and websites, play something on YouTube, take screenshots, "
+         "and switch windows")
+
+# ---- play on YouTube: resolve a REAL video via yt-dlp, open the watch URL (auto-plays) ----
+# This composes the existing SAFE open_url action with a read-only search resolution — no new
+# boundary surface. Bare "play music/something/it" picks from a broad music list.
+_PLAY_RE = re.compile(r"^\s*(?:please\s+|hey\s+|actually\s+|can\s+you\s+|could\s+you\s+|now\s+|"
+                      r"just\s+|go\s+ahead\s+and\s+)*play\s+(.+)$", re.I)
+_PLAY_BARE = {"it", "that", "this", "something", "anything", "music", "some music", "a song",
+              "a video", "me a song", "me something", "me some music", "songs", "some songs",
+              "something good", "whatever", "some tunes", "tunes"}
+_MUSIC_QUERIES = ["lofi hip hop radio", "classic rock greatest hits", "top hits 2026 playlist",
+                  "relaxing jazz piano", "best of 80s music mix", "chill electronic mix"]
+
+
+def _resolve_youtube(query: str):
+    """ytsearch1 -> (video_id, title) or (None, None). Read-only network search."""
+    import app.net  # noqa  (truststore — Norton TLS; no-op if already injected)
+    import yt_dlp
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as y:
+        info = y.extract_info(f"ytsearch1:{query}", download=False)
+    entries = (info or {}).get("entries") or []
+    if not entries:
+        return None, None
+    return entries[0].get("id"), entries[0].get("title") or "that video"
+
+
+def play_youtube(query: str) -> str:
+    """Resolve a real video and open its watch URL (auto-plays) in the default browser. Honest on
+    every failure path — never claims playback without a resolved video AND a real launch."""
+    import random
+    q = (query or "").strip().strip(".!?,")
+    q = re.sub(r"\s+on\s+(?:youtube|yt)\s*$", "", q, flags=re.I).strip()
+    if not q or q.lower() in _PLAY_BARE:
+        q = random.choice(_MUSIC_QUERIES)
+    try:
+        vid, title = _resolve_youtube(q)
+    except Exception as e:
+        print(f"[computer play resolve failed] {repr(e)[:100]}", file=sys.stderr)
+        vid, title = None, None
+    if not vid:
+        return f"I couldn't pull up a video for \"{q}\" — YouTube search isn't answering right now."
+    r = open_url(f"https://www.youtube.com/watch?v={vid}")
+    if r.lower().startswith("opened"):
+        _audit("PLAY", f"{q}\t{vid}\t{title}")
+        return f"Playing \"{title}\" on YouTube."
+    return r   # the launch itself failed — open_url's honest report stands
 
 
 def _gap_phrase(low: str) -> str:
@@ -299,7 +346,14 @@ def interpret(message: str) -> Decision:
         return Decision(None, msg, "risky", False,
                         f"I can't {_gap_phrase(low)} yet — right now {_CAPS}.", msg)
 
-    # 4. switch/focus a window — safe (just brings an existing window forward)
+    # 4. play <something> — resolve a real YouTube video and open it (auto-plays). SAFE: composes
+    #    the open_url action with a read-only search. Bare "play it/music/something" (the follow-up
+    #    after opening YouTube) plays a music pick instead of misreading "it" as an unknown app.
+    m = _PLAY_RE.match(low)
+    if m:
+        return Decision("play_youtube", _clean_target(m.group(1)), "safe", True, "", msg)
+
+    # 5. switch/focus a window — safe (just brings an existing window forward)
     m = re.search(rf"(?:{_SWITCH_VERBS})\s+(?:the\s+|to\s+)?(.+)", low)
     if m:
         return Decision("focus_window", _clean_target(m.group(1)), "safe", True, "", msg)
@@ -505,6 +559,7 @@ def focus_window(substr: str) -> str:
 
 _ACTIONS = {"open_app": lambda d: open_app(d.target),
             "open_url": lambda d: open_url(d.target, d.browser),
+            "play_youtube": lambda d: play_youtube(d.target),
             "screenshot": lambda d: screenshot(),
             "list_windows": lambda d: list_windows(),
             "focus_window": lambda d: focus_window(d.target)}

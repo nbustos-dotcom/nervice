@@ -32,3 +32,4 @@ scikit-learn
 scipy
 narwhals
 # note: openwakeword uses the existing onnxruntime-gpu (install it with --no-deps to avoid pulling CPU onnxruntime)
+yt-dlp
