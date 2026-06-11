@@ -1,6 +1,8 @@
 import re
+import sys
 
 from app.llm import chat_json
+from app import computer   # leaf module — its verb/risk vocabularies are the single source of truth
 
 ROUTER_SYSTEM = """Classify the user's message into exactly one route. Output ONLY JSON: {"route":"hard"} or {"route":"build"} or {"route":"selfmod"} or {"route":"browse"} or {"route":"control"} or {"route":"normal"}.
 The key test for selfmod/build/browse is whether the user is making an EXPLICIT ACTION REQUEST, not merely discussing, asking an opinion, or asking how something could be done. Discussion routes to normal.
@@ -42,6 +44,36 @@ _MACHINE_ACTION = re.compile(r"\b(open|launch|start|close|quit|kill|terminate|en
                              r"screenshot|switch|focus|run|create|make|shut\s*down|shutdown|reboot|restart)\b", re.I)
 
 
+def is_machine_question(msg: str) -> bool:
+    """Deterministic: a READ-ONLY question about this machine's specs/stats/processes/files
+    (no action verb). Shared by the router guard and the sysinfo direct-answer fast path."""
+    m = msg or ""
+    return bool(_SYSINFO_ASK.search(m) and _SYSINFO_NOUN.search(m) and not _MACHINE_ACTION.search(m))
+
+
+# Open-verb + control-surface patterns for the no-LLM fallback router, built from computer.py's
+# own vocabularies so the two can never drift. Used ONLY when the LLM router is unavailable.
+_KW_OPEN = re.compile(rf"^\s*(?:please\s+|hey\s+|can you\s+)?(?:{computer._OPEN_VERBS})\s+\S", re.I)
+_KW_SWITCH = re.compile(rf"\b(?:{computer._SWITCH_VERBS})\b", re.I)
+
+
+def _keyword_route(msg: str) -> str:
+    """Deterministic fallback when the LLM router can't run (Groq capped/down). Reuses the control
+    surface's OWN regexes: screenshots, window ops, risky/destructive words (so the honest refusal
+    still fires), and open/launch verbs all go to control; machine questions to the sysinfo path;
+    everything else stays normal. Machine control NEVER silently dies with zero Groq budget."""
+    m = msg or ""
+    if is_machine_question(m):
+        return "normal"                      # the sysinfo tools / fast path answer these
+    if computer._SCREENSHOT.search(m) or computer._LIST_WINDOWS.search(m) or _KW_SWITCH.search(m):
+        return "control"
+    if computer._RISKY_WORDS.search(m):      # delete/uninstall/send/... -> control's honest refusal
+        return "control"
+    if _KW_OPEN.search(m):                   # open/launch/start/pull up <something>
+        return "control"
+    return "normal"
+
+
 async def classify(user_message: str) -> str:
     msg = user_message or ""
     # A reaction/complaint about a prior action is conversation — keep it normal so it can't fall
@@ -49,11 +81,15 @@ async def classify(user_message: str) -> str:
     if _FOLLOWUP.search(msg):
         return "normal"
     # A read-only machine question -> normal (system-info tools), not control. Action verbs excluded.
-    if _SYSINFO_ASK.search(msg) and _SYSINFO_NOUN.search(msg) and not _MACHINE_ACTION.search(msg):
+    if is_machine_question(msg):
         return "normal"
     try:
         out = await chat_json(ROUTER_SYSTEM, user_message)
         route = out.get("route")
         return route if route in ("hard", "build", "selfmod", "browse", "control") else "normal"
     except Exception:
-        return "normal"   # fail open to the free path
+        # LLM router unavailable (Groq capped/down) — deterministic keyword routing instead of a
+        # blanket "normal", so voice machine-control keeps working in the capped state.
+        r = _keyword_route(msg)
+        print(f"[router fallback] llm router unavailable -> keyword route '{r}'", file=sys.stderr)
+        return r
