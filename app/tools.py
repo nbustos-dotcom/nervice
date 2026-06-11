@@ -13,6 +13,7 @@ from app.agent import ask_claude, agent_task, browse_agent, claude_turn_ctx
 import app.agent as agent_mod
 from app import selfmod
 from app import weather as weather_mod
+from app import sysinfo
 
 
 async def _fetch_page(client: httpx.AsyncClient, url: str, char_limit: int = 2500) -> str:
@@ -219,7 +220,81 @@ BROWSE_TOOL = {
     },
 }
 
+# ---------------------------- read-only system awareness (app/sysinfo.py) ----------------------------
+# All accept **_ : the tool model sometimes emits a stray empty-key argument for no-arg tools, which
+# would otherwise raise "unexpected keyword argument ''" — absorb and ignore it.
+async def get_system_info(**_) -> str:
+    return await asyncio.to_thread(sysinfo.get_system_info)
+
+
+async def get_top_processes(by: str = "memory", n: int = 5, **_) -> str:
+    return await asyncio.to_thread(sysinfo.get_top_processes, by, n)
+
+
+async def count_files(path: str | None = None, **_) -> str:
+    return await asyncio.to_thread(sysinfo.count_files, path)
+
+
+async def get_news(**_) -> str:
+    """Real current headlines in Nate's standing topics, fetched by a live web search (the grounded-
+    synthesis step then summarizes ONLY from these results — no fabricated headlines)."""
+    return await web_search("latest news headlines today politics technology cybersecurity", max_results=8)
+
+
+SYSTEM_INFO_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_system_info",
+        "description": "THIS computer's hardware and live stats: CPU model + cores + current usage %, "
+                       "RAM used/total, GPU model + VRAM + temp, disk space, uptime, OS. Use for ANY "
+                       "question about the machine's specs or current state — 'what CPU/GPU do I have', "
+                       "'how much RAM/disk', 'how busy is it', 'what OS'. Read-only.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+TOP_PROCESSES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_top_processes",
+        "description": "Real running processes sorted by memory or CPU use. Use for 'what's using the "
+                       "most memory/CPU', 'what's eating my RAM', 'what's running'. Read-only — it only "
+                       "reads process stats, it never closes or kills anything.",
+        "parameters": {"type": "object", "properties": {
+            "by": {"type": "string", "enum": ["memory", "cpu"], "description": "sort key (default memory)"},
+            "n": {"type": "integer", "description": "how many to list (default 5)"}}},
+    },
+}
+
+COUNT_FILES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "count_files",
+        "description": "Count files and folders under a path. Use for 'how many files in my Downloads', "
+                       "'how many files do I have'. Pass a folder name (e.g. 'Downloads') or full path; "
+                       "omit for the home folder. Read-only — counts names only, never reads file "
+                       "contents; capped in time/size so it can't hang.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "folder name or path; omit for home"}}},
+    },
+}
+
+GET_NEWS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_news",
+        "description": "Current news / headlines / what's happening. ALWAYS use this for ANY news "
+                       "request ('the news', 'what's happening', 'catch me up') — it returns REAL web "
+                       "results in Nate's topics (politics, computer science, cybersecurity). NEVER "
+                       "answer a news question from your own knowledge.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
 TOOLS = [WEATHER_TOOL, WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL, AGENT_BUILD_TOOL,
-         PROPOSE_SELF_UPDATE_TOOL, BROWSE_TOOL]
+         PROPOSE_SELF_UPDATE_TOOL, BROWSE_TOOL,
+         SYSTEM_INFO_TOOL, TOP_PROCESSES_TOOL, COUNT_FILES_TOOL, GET_NEWS_TOOL]
 TOOL_FUNCS = {"get_weather": get_weather, "web_search": web_search, "consult_claude": consult_claude,
-              "agent_build": agent_build, "propose_self_update": propose_self_update, "browse": browse}
+              "agent_build": agent_build, "propose_self_update": propose_self_update, "browse": browse,
+              "get_system_info": get_system_info, "get_top_processes": get_top_processes,
+              "count_files": count_files, "get_news": get_news}

@@ -280,10 +280,11 @@ async def _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds=
         # tool model for another completion first just generates a full draft that gets discarded
         # (measured 5.2s wasted per grounded turn). Tradeoff: the model no longer refines with a
         # second search; SYNTH_SYSTEM already handles thin sources by answering partially.
-        if "web_search" in fired:
+        if "web_search" in fired or "get_news" in fired:
             break
-    # grounded synthesis is for web material only; consult_claude answers stay in the conversation
-    if "web_search" in fired:
+    # grounded synthesis is for web material only (web_search + get_news); consult_claude answers
+    # stay in the conversation. Grounding here is what keeps news headlines REAL — no fabrication.
+    if "web_search" in fired or "get_news" in fired:
         question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
         return await _grounded_synthesis(question, tool_outputs, voice_mode=voice_mode)
     if direct_answer is None and tool_outputs:

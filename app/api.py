@@ -213,60 +213,14 @@ async def get_location_ep():
 
 
 # ----------------------------- /system : real machine telemetry -----------------------------
-_net_prev = {"t": None, "sent": 0, "recv": 0}
-
-
-def _gpu_telemetry() -> dict:
-    """GPU stats via nvidia-smi (CSV) incl. the real model name. {available:false} if the tool/GPU
-    isn't reachable — no fabricated numbers and no hardcoded model when there's no GPU."""
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,name",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=3).stdout.strip().splitlines()[0]
-        parts = [x.strip() for x in out.split(",")]
-        u, vu, vt, tp = parts[:4]
-        name = ",".join(parts[4:]).strip() or "GPU"      # real driver-reported model string
-        return {"available": True, "util": int(u), "vram_used": int(vu), "vram_total": int(vt),
-                "temp": int(tp), "name": name}
-    except Exception:
-        return {"available": False}
-
-
-def _system_telemetry() -> dict:
-    """Synchronous psutil snapshot (run in a thread). Per-core CPU over a short real sample; RAM,
-    swap, disk for C:, network up/down RATES (delta since last call), uptime, process count."""
-    import psutil
-    per = psutil.cpu_percent(interval=0.15, percpu=True)
-    vm = psutil.virtual_memory()
-    sw = psutil.swap_memory()
-    du = psutil.disk_usage("C:\\")
-    n = psutil.net_io_counters()
-    now = time.time()
-    primed = _net_prev["t"] is not None          # first poll has no baseline -> report null, not a fake 0
-    up_bps = down_bps = None
-    if primed:
-        dt = max(0.001, now - _net_prev["t"])
-        up_bps = round(max(0, n.bytes_sent - _net_prev["sent"]) / dt)
-        down_bps = round(max(0, n.bytes_recv - _net_prev["recv"]) / dt)
-    _net_prev.update(t=now, sent=n.bytes_sent, recv=n.bytes_recv)
-    return {
-        "cpu": {"total": round(sum(per) / len(per), 1), "cores": [round(x, 1) for x in per], "count": len(per)},
-        "ram": {"percent": vm.percent, "used": vm.used, "total": vm.total},
-        "swap": {"percent": sw.percent},
-        "disk": {"percent": du.percent, "used": du.used, "total": du.total},
-        "net": {"up_bps": up_bps, "down_bps": down_bps},
-        "uptime_s": int(now - psutil.boot_time()),
-        "processes": len(psutil.pids()),
-        "gpu": _gpu_telemetry(),
-    }
+from app.sysinfo import system_telemetry   # shared with the conversational system-awareness tools
 
 
 @app.get("/system", dependencies=[Depends(auth)])
 async def system():
     """Real machine telemetry — psutil (CPU/RAM/swap/disk/net/uptime/procs) + nvidia-smi (GPU).
     Cheap to poll every ~2s; the CPU sample blocks ~0.15s in a worker thread, not the loop."""
-    return await asyncio.to_thread(_system_telemetry)
+    return await asyncio.to_thread(system_telemetry)
 
 
 @app.get("/nervice-stats", dependencies=[Depends(auth)])
