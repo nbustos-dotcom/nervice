@@ -551,13 +551,16 @@ async function getChatWS(){ if(chatWS&&chatWS.readyState===1) return chatWS; cha
 
 /* ================= tap-to-talk + hands-free conversation ================= */
 let micStream=null, micSource=null, recorder=null, chunks=[], recording=false, convoMode=false, _discard=false;
-let vadRAF=0, recStart=0, silenceStart=0, voicedMs=0, heard=false, vadLast=0;
-// VAD tuning (hands-free conversation mode). SILENCE = end-of-speech energy floor; SPEECH = energy
-// that counts as real voice; END_SIL_MS = trailing silence before we send (long enough that a
-// mid-sentence pause won't cut him off, short enough that a real stop sends promptly);
-// MIN_SPEECH_MS = drop clips with less voiced audio than this (blips); NO_SPEECH_MS = give up if he
-// never started; MAX_MS = hard cap.
-const SILENCE=0.018, SPEECH=0.040, END_SIL_MS=1350, MIN_SPEECH_MS=400, NO_SPEECH_MS=6000, MAX_MS=30000;
+let vadRAF=0, recStart=0, silentMs=0, voicedMs=0, heard=false, vadLast=0, noiseFloor=0, calN=0;
+/* ADAPTIVE VAD: fixed energy thresholds don't survive phone mics — AGC boosts gain in quiet
+   moments, so the ambient floor drifts ABOVE any fixed cutoff and "silence" is never detected
+   (the records-forever bug). Instead: calibrate the noise floor for the first CAL_MS, then track
+   it (follow drops instantly, rise slowly to ride out AGC drift). Speech/silence cutoffs are set
+   RELATIVE to that floor. The silence timer ACCUMULATES (dead-zone audio only slows it, never
+   hard-resets it), so END_SIL_MS always elapses in real rooms. MAX_MS is the can't-record-forever
+   backstop regardless of detection. */
+const VAD={CAL_MS:500, END_SIL_MS:1350, MIN_SPEECH_MS:400, NO_SPEECH_MS:8000, MAX_MS:30000,
+           SPEECH_MULT:3.0, SIL_MULT:1.8, SPEECH_MIN:0.012, SIL_MIN:0.006, FLOOR_RISE:0.004};
 function pickMime(){ for(const m of ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus']){ try{ if(MediaRecorder.isTypeSupported(m)) return m; }catch(e){} } return ''; }
 async function startRec(auto){
   if(recording) return; if(!getToken()){ openToken(); return; }
@@ -582,26 +585,42 @@ async function onRecStop(){
   try{ const ws=await getVoiceWS(); ws.send(await blob.arrayBuffer()); }
   catch(e){ setState('idle'); if(convoMode) stopConvo(); }
 }
+function _vadEnergy(){   // separable for testing: current mic energy, 0..1
+  micAnalyser.getByteFrequencyData(ampData);
+  let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i];
+  return Math.sqrt(s/ampData.length)/255;
+}
 function startVAD(){
-  recStart=Date.now(); vadLast=recStart; silenceStart=0; voicedMs=0; heard=false; if(!micAnalyser) return;
+  recStart=Date.now(); vadLast=recStart; silentMs=0; voicedMs=0; heard=false; noiseFloor=0; calN=0;
+  if(!micAnalyser) return;
+  // setTimeout, NOT requestAnimationFrame: rAF freezes when the screen dims / app backgrounds,
+  // which froze end-of-speech detection mid-conversation (another records-forever path).
   (function tick(){
-    if(!recording) return; micAnalyser.getByteFrequencyData(ampData);
-    let s=0; for(let i=0;i<ampData.length;i++) s+=ampData[i]*ampData[i];
-    const rms=Math.sqrt(s/ampData.length)/255, now=Date.now(), dt=now-vadLast, el=now-recStart; vadLast=now;
-    const hearing = rms>=SPEECH;
-    if(hearing){ voicedMs+=dt; heard=true; silenceStart=0; }      // real voice
-    else if(rms<SILENCE && heard){ if(!silenceStart) silenceStart=now; }   // trailing silence (only after he spoke)
-    else if(rms>=SILENCE){ silenceStart=0; }                     // mid-word dip: hold, not a stop
+    if(!recording) return;
+    const rms=_vadEnergy(), now=Date.now(), dt=Math.min(1000, now-vadLast), el=now-recStart; vadLast=now;
+    if(el<=VAD.CAL_MS){                                   // calibrate: average the ambient floor
+      noiseFloor = calN ? (noiseFloor*calN+rms)/(calN+1) : rms; calN++;
+    } else if(rms<noiseFloor){ noiseFloor=rms; }          // follow drops instantly
+    else { noiseFloor += (rms-noiseFloor)*VAD.FLOOR_RISE; }  // rise slowly (rides out AGC drift)
+    const speechThr = Math.max(noiseFloor*VAD.SPEECH_MULT, noiseFloor+VAD.SPEECH_MIN);
+    const silThr    = Math.max(noiseFloor*VAD.SIL_MULT,    noiseFloor+VAD.SIL_MIN);
+    const hearing = el>VAD.CAL_MS && rms>=speechThr;
+    if(hearing){ voicedMs+=dt; heard=true; silentMs=0; }  // real voice resets the budget
+    else if(heard && rms<silThr){ silentMs+=dt; }         // clear silence: budget accumulates
+    else if(heard){ silentMs+=dt*0.4; }                   // dead zone: budget creeps, NEVER hard-resets
     reactor.classList.toggle('hearing', hearing);
-    const lbl = hearing ? 'hearing you…' : (heard ? 'go on…' : 'listening');
-    if(lbl!==micLabel.textContent) micLabel.textContent=lbl;     // change-only (no aria-live spam)
-    if(el>=MAX_MS){ stopRec(voicedMs<MIN_SPEECH_MS); return; }                 // hard cap
-    if(!heard && el>=NO_SPEECH_MS){ stopRec(true); return; }                   // never started -> drop
-    if(silenceStart && now-silenceStart>=END_SIL_MS){ stopRec(voicedMs<MIN_SPEECH_MS); return; }  // done -> send (or drop a blip)
-    vadRAF=requestAnimationFrame(tick);
+    let lbl='listening';
+    if(hearing) lbl='hearing you…';
+    else if(heard && silentMs>200) lbl=`heard you — sending in ${Math.max(0,(VAD.END_SIL_MS-silentMs)/1000).toFixed(1)}s`;
+    else if(heard) lbl='go on…';
+    if(lbl!==micLabel.textContent) micLabel.textContent=lbl;   // change-only (no aria-live spam)
+    if(el>=VAD.MAX_MS){ micLabel.textContent='sending…'; stopRec(voicedMs<VAD.MIN_SPEECH_MS); return; }  // backstop: can't record forever
+    if(!heard && el>=VAD.NO_SPEECH_MS){ stopRec(true); return; }   // never started -> drop, re-listen
+    if(heard && silentMs>=VAD.END_SIL_MS){ micLabel.textContent='sending…'; stopRec(voicedMs<VAD.MIN_SPEECH_MS); return; }  // done -> send
+    vadRAF=setTimeout(tick, 50);
   })();
 }
-function stopVAD(){ if(vadRAF) cancelAnimationFrame(vadRAF); vadRAF=0; }
+function stopVAD(){ if(vadRAF) clearTimeout(vadRAF); vadRAF=0; }
 function nextTurn(){ if(convoMode && !recording && orbState!=='speaking') startRec(true); }
 function startConvo(){ if(!getToken()){openToken(); return;} unlockAudio(); convoMode=true; const b=$('#convoBtn'); b.classList.add('on'); b.setAttribute('aria-pressed','true'); $('#convoLabel').textContent='Conversation ON'; toast('Conversation on — talk, then pause'); nextTurn(); }
 function stopConvo(){ convoMode=false; const b=$('#convoBtn'); b.classList.remove('on'); b.setAttribute('aria-pressed','false'); $('#convoLabel').textContent='Conversation'; stopRec(true); releaseMic(); setState('idle'); }
