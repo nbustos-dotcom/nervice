@@ -125,7 +125,7 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
     reply = await execute_route(user_id, system, route, user_message, window,
                                 voice_mode=voice_mode, on_ack=_ack)
     print(reply)
-    rung = "exhausted" if reply == LADDER_EXHAUSTED_MSG else current_rung.get()
+    rung = "exhausted" if (reply or "").startswith(LADDER_EXHAUSTED_MSG) else current_rung.get()
     log_turn(route, rung, time.monotonic() - t0, "rest")
     return reply
 

@@ -4,7 +4,8 @@ import os, re, json, sys, asyncio, inspect
 from groq import AsyncGroq, BadRequestError, RateLimitError
 from dotenv import load_dotenv
 
-from app.agent import ask_claude, AllClaudeExhausted   # the Claude account ladder (Pro -> Max)
+from app.agent import ask_claude, AllClaudeExhausted, current_rung   # the Claude account ladder (Pro -> Max)
+from app import ollama_client as ollama                 # the local qwen3.5:4b rung (free, unlimited)
 
 load_dotenv()
 
@@ -69,6 +70,66 @@ async def extractive_news() -> str | None:
     body = ". ".join(f"{n}) {t}" for n, t in enumerate(tops, 1))
     return (f"I'm rate-limited, so here are the headlines straight from BBC News: {body}. "
             "Want me to dig into one when I'm back to full power?")
+
+
+# Tools safe on the LOCAL rung: local-only, free, instant. Grounded synthesis stays on Claude when
+# capped (a 4B must never paraphrase web sources — council mandate), and the heavy agent tools
+# (consult/build/browse/selfmod) never run on a 4B.
+_OLLAMA_TOOL_NAMES = {"get_weather", "get_system_info", "get_top_processes", "count_files"}
+
+
+async def _ollama_fallback(system: str | None, messages: list,
+                           tool_specs: list | None = None, tool_funcs: dict | None = None) -> str | None:
+    """Groq is capped: answer on the local qwen3.5:4b rung with the SAME system prompt (persona +
+    memories + safety floor) and conversation window the Groq path had, plus the local-only tool
+    subset — so weather/machine-control questions keep working when capped. Returns the answer, or
+    None when Ollama is unavailable/empty (the caller ladders on to Claude)."""
+    try:
+        msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
+        specs = [t for t in (tool_specs or []) if t.get("function", {}).get("name") in _OLLAMA_TOOL_NAMES]
+        funcs = {k: v for k, v in (tool_funcs or {}).items() if k in _OLLAMA_TOOL_NAMES}
+        for _ in range(3):                                   # small tool loop, hard-capped
+            m = await ollama.chat(msgs, tools=specs or None)
+            calls = m.get("tool_calls") or []
+            if not calls:
+                out = (m.get("content") or "").strip()
+                if out:
+                    current_rung.set("ollama")               # telemetry: this turn answered locally
+                    print("[groq 429 -> answered on the local ollama rung]", file=sys.stderr)
+                return out or None
+            msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
+            for tc in calls:
+                name = tc.get("function", {}).get("name", "")
+                args = tc.get("function", {}).get("arguments") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args or "{}")
+                    except Exception:
+                        args = {}
+                fn = funcs.get(name)
+                try:
+                    raw = fn(**args) if fn else f"tool {name} not available on the local rung"
+                    result = await raw if inspect.isawaitable(raw) else raw
+                except Exception as e:
+                    result = f"tool error: {e}"
+                # both name keys for Ollama API version compatibility
+                msgs.append({"role": "tool", "tool_name": name, "name": name, "content": str(result)})
+        return None                                          # tool loop didn't converge
+    except ollama.OllamaUnavailable as e:
+        print(f"[ollama rung unavailable] {e}", file=sys.stderr)
+        return None
+    except Exception as e:
+        # ANY failure on the local rung ladders onward — a capped turn must never crash here.
+        print(f"[ollama rung error -> laddering on] {repr(e)[:120]}", file=sys.stderr)
+        return None
+
+
+async def _exhausted_msg() -> str:
+    """The friendly limit message — with the actionable 'start Ollama' hint when the local rung
+    being down is part of why we're here."""
+    if not await ollama.is_up():
+        return LADDER_EXHAUSTED_MSG + " " + ollama.OLLAMA_DOWN_MSG
+    return LADDER_EXHAUSTED_MSG
 
 
 async def _claude_fallback(prompt: str | None = None, system: str | None = None,
@@ -152,10 +213,12 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
             temperature=0.0)
     except RateLimitError as e:
         # Cap hit between search and synthesis. News: extractive real headlines, zero LLM.
+        # (Grounded synthesis deliberately does NOT run on the 4B — Claude only.)
         if is_news_question(question):
             news = await extractive_news()
             if news:
                 print("[groq 429 in synthesis -> extractive news]", file=sys.stderr)
+                current_rung.set("extractive")
                 return news
         # Otherwise ground the answer with CLAUDE instead, from the SAME sources under the SAME
         # hard rules (answer only from sources) — the grounding boundary holds. The cross-model
@@ -202,18 +265,21 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
         return await _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds,
                                            force_tool, voice_mode)
     except RateLimitError:
-        # Groq is capped. A news question is answered extractively from REAL fetched headlines —
-        # zero LLM, zero fabrication, and it doesn't burn the Claude allowance.
+        # Groq is capped. Ladder: extractive news (zero LLM) -> local Ollama (free, fast, with the
+        # local tool subset) -> Claude (scarce, context-threaded) -> friendly message (+hint).
         question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
         if is_news_question(question):
             news = await extractive_news()
             if news:
                 print("[groq 429 -> extractive news, zero LLM]", file=sys.stderr)
+                current_rung.set("extractive")
                 return news
-        # Otherwise answer via Claude, WITH the full conversation window so context isn't lost.
-        print("[groq 429 in chat_with_tools -> Claude fallback]", file=sys.stderr)
+        ans = await _ollama_fallback(system, messages, tools, tool_funcs)
+        if ans:
+            return ans
+        print("[groq 429, ollama unavailable -> Claude fallback]", file=sys.stderr)
         ans = await _claude_fallback(system=system, messages=messages)
-        return ans if ans else LADDER_EXHAUSTED_MSG
+        return ans if ans else await _exhausted_msg()
     except AllClaudeExhausted:
         # the hard route forced Claude and every account is out — friendly, never a crash
         print("[claude ladder exhausted in chat_with_tools]", file=sys.stderr)
