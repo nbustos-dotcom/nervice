@@ -106,6 +106,42 @@ async def main():
     R["t5 normal groq turn unaffected"] = "paris" in r5.lower() and "rung=groq" in line
     print(f"t5: {dt5*1000:.0f}ms, reply={r5[:40]!r}, log={line.split(chr(9),1)[1] if chr(9) in line else line}")
 
+    # ============ FIX 3: extractive capped news ============
+    # Pre-fetch the real headlines (cached) to compare against the reply.
+    from app.api import _fetch_news
+    real_titles = [i["title"] for i in await _fetch_news()]
+
+    async def boom_create(**kw):
+        raise groq_429()
+    async def no_claude(*a, **k):
+        raise RuntimeError("claude must NOT be called for capped news")
+    llm._client.chat.completions.create = boom_create
+    orig_ask = llm.ask_claude
+    llm.ask_claude = no_claude
+    try:
+        t0 = time.time()
+        r4 = await respond("nate", "give me the news", [])
+        dt4 = time.time() - t0
+    finally:
+        llm._client.chat.completions.create = orig_create
+        llm.ask_claude = orig_ask
+    hits = sum(1 for t in real_titles if t.rstrip(".")[:40].lower() in (r4 or "").lower())
+    R["t4 capped news: real extractive headlines, zero LLM"] = hits >= 2 and "BBC" in (r4 or "")
+    print(f"t4: {dt4*1000:.0f}ms, {hits} real titles in reply: {r4[:130]!r}")
+
+    # t4b: a capped NON-news turn still goes to the Claude ladder (unchanged behavior)
+    llm._client.chat.completions.create = boom_create
+    async def marker_claude(prompt=None, system=None, messages=None):
+        return "CLAUDE_MARKER answer"
+    llm.ask_claude = marker_claude
+    try:
+        r4b = await respond("nate", "what's a good gift for a programmer?", [])
+    finally:
+        llm._client.chat.completions.create = orig_create
+        llm.ask_claude = orig_ask
+    R["t4b capped non-news still -> claude ladder"] = "CLAUDE_MARKER" in (r4b or "")
+    print(f"t4b: {r4b[:60]!r}")
+
     print("\nRESULT:")
     for k, v in R.items():
         print(("  PASS " if v else "  FAIL ") + k)

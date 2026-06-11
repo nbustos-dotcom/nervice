@@ -255,14 +255,20 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         try:
             reply, pivot = await _stream_normal(system, text, window, send, voice)
         except RateLimitError:
-            # Groq daily cap hit at the streaming create (before any token/audio went out) — ladder
-            # to Claude (Pro -> Max), exactly like the REST path, instead of just announcing the cap.
-            # Pass the full window + this user turn so Claude answers WITH conversation context (the
-            # mid-conversation amnesia fix) — not just the bare message. Delivered as one text+audio
-            # block below so the phone speaks it. Nothing streamed yet -> no double-speak.
-            print("[groq 429 in stream_reply -> claude ladder]", file=sys.stderr)
-            ans = await llm._claude_fallback(
-                system=system, messages=window + [{"role": "user", "content": text}])
+            # Groq daily cap hit at the streaming create (before any token/audio went out).
+            # News question -> extractive REAL headlines, zero LLM, zero fabrication.
+            ans = None
+            if llm.is_news_question(text):
+                ans = await llm.extractive_news()
+                if ans:
+                    print("[groq 429 in stream_reply -> extractive news]", file=sys.stderr)
+            if ans is None:
+                # Otherwise ladder to Claude (Pro -> Max) WITH the full window + this user turn so
+                # Claude answers in context (the amnesia fix). Delivered as one text+audio block
+                # below so the phone speaks it. Nothing streamed yet -> no double-speak.
+                print("[groq 429 in stream_reply -> claude ladder]", file=sys.stderr)
+                ans = await llm._claude_fallback(
+                    system=system, messages=window + [{"role": "user", "content": text}])
             reply, pivot, rate_limited = (ans or llm.LADDER_EXHAUSTED_MSG), None, True
         if rate_limited:
             pass                          # reply set, streamed stays False -> delivered below

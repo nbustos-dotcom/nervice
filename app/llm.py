@@ -44,6 +44,32 @@ def _is_rate_limit(e: Exception) -> bool:
 LADDER_EXHAUSTED_MSG = ("I've hit my usage limits for now — they reset shortly. "
                         "Try me again in a bit.")
 
+# ---- capped news = extractive, zero LLM (Phase 0.3) ----
+# When Groq is capped, a news question is answered straight from the fetched REAL headlines —
+# no model paraphrase, so zero fabrication risk and zero token cost. With budget, the normal
+# grounded synthesis path (search -> synth -> cross-verify) is unchanged.
+_NEWS_RE = re.compile(r"\b(news|headlines?|what'?s\s+(?:happening|going\s+on)(?:\s+(?:in\s+the\s+world|today|out\s+there))?\s*\??$|catch\s+me\s+up)\b", re.I)
+
+
+def is_news_question(text: str) -> bool:
+    return bool(_NEWS_RE.search(text or ""))
+
+
+async def extractive_news() -> str | None:
+    """Real headlines verbatim from the cached BBC fetch, formatted for speech. None if the fetch
+    has nothing (caller proceeds to its normal fallback)."""
+    try:
+        from app.api import _fetch_news   # lazy: api imports this module at startup (same pattern as skills)
+        items = await _fetch_news()
+    except Exception:
+        items = []
+    if not items:
+        return None
+    tops = [i["title"].rstrip(".") for i in items[:4]]
+    body = ". ".join(f"{n}) {t}" for n, t in enumerate(tops, 1))
+    return (f"I'm rate-limited, so here are the headlines straight from BBC News: {body}. "
+            "Want me to dig into one when I'm back to full power?")
+
 
 async def _claude_fallback(prompt: str | None = None, system: str | None = None,
                            messages: list | None = None) -> str | None:
@@ -125,10 +151,15 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
                       {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nDRAFT:\n{draft}"}],
             temperature=0.0)
     except RateLimitError as e:
-        # Cap hit between search and synthesis: ground the answer with CLAUDE instead, from the SAME
-        # sources under the SAME hard rules (answer only from sources) — the grounding boundary
-        # holds. The cross-model verifier is skipped because Groq is down; we never emit the raw
-        # unverified Groq draft. If Claude is also out, show the friendly limit message.
+        # Cap hit between search and synthesis. News: extractive real headlines, zero LLM.
+        if is_news_question(question):
+            news = await extractive_news()
+            if news:
+                print("[groq 429 in synthesis -> extractive news]", file=sys.stderr)
+                return news
+        # Otherwise ground the answer with CLAUDE instead, from the SAME sources under the SAME
+        # hard rules (answer only from sources) — the grounding boundary holds. The cross-model
+        # verifier is skipped because Groq is down; we never emit the raw unverified Groq draft.
         print("[groq 429 in grounded synthesis -> Claude fallback]", file=sys.stderr)
         prompt = f"SOURCE MATERIAL:\n{src}\n\nQUESTION: {question}"
         ans = await _claude_fallback(prompt, system=synth_system)
@@ -171,8 +202,15 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
         return await _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds,
                                            force_tool, voice_mode)
     except RateLimitError:
-        # Groq is capped — answer the user's turn via Claude instead of dying on the limit, WITH the
-        # full conversation window (not just the bare last message) so Claude doesn't lose context.
+        # Groq is capped. A news question is answered extractively from REAL fetched headlines —
+        # zero LLM, zero fabrication, and it doesn't burn the Claude allowance.
+        question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+        if is_news_question(question):
+            news = await extractive_news()
+            if news:
+                print("[groq 429 -> extractive news, zero LLM]", file=sys.stderr)
+                return news
+        # Otherwise answer via Claude, WITH the full conversation window so context isn't lost.
         print("[groq 429 in chat_with_tools -> Claude fallback]", file=sys.stderr)
         ans = await _claude_fallback(system=system, messages=messages)
         return ans if ans else LADDER_EXHAUSTED_MSG
