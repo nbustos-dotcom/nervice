@@ -1,3 +1,5 @@
+import re
+
 from app.llm import chat_json
 
 ROUTER_SYSTEM = """Classify the user's message into exactly one route. Output ONLY JSON: {"route":"hard"} or {"route":"build"} or {"route":"selfmod"} or {"route":"browse"} or {"route":"control"} or {"route":"normal"}.
@@ -13,10 +15,24 @@ control = a request for Nervice to DO something on Nate's OWN computer: open or 
   control: "open youtube" / "open notepad" / "take a screenshot" / "close chrome" / "delete my downloads"   vs   browse: "open youtube and tell me the top trending video"
 hard = formal logic puzzles/riddles/brainteasers with interacting constraints; mathematical proofs or multi-step quantitative problems beyond basic algebra; design or review of nontrivial code architecture or database schemas; long rigorous analysis where wrong answers are costly; or the user explicitly asks for Claude.
 normal = everything else: chat, opinions (including opinions ABOUT Nervice itself), simple facts, news/current events, everyday tasks, and any DISCUSSION (as opposed to an explicit action request) of building, browsing, or self-change.
+A REACTION or FOLLOW-UP about something that just happened is ALWAYS normal — never browse or control: "it didn't appear", "I don't see it", "I want to see it", "that didn't work", "where is it", "nothing happened", "it's not showing". These are conversation about a previous action, not a new request. browse requires the user to NAME a specific website to read; if no site is named, it is not browse.
 Classify the TASK TYPE — an explicit action request vs. a discussion. Ignore whether the question seems easy or famous."""
+
+# Deterministic guard: a complaint/reaction about a prior action must stay conversational and NEVER
+# reach the browse agent or the control interpreter, regardless of what the LLM router decides.
+_FOLLOWUP = re.compile(
+    r"\b(did(n'?t| not)\s+(appear|open|work|show|launch|come up|do anything|pop up)|"
+    r"not\s+(showing|there|appearing|visible|working|here)|"
+    r"don'?t\s+see|can'?t\s+see\s+(it|anything|that)|i\s+(want to|wanna)\s+see\s+it|"
+    r"where('?s| is| did)\s+it|nothing\s+(happened|appeared|opened|showed)|"
+    r"it'?s\s+not\s+(here|showing|there|working|open|up))\b", re.I)
 
 
 async def classify(user_message: str) -> str:
+    # A reaction/complaint about a prior action is conversation — keep it normal so it can't fall
+    # through to the browse agent's "my browser runs on the server" boilerplate or the control gate.
+    if _FOLLOWUP.search(user_message or ""):
+        return "normal"
     try:
         out = await chat_json(ROUTER_SYSTEM, user_message)
         route = out.get("route")

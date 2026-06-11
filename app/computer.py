@@ -246,9 +246,40 @@ def _split_browser(target: str) -> tuple[str, str | None]:
     return target, None
 
 
+# What Nervice can actually do — quoted in every honest refusal so the boundary is always clear.
+_CAPS = "I can only open apps and websites, take screenshots, and switch windows"
+
+
+def _gap_phrase(low: str) -> str:
+    """A short, honest name for a request that's OUTSIDE the five named actions, used in the
+    up-front refusal ('I can't <gap> yet — ...'). Never an offer to try."""
+    if re.search(r"\b(send|e-?mail)\b", low):
+        return "send email"
+    if re.search(r"\b(post|tweet|publish|dm)\b", low):
+        return "post or message for you"
+    if re.search(r"\b(buy|purchase|order|pay|checkout|transfer|venmo)\b", low):
+        return "buy things or move money"
+    if re.search(r"\b(delete|remove|erase|wipe|format|trash|empty|move|rename|overwrite)\b", low):
+        return "delete or move files"
+    if re.search(r"\b(uninstall|install|update\s+windows)\b", low):
+        return "install or remove software"
+    if re.search(r"\b(close|quit|kill|terminate|end\s+task)\b", low):
+        return "close apps"
+    if re.search(r"\b(shut\s*down|shutdown|restart|reboot|log\s*off|sign\s*out)\b", low):
+        return "shut down or restart the PC"
+    if re.search(r"\b(settings|preferences|disable|enable|registry)\b", low):
+        return "change system settings"
+    if re.search(r"\b(password|credential|api\s*key|login)\b", low):
+        return "handle your credentials"
+    if re.search(r"\b(rm|rmdir|del|sudo|powershell|terminal|command\s*prompt|cmd|bash|sh|exec|script)\b", low):
+        return "run shell commands"
+    return "do that"
+
+
 def interpret(message: str) -> Decision:
     """Map a natural-language control request to a Decision. Deterministic and fail-safe: anything
-    not clearly on the SAFE list is RISKY."""
+    not clearly on the SAFE list is RISKY. For requests OUTSIDE the five named actions, reason holds
+    a complete, honest refusal sentence (handle_control returns it verbatim — no offer to try)."""
     msg = (message or "").strip()
     low = msg.lower()
 
@@ -262,13 +293,11 @@ def interpret(message: str) -> Decision:
     if _LIST_WINDOWS.search(low):
         return Decision("list_windows", "", "safe", True, "", msg)
 
-    # 3. destructive / system / send / money words -> RISKY, and NOT in our action list (unsupported)
-    rw = _RISKY_WORDS.search(low)
-    if rw:
-        verb = rw.group(0).lower()
+    # 3. destructive / system / send / money words -> NOT one of the five actions. Unsupported:
+    #    one honest up-front refusal (reason is the full sentence), never a fake offer-to-try.
+    if _RISKY_WORDS.search(low):
         return Decision(None, msg, "risky", False,
-                        f"that would {verb} something on your machine, which I don't do without a clear yes",
-                        msg)
+                        f"I can't {_gap_phrase(low)} yet — right now {_CAPS}.", msg)
 
     # 4. switch/focus a window — safe (just brings an existing window forward)
     m = re.search(rf"(?:{_SWITCH_VERBS})\s+(?:the\s+|to\s+)?(.+)", low)
@@ -293,9 +322,10 @@ def interpret(message: str) -> Decision:
         return Decision("open_app", target, "risky", True,
                         f"\"{target}\" isn't on your safe-apps list", msg)
 
-    # 6. routed to control but unparseable -> fail safe: ask
+    # 6. routed to control but unparseable -> a clarifying question, not a fake offer-to-try
     return Decision(None, msg, "risky", False,
-                    "I'm not sure exactly what you want me to do on your computer", msg)
+                    f"I'm not sure what you'd like me to do on your computer — right now {_CAPS}. "
+                    "What are you after?", msg)
 
 
 # ---------------------------------------------------------------------------
@@ -313,31 +343,53 @@ def _spawn(exe: str, *args: str) -> bool:
         return False
 
 
-def _launch(target: str) -> bool:
-    """Start an app without a shell, honestly. Resolve a real exe (PATH or App Paths) and verify
-    the spawn; only fall back to Windows `start` when we can't resolve it. Returns True iff a
-    process was actually started. target is whitelisted or charset-validated by the caller."""
-    exe = shutil.which(target) or shutil.which(target + ".exe")
-    if exe and exe.lower().endswith(".exe"):
-        return _spawn(exe)
-    app = _app_paths_lookup(target if target.lower().endswith(".exe") else target + ".exe")
-    if app:
-        return _spawn(app)
-    # last resort for App-Paths apps we couldn't resolve (rare): `start` resolves them itself.
+def _running(basename: str, tries: int = 3, gap: float = 0.3) -> bool:
+    """Poll tasklist for a process basename (e.g. 'outlook.exe'), briefly, so a launch can be
+    CONFIRMED rather than assumed. Blocks up to ~tries*gap seconds; fine for a deliberate open."""
+    for i in range(tries):
+        try:
+            out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {basename}", "/NH"],
+                                 capture_output=True, text=True, timeout=4).stdout.lower()
+            if basename.lower() in out:
+                return True
+        except Exception:
+            return False
+        if i < tries - 1:
+            time.sleep(gap)
+    return False
+
+
+def _launch(target: str) -> str:
+    """Start an app without a shell and report what actually happened — never optimistically.
+    Returns 'ok' (process confirmed running via tasklist), 'unverified' (we issued the launch but
+    can't confirm a process appeared), or 'fail' (the launch raised). target is whitelisted or
+    charset-validated by the caller."""
+    basename = target if target.lower().endswith(".exe") else target + ".exe"
+    exe = shutil.which(target) or shutil.which(target + ".exe") or _app_paths_lookup(basename)
+    if exe and os.path.isfile(exe):
+        if not _spawn(exe):
+            return "fail"
+        return "ok" if _running(os.path.basename(exe)) else "unverified"
+    # couldn't resolve a real exe — best-effort `start` (it resolves App Paths itself), then
+    # confirm via tasklist. If nothing shows up, stay honest: 'unverified', not a fake success.
     try:
         subprocess.Popen(["cmd", "/c", "start", "", target], close_fds=True)
-        return True
     except Exception as e:
         print(f"[computer launch failed] start {target}: {repr(e)[:80]}", file=sys.stderr)
-        return False
+        return "fail"
+    return "ok" if _running(basename) else "unverified"
 
 
 def open_app(name: str) -> str:
     spec = WHITELIST.get(name.lower(), name)
     if not _SAFE_NAME.match(spec):
         return f"I won't launch \"{name}\" — the name has characters I don't allow."
-    if _launch(spec):
+    status = _launch(spec)
+    if status == "ok":
         return f"Opened {name} for you."
+    if status == "unverified":
+        return (f"I tried to open {name} but couldn't confirm it actually started — "
+                "if it didn't pop up, it may not be installed here.")
     return f"I tried to open {name} but it didn't start — it may not be installed."
 
 
@@ -475,27 +527,29 @@ _pending: dict[str, tuple[Decision, float]] = {}
 
 
 def handle_control(user_id: str, message: str) -> str:
-    """Entry point for the 'control' route. SAFE -> execute now. RISKY -> store a pending
-    confirmation and ASK; nothing risky runs until resolve_pending() sees a yes."""
+    """Entry point for the 'control' route. SAFE -> execute now. RISKY-but-doable (a non-whitelisted
+    app) -> ask once and wait for a yes. UNSUPPORTED (outside the five actions: send/delete/close/
+    shell/etc.) -> ONE honest refusal up front; never a fake offer-to-try that admits defeat later."""
     d = interpret(message)
     if d.risk == "safe":
         return _execute(d)
 
-    # RISKY: never execute now — record the ask and wait for confirmation
+    if not d.supported:
+        # outside the action list entirely — refuse honestly now, store nothing, ask nothing
+        _audit("REFUSE", str(d.target)[:80])
+        return d.reason
+
+    # risky but genuinely doable (only the non-whitelisted-app case reaches here) — confirm first
     _pending[user_id] = (d, time.time())
-    if d.supported and d.action == "open_app":
-        _audit("ASK", f"open non-whitelisted app\t{d.target}")
-        return (f"{d.reason}. Want me to open it anyway? Say yes and I will, "
-                "or no to skip it.")
-    _audit("ASK", f"risky/unsupported\t{d.target}")
-    return (f"Hold on — {d.reason}. I won't do that without you confirming. "
-            "Say yes if you really want me to try, or no to leave it.")
+    _audit("ASK", f"open non-whitelisted app\t{d.target}")
+    return f"{d.reason}. Want me to open it anyway? Say yes and I will, or no to skip it."
 
 
 def resolve_pending(user_id: str, message: str) -> str | None:
-    """Called BEFORE routing every turn. If a confirmation is pending: a yes executes it (if it's
-    actually doable), a no cancels, anything else abandons it and returns None so the new message
-    routes normally. Returns a reply string when it handled the turn, else None."""
+    """Called BEFORE routing every turn. A pending ask is ONLY ever a supported, risky action (a
+    non-whitelisted app open) — unsupported requests are refused up front and never stored. A yes
+    executes it, a no cancels, anything else abandons it and returns None so the new message routes
+    normally. Returns a reply string when it handled the turn, else None."""
     item = _pending.get(user_id)
     if not item:
         return None
@@ -506,11 +560,6 @@ def resolve_pending(user_id: str, message: str) -> str | None:
 
     if _AFFIRM.match(message or ""):
         _pending.pop(user_id, None)
-        if not d.supported:
-            _audit("CONFIRM-UNSUPPORTED", f"{d.target}")
-            return ("Even with your okay, I genuinely can't do that — my control here is limited to "
-                    "opening apps and websites, taking screenshots, and switching windows. "
-                    "So I've left everything alone.")
         _audit("CONFIRM-EXEC", f"{d.action}\t{d.target}")
         return _execute(d)
 
