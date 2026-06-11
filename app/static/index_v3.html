@@ -150,14 +150,18 @@
      core 1.0-1.12, fill <=0.74, glow <=1.2 of r26 (~31+blur) — always inside the r58 inner ring. */
   .core-glow{fill:var(--accent); opacity:calc(.10 + min(var(--amp),1)*.4); filter:blur(10px);
              transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + min(var(--amp),1)*.2)); transition:opacity .1s linear;}
-  .core{fill:none; stroke:var(--accent); stroke-width:1.4;
+  .core{fill:none !important; stroke:var(--accent); stroke-width:1.4;   /* stroke-only ring — backstop against refill */
         transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + min(var(--amp),1)*.12));}
   .core-fill{fill:url(#coreGrad); opacity:calc(.5 + min(var(--amp),1)*.5);
              transform-box:fill-box; transform-origin:center; transform:scale(calc(.34 + min(var(--amp),1)*.4));}
-  .amp-arc{fill:none; stroke:url(#reactorGrad); stroke-width:2; stroke-linecap:round; filter:drop-shadow(0 0 4px var(--accent-soft));}
+  .amp-arc{fill:none !important; stroke:url(#reactorGrad); stroke-width:2; stroke-linecap:round; filter:drop-shadow(0 0 4px var(--accent-soft));}   /* open path: a fill paints a giant chord-segment — never fill */
   .reactor.listening{--rc:#37e0ff;}  .reactor.speaking{--rc:#ff8a4c;}  .reactor.thinking{--rc:#cf9bff;}  /* violet shimmer */
-  .reactor.listening .ring-ticks line,.reactor.listening #ringOuter line,.reactor.listening .core,.reactor.listening .core-fill,.reactor.listening .amp-arc{stroke:#37e0ff;fill:#37e0ff;}
-  .reactor.speaking .ring-ticks line,.reactor.speaking #ringOuter line,.reactor.speaking .core,.reactor.speaking .core-fill,.reactor.speaking .amp-arc{stroke:#ff8a4c;fill:#ff8a4c;}  /* warm */
+  /* State recolors are PROPERTY-SPECIFIC. Never set fill on .amp-arc/.core: filling an OPEN arc
+     path paints the giant solid segment under its chord (the half-disc bug) — stroke-only there. */
+  .reactor.listening .ring-ticks line,.reactor.listening #ringOuter line,.reactor.listening .core,.reactor.listening .amp-arc{stroke:#37e0ff;}
+  .reactor.listening .core-fill{fill:#37e0ff;}
+  .reactor.speaking .ring-ticks line,.reactor.speaking #ringOuter line,.reactor.speaking .core,.reactor.speaking .amp-arc{stroke:#ff8a4c;}  /* warm */
+  .reactor.speaking .core-fill{fill:#ff8a4c;}
   .reactor.listening .core-glow,.reactor.speaking .core-glow,.reactor.thinking .core-glow{fill:var(--rc);}
   /* distinct calm states. listening/speaking are amplitude-driven via --amp (JS); idle + thinking
      get gentle CSS loops so each state reads differently. */
