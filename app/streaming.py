@@ -29,7 +29,7 @@ from app import skills
 from app import music
 from app.agent import current_rung
 from app.turnlog import log_turn
-from app.router import classify, is_machine_question as router_is_machine
+from app.router import classify
 from app import sysinfo
 from app.chat import build_system_prompt, execute_route, save_exchange, _ACK
 
@@ -224,10 +224,23 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         log_turn("control", "control", time.monotonic() - t0, "ws")
         return pending
 
-    # user-defined skills run BEFORE normal routing (saved trigger -> run; create/list/delete here).
-    # Delivered as one complete text+audio block, like a pending/tool turn.
-    skill_reply = await skills.handle(user_id, text)
-    if skill_reply is not None:
+    # skill SAVE confirmation (deterministic yes/no), then EXACT-normalized trigger match ONLY —
+    # everything else goes to the LLM router (the single intent decider).
+    sk_pending = skills._resolve_pending(user_id, text)
+    if sk_pending is not None:
+        await send({"type": "text", "text": sk_pending})
+        if voice:
+            b64 = await asyncio.to_thread(_synth_full_b64, sk_pending)
+            if b64:
+                await send({"type": "audio", "wav_base64": b64})
+        await send({"type": "done", "reply": sk_pending})
+        _store(user_id, conversation_id, text, sk_pending)
+        log_turn("skill", "skill", time.monotonic() - t0, "ws")
+        return sk_pending
+
+    sk = skills.find_skill(text)
+    if sk is not None:
+        skill_reply = await skills.run_skill(user_id, sk)
         await send({"type": "text", "text": skill_reply})
         if voice:
             b64 = await asyncio.to_thread(_synth_full_b64, skill_reply)
@@ -238,39 +251,11 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         log_turn("skill", "skill", time.monotonic() - t0, "ws")
         return skill_reply
 
-    # favorite-artists management — deterministic, one text+audio block, works on any rung.
-    music_reply = music.handle(text)
-    if music_reply is not None:
-        await send({"type": "text", "text": music_reply})
-        if voice:
-            b64 = await asyncio.to_thread(_synth_full_b64, music_reply)
-            if b64:
-                await send({"type": "audio", "wav_base64": b64})
-        await send({"type": "done", "reply": music_reply})
-        _store(user_id, conversation_id, text, music_reply)
-        log_turn("music", "direct", time.monotonic() - t0, "ws")
-        return music_reply
-
-    # sysinfo DIRECT fast path: machine questions answered straight from telemetry (~1s) — no
-    # retrieval, no classify, no LLM tool-round. None -> normal pipeline below.
-    if router_is_machine(text):
-        direct = await asyncio.to_thread(sysinfo.answer_machine_question, text)
-        if direct:
-            await send({"type": "text", "text": direct})
-            if voice:
-                b64 = await asyncio.to_thread(_synth_full_b64, direct)
-                if b64:
-                    await send({"type": "audio", "wav_base64": b64})
-            await send({"type": "done", "reply": direct})
-            _store(user_id, conversation_id, text, direct)
-            log_turn("system", "direct", time.monotonic() - t0, "ws")
-            return direct
-
     system, route = await asyncio.gather(
         build_system_prompt(user_id, text, voice_mode=voice), classify(text))
 
     reply, streamed = None, False
-    if route == "normal":
+    if route.get("route") == "normal":
         rate_limited = False
         try:
             reply, pivot = await _stream_normal(system, text, window, send, voice)
@@ -344,5 +329,5 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
     await send({"type": "done", "reply": reply or ""})
     _store(user_id, conversation_id, text, reply or "")
     rung = "exhausted" if (reply or "").startswith(llm.LADDER_EXHAUSTED_MSG) else current_rung.get()
-    log_turn(route, rung, time.monotonic() - t0, "ws")
+    log_turn(route.get("route", "?"), rung, time.monotonic() - t0, "ws")
     return reply or ""

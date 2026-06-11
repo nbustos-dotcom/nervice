@@ -44,6 +44,16 @@ USER = "nate"
 _TOKEN = os.environ.get("NERVICE_API_TOKEN")
 WINDOW_MAX = 12
 
+# Version banner (the stale-server killer): /health reports the git hash this PROCESS was booted
+# from + the boot time, so a running server that predates HEAD is immediately visible.
+_BOOT_TIME = datetime.datetime.now().isoformat(timespec="seconds")
+try:
+    _GIT_HASH = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                               capture_output=True, text=True, timeout=5,
+                               cwd=str(pathlib.Path(__file__).resolve().parent.parent)).stdout.strip() or "unknown"
+except Exception:
+    _GIT_HASH = "unknown"
+
 # Per-conversation sliding window of the last WINDOW_MAX messages, in-process (single user).
 # CAVEAT: lost on restart — but that's only the verbatim recent-turns buffer; durable facts about
 # Nate live in the memory DB (retrieved fresh each turn), so a restart loses chat scrollback, not
@@ -176,8 +186,10 @@ async def health():
     voice = _voice_state["status"]
     if voice == "warm" and "app.voice" in sys.modules:
         v = sys.modules["app.voice"]
-        return {"status": "ok", "voice": "warm", "stt": v.WHISPER_PATH, "tts": v.TTS_ENGINE}
-    return {"status": "ok", "voice": voice, "stt": "faster-whisper base.en", "tts": "kokoro"}
+        return {"status": "ok", "voice": "warm", "stt": v.WHISPER_PATH, "tts": v.TTS_ENGINE,
+                "git": _GIT_HASH, "boot": _BOOT_TIME}
+    return {"status": "ok", "voice": voice, "stt": "faster-whisper base.en", "tts": "kokoro",
+            "git": _GIT_HASH, "boot": _BOOT_TIME}
 
 
 @app.get("/weather", dependencies=[Depends(auth)])

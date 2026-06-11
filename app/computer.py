@@ -586,11 +586,48 @@ def _execute(d: Decision) -> str:
 _pending: dict[str, tuple[Decision, float]] = {}
 
 
-def handle_control(user_id: str, message: str) -> str:
-    """Entry point for the 'control' route. SAFE -> execute now. RISKY-but-doable (a non-whitelisted
-    app) -> ask once and wait for a yes. UNSUPPORTED (outside the five actions: send/delete/close/
-    shell/etc.) -> ONE honest refusal up front; never a fake offer-to-try that admits defeat later."""
-    d = interpret(message)
+def _decision_from_args(action: str, target: str | None, msg: str) -> Decision | None:
+    """Build a Decision from the ROUTER's structured {action, target} — the LLM decides intent,
+    this code decides RISK with the exact same rules as interpret(): whitelist for apps, safe for
+    url/play/screenshot/window ops, risky-words on the target still refuse (no shell via mislabel).
+    None -> caller falls back to interpret(raw message)."""
+    t = _clean_target((target or "").strip())
+    if action == "screenshot":
+        return Decision("screenshot", "", "safe", True, "", msg)
+    if action == "list_windows":
+        return Decision("list_windows", "", "safe", True, "", msg)
+    if action == "focus_window":
+        return Decision("focus_window", t, "safe", True, "", msg)
+    if action == "play_youtube":
+        return Decision("play_youtube", t, "safe", True, "", msg)
+    if action == "open_url":
+        site, browser = _split_browser(t) if t else ("", None)
+        url = _to_url(site) if site else "https://www.google.com"
+        return Decision("open_url", url, "safe", True, "", msg, browser=browser)
+    if action == "open_app":
+        if _RISKY_WORDS.search(t):           # "open cmd"/"open powershell" stays refused
+            return Decision(None, msg, "risky", False,
+                            f"I can't {_gap_phrase(t.lower())} yet — right now {_CAPS}.", msg)
+        tl = t.lower()
+        if tl in WHITELIST:
+            return Decision("open_app", tl, "safe", True, "", msg)
+        url = _looks_like_url(tl)
+        if url:                              # the LLM sometimes labels a site as an app
+            return Decision("open_url", url, "safe", True, "", msg)
+        return Decision("open_app", t, "risky", True,
+                        f"\"{t}\" isn't on your safe-apps list", msg)
+    return None
+
+
+def handle_control(user_id: str, message: str, action: str | None = None,
+                   target: str | None = None) -> str:
+    """Entry point for the 'control' route. When the router supplies structured {action, target},
+    they are executed under the SAME risk rules; otherwise (keyword-net fallback / no action)
+    interpret(message) parses the raw text. SAFE -> execute now. RISKY-but-doable -> ask once and
+    wait for a yes. UNSUPPORTED -> ONE honest refusal up front."""
+    d = _decision_from_args(action, target, message) if action else None
+    if d is None:
+        d = interpret(message)
     if d.risk == "safe":
         return _execute(d)
 

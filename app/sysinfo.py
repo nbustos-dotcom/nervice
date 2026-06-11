@@ -151,41 +151,67 @@ _Q_UP = re.compile(r"\b(uptime|been\s+(?:up|on|running)|turned\s+on)\b", re.I)
 _Q_SPECS = re.compile(r"\b(specs?|hardware|system\s+info)\b", re.I)
 
 
-def answer_machine_question(text: str) -> str | None:
-    """Direct, natural-sounding answer to a machine question from live telemetry — no model
-    round-trip. None when the question doesn't map cleanly (caller falls back to the LLM path)."""
-    q = (text or "").strip()
-    if _Q_FILES.search(q):
-        m = _Q_PATH.search(q)
-        return count_files(m.group(1).strip() if m else None)
-    if _Q_TOPPROC.search(q):
-        by = "cpu" if re.search(r"\bcpu|processor\b", q, re.I) else "memory"
+# phrases the LLM (or a user) might pass as a "path" that are NOT folders — fall back to home
+_NOT_PATHS = {"", "my computer", "the computer", "computer", "this computer", "my pc", "pc",
+              "the pc", "my machine", "machine", "this machine", "here", "everything", "all",
+              "my files", "the system", "system", "c", "c:"}
+
+
+def answer_by_question(question: str | None, path: str | None = None, raw_text: str = "") -> str | None:
+    """Structured dispatch from the ROUTER's {question, path} args. The single source of the
+    answer templates. None when question is unknown (caller may try the text dispatcher)."""
+    q = (question or "").strip().lower()
+    if q == "file_count":
+        p = (path or "").strip().strip('"\'').strip()
+        if p.lower() in _NOT_PATHS:
+            p = None                      # "my computer" is not a folder — count home and SAY so
+        return count_files(p)             # the reply names the directory actually counted
+    if q == "top_proc":
+        by = "cpu" if re.search(r"\bcpu\b|\bprocessor\b", raw_text or "", re.I) else "memory"
         return get_top_processes(by, 3)
+    if q == "specs":
+        return get_system_info()
+    if q not in ("cpu", "ram", "gpu", "disk", "os", "uptime"):
+        return None
     t = system_telemetry()
     g = t["gpu"]
-    if _Q_SPECS.search(q):
-        return get_system_info()
-    if _Q_GPU.search(q):
+    if q == "gpu":
         if not g.get("available"):
             return "No GPU shows up via nvidia-smi right now."
         return (f"You've got an {g['name']} — {g['util']}% busy, "
                 f"{g['vram_used']} of {g['vram_total']} MB VRAM in use, running {g['temp']}°C.")
-    if _Q_CPU.search(q):
+    if q == "cpu":
         return (f"You're on an {_cpu_name()} — {t['cpu']['count']} logical cores, "
                 f"sitting at {t['cpu']['total']:.0f}% right now.")
-    if _Q_RAM.search(q):
+    if q == "ram":
         return (f"{t['ram']['used']/1e9:.1f} of {t['ram']['total']/1e9:.1f} GB RAM in use "
                 f"({t['ram']['percent']:.0f}%).")
-    if _Q_DISK.search(q):
+    if q == "disk":
         free = (t['disk']['total'] - t['disk']['used']) / 1e9
         return (f"Disk C: has {free:.0f} GB free of {t['disk']['total']/1e9:.0f} GB "
                 f"({t['disk']['percent']:.0f}% used).")
-    if _Q_UP.search(q):
+    if q == "uptime":
         up = t["uptime_s"]; d, h, m_ = up // 86400, (up % 86400) // 3600, (up % 3600) // 60
         span = f"{d} day{'s' if d != 1 else ''} and {h} hours" if d else f"{h} hours {m_} minutes"
         return f"This machine's been up {span}."
-    if _Q_OS.search(q):
-        return f"You're on {platform.platform()}."
+    return f"You're on {platform.platform()}."
+
+
+def answer_machine_question(text: str) -> str | None:
+    """Text fallback (keyword-net path): map the raw question to the enum, then delegate to
+    answer_by_question. None when it doesn't map cleanly."""
+    q = (text or "").strip()
+    if _Q_FILES.search(q):
+        m = _Q_PATH.search(q)
+        return answer_by_question("file_count", m.group(1).strip() if m else None, q)
+    if _Q_TOPPROC.search(q):
+        return answer_by_question("top_proc", None, q)
+    if _Q_SPECS.search(q):
+        return answer_by_question("specs", None, q)
+    for rx, name in ((_Q_GPU, "gpu"), (_Q_CPU, "cpu"), (_Q_RAM, "ram"), (_Q_DISK, "disk"),
+                     (_Q_UP, "uptime"), (_Q_OS, "os")):
+        if rx.search(q):
+            return answer_by_question(name, None, q)
     return None
 
 

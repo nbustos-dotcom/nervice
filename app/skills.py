@@ -240,6 +240,30 @@ _LIST_RE = re.compile(r"\b(my|your)\s+(skills?|shortcuts?)\b|\b(list|show)\b[^.]
 _DELETE_RE = re.compile(r"\b(delete|remove|forget|drop|get rid of)\b\s+(?:the\s+|my\s+)?(.+?)\s*(?:skill|shortcut|macro)\b", re.I)
 
 
+async def execute_op(user_id: str, op: str, trigger: str, raw_text: str) -> str:
+    """Execute a structured skill operation from the ROUTER ({op, trigger}). The LLM decides the
+    intent; this validates and runs through the existing (re-gated) machinery."""
+    op = (op or "run").strip().lower()
+    if op == "create":
+        return await _create(user_id, raw_text)
+    if op == "list":
+        return _list_text()
+    if op == "delete":
+        name = _norm(trigger)
+        if not name:
+            m = _DELETE_RE.search((raw_text or "").lower())
+            name = _norm(m.group(2)) if m else ""
+        if not name:
+            return "Which skill should I delete? Say \"delete the <name> skill.\""
+        return _delete(name)
+    # run
+    sk = find_skill(trigger) or find_skill(raw_text)
+    if sk:
+        return await run_skill(user_id, sk)
+    shown = trigger or raw_text
+    return f"I don't have a skill called “{shown}”. Say \"list my skills\" to see them."
+
+
 async def handle(user_id: str, text: str):
     """Called before normal routing. Returns a reply string if this turn is a skill operation
     (save-confirm / create / list / delete / run a trigger), else None so the turn routes normally."""

@@ -349,6 +349,8 @@
             <span class="bs-k">BRAIN</span><span class="bs-v" id="bsBrain">—</span>
             <span class="bs-sep"></span>
             <span class="bs-k">LAST</span><span class="bs-v" id="bsTime">—</span>
+            <span class="bs-sep"></span>
+            <span class="bs-k">VER</span><span class="bs-v instant" id="bsVer">—</span>
           </div>
         </div>
         <div class="panel convo" style="animation-delay:.12s">
@@ -800,6 +802,7 @@ async function loadHealth(){
   const dot=$('#sysDot'), st=$('#sysStat');
   try{ const h=await api('/health'); const warm=h.voice==='warm';
     dot.className='dot '+(warm?'on':'warn'); st.textContent= warm?'system online':'warming core';
+    if(h.git){ $('#bsVer').textContent=h.git; $('#brainStrip').style.display=''; }  // version banner (stale-server killer)
   }catch(e){ dot.className='dot off'; st.textContent= String(e.message).indexOf('401')>=0?'no token':'offline'; }
 }
 

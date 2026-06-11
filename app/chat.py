@@ -10,7 +10,7 @@ from app.retrieval import retrieve
 from app.agent import current_rung
 from app.turnlog import log_turn
 from app.llm import chat_stream, chat_with_tools, TOOL_TIMEOUTS, TIMEOUT_MSG, LADDER_EXHAUSTED_MSG
-from app.router import classify, is_machine_question as classify_is_machine
+from app.router import classify
 from app.tools import TOOLS, TOOL_FUNCS
 from app import sysinfo
 from app.memory import remember
@@ -57,27 +57,49 @@ _TIMEOUT_MSG = TIMEOUT_MSG
 
 
 async def execute_route(user_id, system, route, user_message, window, voice_mode: bool = False, on_ack=None):
-    """The post-classify half of a turn: 'control' local-machine action, forced-tool ack + timeout,
-    or the plain tool loop. Shared by respond() and app/streaming.py so ack/timeout/terminal
-    semantics exist exactly once. on_ack(text) is awaited right before a slow forced tool starts."""
-    if route == "control":
-        # Local-machine action. SAFE actions execute immediately; RISKY ones return a confirmation
-        # request and arm the gate (resolved next turn by computer.resolve_pending, checked in the
-        # callers before routing). Deterministic — the model never decides what's safe.
-        print("[ROUTE: control -> local computer]", file=sys.stderr)
-        return computer.handle_control(user_id, user_message)
-    force = _FORCE.get(route)
+    """The post-classify half of a turn. `route` is the router's dict ({"route": name, ...args})
+    or a bare string for legacy callers. The LLM router decided INTENT; everything here only
+    EXECUTES — risk gating, whitelists, and the pending-confirm gate are unchanged in their
+    modules. Shared by respond() and app/streaming.py. on_ack(text) is awaited right before a
+    slow forced tool starts."""
+    rd = route if isinstance(route, dict) else {"route": route}
+    r = rd.get("route", "normal")
+    if r == "control":
+        # Structured {action, target} from the router when present; computer._decision_from_args
+        # applies the SAME risk rules, and interpret(raw) remains the fallback (keyword net).
+        print(f"[ROUTE: control -> {rd.get('action') or 'interpret'}]", file=sys.stderr)
+        return computer.handle_control(user_id, user_message,
+                                       action=rd.get("action"), target=rd.get("target"))
+    if r == "system":
+        ans = await asyncio.to_thread(sysinfo.answer_by_question,
+                                      rd.get("question"), rd.get("path"), user_message)
+        if ans is None:
+            ans = await asyncio.to_thread(sysinfo.answer_machine_question, user_message)
+        if ans:
+            print("[ROUTE: system -> direct telemetry]", file=sys.stderr)
+            current_rung.set("direct")
+            return ans
+        r = "normal"                      # unmappable machine question -> normal pipeline
+    if r == "skill":
+        print(f"[ROUTE: skill/{rd.get('op','run')}]", file=sys.stderr)
+        current_rung.set("skill")
+        return await skills.execute_op(user_id, rd.get("op", "run"), rd.get("trigger", ""), user_message)
+    if r == "music_mgmt":
+        print(f"[ROUTE: music_mgmt/{rd.get('op')}]", file=sys.stderr)
+        current_rung.set("direct")
+        return music.apply(rd.get("op"), rd.get("artists"))
+    force = _FORCE.get(r)
     if force:
-        print(f"[ROUTE: {route} -> {force}]", file=sys.stderr)
+        print(f"[ROUTE: {r} -> {force}]", file=sys.stderr)
         if on_ack:
-            await on_ack(_ACK[route])    # immediate feedback before the slow tool
+            await on_ack(_ACK[r])        # immediate feedback before the slow tool
     coro = chat_with_tools(system, window + [{"role": "user", "content": user_message}],
                            TOOLS, TOOL_FUNCS, force_tool=force, voice_mode=voice_mode)
     if force:
         try:
             # route maps 1:1 to the forced agent tool, so this applies that tool's timeout;
             # wait_for cancels chat_with_tools (and the awaited agent) cleanly on expiry
-            return await asyncio.wait_for(coro, _TIMEOUTS[route])
+            return await asyncio.wait_for(coro, _TIMEOUTS[r])
         except asyncio.TimeoutError:
             return _TIMEOUT_MSG
     return await coro
@@ -94,31 +116,21 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         log_turn("control", "control", time.monotonic() - t0, "rest")
         return pending
 
-    # user-defined skills run BEFORE normal routing: a saved trigger phrase runs the skill, and
-    # create/list/delete are handled here too. None -> route normally.
-    skill_reply = await skills.handle(user_id, user_message)
-    if skill_reply is not None:
-        print(skill_reply)
+    # skill SAVE confirmation (a deterministic yes/no, sibling of the control pending gate)
+    sk_pending = skills._resolve_pending(user_id, user_message)
+    if sk_pending is not None:
+        print(sk_pending)
         log_turn("skill", "skill", time.monotonic() - t0, "rest")
-        return skill_reply
+        return sk_pending
 
-    # favorite-artists management ("my favorite artists are...", add/remove/list) — deterministic,
-    # works on any rung. None -> route normally.
-    music_reply = music.handle(user_message)
-    if music_reply is not None:
-        print(music_reply)
-        log_turn("music", "direct", time.monotonic() - t0, "rest")
-        return music_reply
-
-    # sysinfo DIRECT fast path: machine questions are identified deterministically and answered
-    # straight from telemetry (~1s) — no retrieval, no classify, no LLM tool-round (was 9-19s).
-    # None -> not confidently mappable -> normal pipeline below.
-    if classify_is_machine(user_message):
-        direct = await asyncio.to_thread(sysinfo.answer_machine_question, user_message)
-        if direct:
-            print(direct)
-            log_turn("system", "direct", time.monotonic() - t0, "rest")
-            return direct
+    # EXACT-normalized saved-trigger match ONLY (string-equal — nothing fuzzy). Everything else
+    # goes to the LLM router, the single intent decider.
+    sk = skills.find_skill(user_message)
+    if sk is not None:
+        reply = await skills.run_skill(user_id, sk)
+        print(reply)
+        log_turn("skill", "skill", time.monotonic() - t0, "rest")
+        return reply
 
     # memory retrieval and router classification are independent — overlap them so the turn
     # pays max(retrieve, classify) instead of the sum (classify alone measured 0.3-0.8s)
@@ -135,7 +147,7 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
                                 voice_mode=voice_mode, on_ack=_ack)
     print(reply)
     rung = "exhausted" if (reply or "").startswith(LADDER_EXHAUSTED_MSG) else current_rung.get()
-    log_turn(route, rung, time.monotonic() - t0, "rest")
+    log_turn(route.get("route", "?"), rung, time.monotonic() - t0, "rest")
     return reply
 
 
