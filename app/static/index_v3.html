@@ -595,7 +595,7 @@ async function getChatWS(){ if(chatWS&&chatWS.readyState===1) return chatWS; cha
 
 /* ================= tap-to-talk + hands-free conversation ================= */
 let micStream=null, micSource=null, recorder=null, chunks=[], recording=false, convoMode=false, _discard=false;
-let vadRAF=0, recStart=0, silentMs=0, voicedMs=0, heard=false, vadLast=0, noiseFloor=0, calN=0;
+let vadRAF=0, recStart=0, silentMs=0, voicedMs=0, heard=false, vadLast=0, noiseFloor=0, aboveMs=0, calSamples=[];
 /* ADAPTIVE VAD: fixed energy thresholds don't survive phone mics — AGC boosts gain in quiet
    moments, so the ambient floor drifts ABOVE any fixed cutoff and "silence" is never detected
    (the records-forever bug). Instead: calibrate the noise floor for the first CAL_MS, then track
@@ -604,7 +604,10 @@ let vadRAF=0, recStart=0, silentMs=0, voicedMs=0, heard=false, vadLast=0, noiseF
    hard-resets it), so END_SIL_MS always elapses in real rooms. MAX_MS is the can't-record-forever
    backstop regardless of detection. */
 const VAD={CAL_MS:500, END_SIL_MS:1350, MIN_SPEECH_MS:400, NO_SPEECH_MS:8000, MAX_MS:30000,
-           SPEECH_MULT:3.0, SIL_MULT:1.8, SPEECH_MIN:0.012, SIL_MIN:0.006, FLOOR_RISE:0.004};
+           SPEECH_MULT:3.5, SIL_MULT:2.0, SPEECH_MIN:0.015, SIL_MIN:0.008,
+           SPEECH_HOLD_MS:150,            /* voice = SUSTAINED above threshold, not a blip */
+           FLOOR_RISE_IDLE:0.02,          /* steady noise (fan/AC) becomes the floor in ~2s */
+           FLOOR_RISE_SPEECH:0.002};      /* ...but talking can't inflate the floor */
 function pickMime(){ for(const m of ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus']){ try{ if(MediaRecorder.isTypeSupported(m)) return m; }catch(e){} } return ''; }
 async function startRec(auto){
   if(recording) return; if(!getToken()){ openToken(); return; }
@@ -635,26 +638,39 @@ function _vadEnergy(){   // separable for testing: current mic energy, 0..1
   return Math.sqrt(s/ampData.length)/255;
 }
 function startVAD(){
-  recStart=Date.now(); vadLast=recStart; silentMs=0; voicedMs=0; heard=false; noiseFloor=0; calN=0;
+  recStart=Date.now(); vadLast=recStart; silentMs=0; voicedMs=0; heard=false; noiseFloor=0; aboveMs=0; calSamples=[];
   if(!micAnalyser) return;
   // setTimeout, NOT requestAnimationFrame: rAF freezes when the screen dims / app backgrounds,
   // which froze end-of-speech detection mid-conversation (another records-forever path).
   (function tick(){
     if(!recording) return;
     const rms=_vadEnergy(), now=Date.now(), dt=Math.min(1000, now-vadLast), el=now-recStart; vadLast=now;
-    if(el<=VAD.CAL_MS){                                   // calibrate: average the ambient floor
-      noiseFloor = calN ? (noiseFloor*calN+rms)/(calN+1) : rms; calN++;
-    } else if(rms<noiseFloor){ noiseFloor=rms; }          // follow drops instantly
-    else { noiseFloor += (rms-noiseFloor)*VAD.FLOOR_RISE; }  // rise slowly (rides out AGC drift)
+    // thresholds from the CURRENT floor (floor itself updates after, using this tick's verdict)
     const speechThr = Math.max(noiseFloor*VAD.SPEECH_MULT, noiseFloor+VAD.SPEECH_MIN);
     const silThr    = Math.max(noiseFloor*VAD.SIL_MULT,    noiseFloor+VAD.SIL_MIN);
-    const hearing = el>VAD.CAL_MS && rms>=speechThr;
-    if(hearing){ voicedMs+=dt; heard=true; silentMs=0; }  // real voice resets the budget
-    else if(heard && rms<silThr){ silentMs+=dt; }         // clear silence: budget accumulates
-    else if(heard){ silentMs+=dt*0.4; }                   // dead zone: budget creeps, NEVER hard-resets
-    reactor.classList.toggle('hearing', hearing);
+    // voice = SUSTAINED energy above threshold (>=SPEECH_HOLD_MS consecutive) — a fan's jitter or
+    // a momentary clank can no longer reset the end-of-speech budget.
+    const above = el>VAD.CAL_MS && rms>=speechThr;
+    aboveMs = above ? aboveMs+dt : 0;
+    const speaking = aboveMs>=VAD.SPEECH_HOLD_MS;
+    if(el<=VAD.CAL_MS){
+      // calibrate on the 20th percentile — robust to talking/spikes during the window, and a fan
+      // already running gets baked into the floor instead of read as speech
+      calSamples.push(rms);
+      const s=[...calSamples].sort((a,b)=>a-b);
+      noiseFloor=s[Math.floor(s.length*0.2)];
+    } else if(rms<noiseFloor){ noiseFloor=rms; }            // follow drops instantly
+    else {
+      // rolling re-estimation: steady background (fan/AC kicking on mid-listen) climbs into the
+      // floor within ~2s when not speaking; confirmed speech barely moves it
+      noiseFloor += (rms-noiseFloor)*(speaking?VAD.FLOOR_RISE_SPEECH:VAD.FLOOR_RISE_IDLE);
+    }
+    if(speaking){ voicedMs+=dt; heard=true; silentMs=0; }   // sustained voice resets the budget
+    else if(heard && rms<silThr){ silentMs+=dt; }           // clear silence: budget accumulates
+    else if(heard){ silentMs+=dt*0.4; }                     // dead zone: budget creeps, NEVER hard-resets
+    reactor.classList.toggle('hearing', speaking);
     let lbl='listening';
-    if(hearing) lbl='hearing you…';
+    if(speaking) lbl='hearing you…';
     else if(heard && silentMs>200) lbl=`heard you — sending in ${Math.max(0,(VAD.END_SIL_MS-silentMs)/1000).toFixed(1)}s`;
     else if(heard) lbl='go on…';
     if(lbl!==micLabel.textContent) micLabel.textContent=lbl;   // change-only (no aria-live spam)
