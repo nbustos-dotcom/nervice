@@ -4,6 +4,8 @@ import os, re, json, sys, asyncio, inspect
 from groq import AsyncGroq, BadRequestError, RateLimitError
 from dotenv import load_dotenv
 
+from app.agent import ask_claude, AllClaudeExhausted   # the Claude account ladder (Pro -> Max)
+
 load_dotenv()
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -36,6 +38,22 @@ def rate_limit_message(err=None) -> str:
 
 def _is_rate_limit(e: Exception) -> bool:
     return isinstance(e, RateLimitError) or "rate_limit" in str(e).lower()
+
+
+# Shown only when the WHOLE ladder is exhausted — Groq capped AND every Claude account unavailable.
+LADDER_EXHAUSTED_MSG = ("I've hit my usage limits for now — they reset shortly. "
+                        "Try me again in a bit.")
+
+
+async def _claude_fallback(prompt: str, system: str | None = None) -> str | None:
+    """Groq is capped on a turn that would normally use it — answer via Claude (the Pro -> Max
+    account ladder) instead of failing. Returns Claude's answer, or None if Claude is ALSO
+    unavailable (the caller then shows LADDER_EXHAUSTED_MSG)."""
+    try:
+        return await ask_claude(prompt, system=system)
+    except Exception as e:   # AllClaudeExhausted, or any SDK/auth error
+        print(f"[groq->claude fallback unavailable] {repr(e)[:120]}", file=sys.stderr)
+        return None
 
 # Per-tool ceilings for the slow agent tools, applied wherever they fire: respond() uses them for
 # forced routes, and chat_with_tools applies them when the tool model calls one on its own — the
@@ -103,10 +121,14 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
                       {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nDRAFT:\n{draft}"}],
             temperature=0.0)
     except RateLimitError as e:
-        # Cap hit between search and synthesis: never speak unverified draft material — return the
-        # friendly limit message (the verifier boundary is preserved by NOT emitting the draft).
-        print("[groq 429 in grounded synthesis]", file=sys.stderr)
-        return rate_limit_message(e)
+        # Cap hit between search and synthesis: ground the answer with CLAUDE instead, from the SAME
+        # sources under the SAME hard rules (answer only from sources) — the grounding boundary
+        # holds. The cross-model verifier is skipped because Groq is down; we never emit the raw
+        # unverified Groq draft. If Claude is also out, show the friendly limit message.
+        print("[groq 429 in grounded synthesis -> Claude fallback]", file=sys.stderr)
+        prompt = f"SOURCE MATERIAL:\n{src}\n\nQUESTION: {question}"
+        ans = await _claude_fallback(prompt, system=synth_system)
+        return ans if ans else LADDER_EXHAUSTED_MSG
     out = resp.choices[0].message.content
     if "FINAL:" in out:
         return out.split("FINAL:", 1)[1].strip()
@@ -133,16 +155,23 @@ async def chat_stream(system: str, messages: list[dict]):
 
 async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
                           force_tool: str | None = None, voice_mode: bool = False):
-    """Thin 429 guard over the tool loop. Any Groq daily-cap hit anywhere in the loop (tool rounds,
-    trailing answer, or grounded synthesis) returns the friendly limit message instead of raising,
-    so respond()/the API return 200 with a speakable reply. Agent-tool errors (Claude) are handled
-    inside _impl and are unaffected."""
+    """Tier-ladder guard over the Groq tool loop. On a Groq daily-cap 429 anywhere in the loop,
+    fall back to Claude (the Pro -> Max account ladder) rather than failing — cheapest-capable
+    Groq first, Claude when Groq is out. If a FORCED Claude tool (the hard route) finds every
+    account exhausted, return the friendly limit message. Nothing here 500s on a rate limit."""
     try:
         return await _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds,
                                            force_tool, voice_mode)
     except RateLimitError as e:
-        print("[groq 429 in chat_with_tools]", file=sys.stderr)
-        return rate_limit_message(e)
+        # Groq is capped — answer the user's turn via Claude instead of dying on the limit.
+        print("[groq 429 in chat_with_tools -> Claude fallback]", file=sys.stderr)
+        question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+        ans = await _claude_fallback(question, system=system)
+        return ans if ans else LADDER_EXHAUSTED_MSG
+    except AllClaudeExhausted:
+        # the hard route forced Claude and every account is out — friendly, never a crash
+        print("[claude ladder exhausted in chat_with_tools]", file=sys.stderr)
+        return LADDER_EXHAUSTED_MSG
 
 
 async def _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds=4,
@@ -170,6 +199,8 @@ async def _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds=
             try:
                 raw = fn(**{arg_name: question})
                 result = await raw if inspect.isawaitable(raw) else raw
+            except AllClaudeExhausted:
+                raise   # let the wrapper return the friendly limit message
             except Exception as ex:
                 result = f"tool error: {ex}"
             print(f"[TOOL RESULT first 600 chars]\n{str(result)[:600]}\n", file=sys.stderr)
@@ -218,6 +249,8 @@ async def _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds=
                     return TIMEOUT_MSG   # terminal tools: the reply IS the timeout notice
                 result = (f"tool timed out after {TOOL_TIMEOUTS.get(tc.function.name)}s and was "
                           "stopped — answer from what you have and say the expert call timed out")
+            except AllClaudeExhausted:
+                raise   # auto-fired consult found every Claude account out — wrapper handles it
             except Exception as e:
                 result = f"tool error: {e}"
             print(f"[TOOL RESULT first 600 chars]\n{str(result)[:600]}\n", file=sys.stderr)
