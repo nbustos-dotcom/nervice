@@ -181,6 +181,22 @@
   /* ---------- audio spectrum ---------- */
   .spectrum{width:100%; max-width:560px; height:64px; margin:2px auto 0; display:block;}
 
+  /* ---------- daily line: one quiet grounded sentence near the clock (NO box) ----------
+     Yesterday's REAL aggregates phrased as one sentence (/daily-summary, facts-only, cached
+     per-day server-side). T3 ambient plane: faint, centered, a micro-prefix, nothing else. */
+  .dayline{display:flex; align-items:baseline; justify-content:center; gap:9px; width:100%;
+           max-width:640px; margin:0 auto; padding:0 14px; pointer-events:none; text-align:center;}
+  .dayline .dl-k{font-family:var(--mono); font-size:8.5px; letter-spacing:.22em; color:var(--accent);
+                 opacity:.55; flex:none;}
+  .dayline #dlText{font-size:11.5px; color:var(--faint); line-height:1.4;}
+
+  /* AWAITING NATE: leader-line callout in the lower-right void — EXISTS only when something
+     is actually waiting (absence = silence, grammar v4.1 #8). Spawn fades up once on first
+     appearance, never replays on routine re-renders. */
+  .ld-g.await .ld-node{fill:var(--accent2); opacity:.9;}
+  .ld-g.await.spawn{animation:ldSpawn .5s ease-out backwards;}
+  @keyframes ldSpawn{from{opacity:0;}}
+
   /* ---------- brain ladder: three floating arc clusters (information layer — NO box) ----------
      Open arc fragments in the void at the reactor's diagonal periphery, openings facing the
      orb (grammar v4.1 #5/#9). Dim purple track = the range, cyan fill = today's REAL share of
@@ -361,6 +377,9 @@
           <div class="ruler" id="ruler"></div>
         </div>
         <div class="reactor-wrap">
+          <div class="dayline" id="dayLine" style="display:none" aria-hidden="true">
+            <span class="dl-k">YESTERDAY</span><span id="dlText"></span>
+          </div>
           <div class="orbzone">
           <svg id="ladderSvg" aria-hidden="true"></svg>
           <div class="reactor idle" id="reactor" role="button" tabindex="0" aria-label="Hold to talk to Nervice">
@@ -1007,6 +1026,29 @@ function renderLadder(){
     out+=`<text class="ld-val" x="${tx.toFixed(1)}" y="${(ey+11).toFixed(1)}" text-anchor="${anchor}">${val}</text>`;
     out+=`</g>`;
   }
+  // AWAITING NATE: callout in the lower-right void — rendered ONLY when something genuinely waits.
+  const p=_pendingData;
+  const nProps=(p&&p.proposals)?p.proposals.length:0;
+  const reqEntries=(p&&p.requeue)?Object.entries(p.requeue):[];
+  const nReq=reqEntries.reduce((a,e)=>a+e[1],0);
+  if(nProps>0||nReq>0){
+    const ang=Math.PI/4;                                   // the free diagonal (ladder owns the other three)
+    const nx=C+Math.cos(ang)*orbR*1.06, ny=C+Math.sin(ang)*orbR*1.06;   // origin node hugs the orb
+    const ex=nx+16*k, ey=ny+16*k, lx=ex+42*k;
+    const spawn=renderLadder._awaitShown?'':' spawn';
+    const parts=[];
+    if(nProps) parts.push(nProps+(nProps>1?' proposals':' proposal'));
+    for(const [kind,cnt] of reqEntries) parts.push(cnt+' '+kind);
+    out+=`<g class="ld-g await${spawn}">`;
+    out+=`<circle class="ld-node" cx="${nx.toFixed(1)}" cy="${ny.toFixed(1)}" r="2.5"/>`;
+    out+=`<path class="ld-lead" d="M ${nx.toFixed(1)} ${ny.toFixed(1)} L ${ex.toFixed(1)} ${ey.toFixed(1)} L ${lx.toFixed(1)} ${ey.toFixed(1)}"/>`;
+    out+=`<text class="ld-name" x="${(ex+5*k).toFixed(1)}" y="${(ey-4).toFixed(1)}" text-anchor="start">AWAITING NATE</text>`;
+    out+=`<text class="ld-val" x="${(ex+5*k).toFixed(1)}" y="${(ey+11).toFixed(1)}" text-anchor="start">${esc(parts.join(' · '))}</text>`;
+    out+=`</g>`;
+    renderLadder._awaitShown=true;
+  } else {
+    renderLadder._awaitShown=false;                        // resolved -> next appearance spawns again
+  }
   svg.innerHTML=out;
   // phone widths: nudge any label that escapes the svg box back inside (runs per poll, not per frame)
   for(const t of svg.querySelectorAll('text')){
@@ -1020,6 +1062,19 @@ function renderLadder(){
 async function loadLadder(){
   if(document.hidden) return;                            // perf budget: nothing fetches while hidden
   try{ _ladder=await api('/ladder'); renderLadder(); }catch(e){}
+}
+
+/* ---- AWAITING NATE + daily line (real /pending + /daily-summary; absence = silence) ---- */
+let _pendingData=null;
+async function loadPending(){
+  if(document.hidden) return;
+  try{ _pendingData=await api('/pending'); renderLadder(); }catch(e){}
+}
+async function loadDaily(){
+  if(document.hidden) return;
+  try{ const j=await api('/daily-summary');
+    if(j&&j.available&&j.sentence){ $('#dlText').textContent=j.sentence; $('#dayLine').style.display=''; }
+  }catch(e){}
 }
 let _ldRz; addEventListener('resize',()=>{ clearTimeout(_ldRz); _ldRz=setTimeout(renderLadder,180); },{passive:true});
 document.addEventListener('visibilitychange',()=>document.documentElement.classList.toggle('vishidden',document.hidden));
@@ -1035,7 +1090,7 @@ async function loadUpdates(){
 }
 
 /* ================= boot ================= */
-function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); loadUpdates(); loadLastTurn(); loadLadder(); requestLocation(false); }
+function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); loadUpdates(); loadLastTurn(); loadLadder(); loadPending(); loadDaily(); requestLocation(false); }
 buildGauges();
 setInterval(loadSystem, 2000);
 setInterval(loadHealth, 15000);
@@ -1045,6 +1100,8 @@ setInterval(loadWeather, 600000);
 setInterval(loadNews, 600000);
 setInterval(loadLastTurn, 4000);
 setInterval(loadLadder, 15000);
+setInterval(loadPending, 60000);
+setInterval(loadDaily, 600000);
 setInterval(loadUpdates, 300000);
 getCID();
 if(!getToken()) openToken(); else refreshAll();
