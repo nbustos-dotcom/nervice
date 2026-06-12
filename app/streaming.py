@@ -313,14 +313,14 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
             if llm.is_news_question(text):
                 ans = await llm.extractive_news()
                 if ans:
-                    print("[groq 429 in stream_reply -> extractive news]", file=sys.stderr)
+                    print("[groq capped in stream_reply -> extractive news]", file=sys.stderr)
                     current_rung.set("extractive")
                     await _trace(send, "answering", rung="extractive", ms=_ms())
             if ans is None:
                 await _trace(send, "answering", rung="ollama", ms=_ms())
                 ans = await llm._ollama_fallback(system, msgs, tools.TOOLS, tools.TOOL_FUNCS)
             if ans is None:
-                print("[groq 429 in stream_reply -> claude ladder]", file=sys.stderr)
+                print("[groq capped in stream_reply -> claude ladder]", file=sys.stderr)
                 await _trace(send, "answering", rung="claude", ms=_ms())
                 ans = await llm._claude_fallback(system=system, messages=msgs)
             reply, pivot, rate_limited = (ans or await llm._exhausted_msg()), None, True

@@ -229,7 +229,7 @@ async def _ollama_fallback(system: str | None, messages: list,
                 if out:
                     out = _guard_local_reply(out, used_tool)
                     current_rung.set("ollama")               # telemetry: this turn answered locally
-                    print("[groq 429 -> answered on the local ollama rung]", file=sys.stderr)
+                    print("[groq capped -> answered on the local ollama rung]", file=sys.stderr)
                 return out or None
             used_tool = True                                 # tool-grounded replies skip the guard
             msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
@@ -355,13 +355,13 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
         if is_news_question(question):
             news = await extractive_news()
             if news:
-                print("[groq 429 in synthesis -> extractive news]", file=sys.stderr)
+                print("[groq capped in synthesis -> extractive news]", file=sys.stderr)
                 current_rung.set("extractive")
                 return news
         # Otherwise ground the answer with CLAUDE instead, from the SAME sources under the SAME
         # hard rules (answer only from sources) — the grounding boundary holds. The cross-model
         # verifier is skipped because Groq is down; we never emit the raw unverified Groq draft.
-        print("[groq 429 in grounded synthesis -> Claude fallback]", file=sys.stderr)
+        print("[groq capped in grounded synthesis -> Claude fallback]", file=sys.stderr)
         prompt = f"SOURCE MATERIAL:\n{src}\n\nQUESTION: {question}"
         ans = await _claude_fallback(prompt, system=synth_system)
         return ans if ans else LADDER_EXHAUSTED_MSG
@@ -388,7 +388,7 @@ async def chat_stream(system: str, messages: list[dict]):
     except RateLimitError as e:
         # e.g. the startup greeting when the cap is already hit — speak the limit, don't crash
         _stick_cap(e)
-        print("[groq 429 in chat_stream]", file=sys.stderr)
+        print("[groq capped in chat_stream]", file=sys.stderr)
         yield rate_limit_message(e)
 
 
@@ -421,13 +421,13 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
         if is_news_question(question):
             news = await extractive_news()
             if news:
-                print("[groq 429 -> extractive news, zero LLM]", file=sys.stderr)
+                print("[groq capped -> extractive news, zero LLM]", file=sys.stderr)
                 current_rung.set("extractive")
                 return news
         ans = await _ollama_fallback(system, messages, tools, tool_funcs)
         if ans:
             return ans
-        print("[groq 429, ollama unavailable -> Claude fallback]", file=sys.stderr)
+        print("[groq capped, ollama unavailable -> Claude fallback]", file=sys.stderr)
         ans = await _claude_fallback(system=system, messages=messages)
         return ans if ans else await _exhausted_msg()
     except AllClaudeExhausted:
