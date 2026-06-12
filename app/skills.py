@@ -150,10 +150,22 @@ Output ONLY JSON, no prose:
 The trigger is the short phrase the user will say to run it. Keep args short and literal."""
 
 
+_CAPPED_CREATE_MSG = ("Saving a skill needs my big brain, and Groq is rate-limited right now — "
+                      "ask me again when it resets and I'll save it properly.")
+
+
 async def _create(user_id: str, text: str) -> str:
-    from app.llm import chat_json
+    # Fix 2.5: skill parsing NEVER runs on the 4B (a confabulated trigger/step would be saved
+    # and then re-run forever). While Groq is capped/sticky: honest deferral, nothing written
+    # to skills.json, no pending-save state.
+    from app.llm import chat_json, groq_capped
+    from groq import RateLimitError
+    if groq_capped():
+        return _CAPPED_CREATE_MSG
     try:
         parsed = await chat_json(_PARSE_SYSTEM, text)
+    except RateLimitError:
+        return _CAPPED_CREATE_MSG        # the 429 that just set the sticky window
     except Exception:
         return "I couldn't parse that into a skill — try \"when I say work mode, open vscode and open github\"."
     trigger = (parsed.get("trigger") or "").strip()
