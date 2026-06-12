@@ -162,6 +162,8 @@ class _AudioPipeline:
 async def _stream_normal(system: str, text: str, window: list, send, voice: bool):
     """Token-stream a normal turn. Returns (reply, None) on success or (None, tool_name) when the
     model pivoted to a tool call and the caller must rerun the full pipeline."""
+    if llm.groq_capped():
+        raise llm._sticky_429()          # sticky window: ladder immediately, no wasted round-trip
     msgs = ([{"role": "system", "content": system}] + list(window)
             + [{"role": "user", "content": text}])
     stream = await llm._client.chat.completions.create(
@@ -290,7 +292,8 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         try:
             await _trace(send, "answering", rung="groq", ms=_ms())
             reply, pivot = await _stream_normal(system, text, window, send, voice)
-        except RateLimitError:
+        except RateLimitError as _rl:
+            llm._stick_cap(_rl)          # real 429 sets the sticky window; synthetic no-ops
             # Groq daily cap hit at the streaming create (before any token/audio went out).
             # Ladder: extractive news (zero LLM) -> local Ollama (free/fast, local tools, same
             # system+window) -> Claude (context-threaded) -> friendly message (+'start Ollama'

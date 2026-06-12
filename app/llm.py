@@ -1,6 +1,6 @@
 import app.net  # noqa
 
-import os, re, json, sys, asyncio, inspect
+import os, re, json, sys, time, asyncio, inspect
 from groq import AsyncGroq, BadRequestError, RateLimitError
 from dotenv import load_dotenv
 
@@ -39,6 +39,75 @@ def rate_limit_message(err=None) -> str:
 
 def _is_rate_limit(e: Exception) -> bool:
     return isinstance(e, RateLimitError) or "rate_limit" in str(e).lower()
+
+
+# ---- Fix 2.3: sticky cap-state ----
+# Cap detection was reactive with a residue effect: every capped turn paid a failed Groq
+# round-trip before laddering (14 exhausted turns in one day). Now the FIRST real 429 sets a
+# sticky capped_until (parsed from the error's reset info when present, else 15 min); while
+# sticky, every Groq entry point SKIPS the attempt by raising a synthetic RateLimitError —
+# the existing 429 handlers ladder exactly as before, just without the wasted round-trip.
+# On expiry, real traffic retries; another 429 re-sticks.
+_capped_until = 0.0
+if os.environ.get("NERVICE_FORCE_CAPPED"):
+    # TEST LEVER ONLY (documented): boot in the capped state so capped behavior can be
+    # exercised against a real server without waiting for Groq to actually run dry.
+    _capped_until = time.time() + 900
+    print("[llm] NERVICE_FORCE_CAPPED set -> sticky capped for 15min (test lever)", file=sys.stderr)
+
+
+def groq_capped() -> bool:
+    return time.time() < _capped_until
+
+
+def capped_until() -> float:
+    """Epoch seconds the sticky cap expires, 0.0 when not capped. Surfaced on /ladder."""
+    return _capped_until if groq_capped() else 0.0
+
+
+def _sticky_429() -> RateLimitError:
+    """A synthetic RateLimitError so every existing 429 handler treats 'sticky-skipped' exactly
+    like a real cap — same ladder, zero new control flow. Marked so _stick_cap ignores it."""
+    import httpx
+    req = httpx.Request("POST", "https://api.groq.com/sticky-cap")
+    return RateLimitError("sticky-capped (Groq attempt skipped — no round-trip)",
+                          response=httpx.Response(429, request=req), body=None)
+
+
+def _stick_cap(err) -> None:
+    """Record a REAL 429: parse retry-after / reset headers, else the 'try again in Xm'
+    message, else 15 minutes. Synthetic sticky errors never re-stick (that would extend the
+    window on every capped turn)."""
+    global _capped_until
+    if "sticky-capped" in str(err):
+        return
+    secs = 0.0
+    try:
+        resp = getattr(err, "response", None)
+        headers = resp.headers if resp is not None else {}
+        ra = headers.get("retry-after")
+        if ra:
+            secs = float(ra)
+        else:
+            for h in ("x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+                v = headers.get(h)
+                if v:
+                    m = re.match(r"(?:(\d+)h)?(?:(\d+)m)?([\d.]+)?s?$", v.strip())
+                    if m and any(m.groups()):
+                        secs = (int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60
+                                + float(m.group(3) or 0))
+                    break
+    except Exception:
+        pass
+    if not secs:
+        m = re.search(r"try again in (?:(\d+)h)?(?:(\d+)m)?([\d.]+)?s?", str(err))
+        if m and any(m.groups()):
+            secs = (int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60
+                    + float(m.group(3) or 0))
+    secs = min(max(secs, 60.0), 6 * 3600) if secs else 900.0
+    _capped_until = time.time() + secs
+    print(f"[llm] Groq 429 -> sticky capped for {secs/60:.1f}min "
+          f"(until epoch {_capped_until:.0f})", file=sys.stderr)
 
 
 # Shown only when the WHOLE ladder is exhausted — Groq capped AND every Claude account unavailable.
@@ -264,6 +333,8 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
     synth_system = SYNTH_SYSTEM + (VOICE_SYNTH_ADDENDUM if voice_mode else "")
     verify_system = VERIFY_SYSTEM + (VOICE_VERIFY_ADDENDUM if voice_mode else "")
     try:
+        if groq_capped():
+            raise _sticky_429()          # sticky window: straight to the capped synthesis path
         # Pass 1: isolated synthesis — model sees ONLY question + sources
         resp = await _client.chat.completions.create(
             model=TOOL_MODEL,
@@ -278,6 +349,7 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
                       {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nDRAFT:\n{draft}"}],
             temperature=0.0)
     except RateLimitError as e:
+        _stick_cap(e)
         # Cap hit between search and synthesis. News: extractive real headlines, zero LLM.
         # (Grounded synthesis deliberately does NOT run on the 4B — Claude only.)
         if is_news_question(question):
@@ -301,6 +373,8 @@ async def _grounded_synthesis(question: str, tool_outputs: list[str], voice_mode
 
 async def chat_stream(system: str, messages: list[dict]):
     try:
+        if groq_capped():
+            raise _sticky_429()
         stream = await _client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "system", "content": system}] + messages,
@@ -313,6 +387,7 @@ async def chat_stream(system: str, messages: list[dict]):
                 yield delta
     except RateLimitError as e:
         # e.g. the startup greeting when the cap is already hit — speak the limit, don't crash
+        _stick_cap(e)
         print("[groq 429 in chat_stream]", file=sys.stderr)
         yield rate_limit_message(e)
 
@@ -328,9 +403,12 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
     from app.agent import claude_turn_ctx
     token = claude_turn_ctx.set({"system": system, "messages": list(messages), "voice_mode": voice_mode})
     try:
+        if groq_capped():
+            raise _sticky_429()          # sticky window: skip the wasted Groq round-trip entirely
         return await _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds,
                                            force_tool, voice_mode)
-    except RateLimitError:
+    except RateLimitError as e:
+        _stick_cap(e)                    # a real 429 sets/extends the sticky window; synthetic no-ops
         # Groq is capped. Ladder: extractive news (zero LLM) -> local Ollama (free, fast, with the
         # local tool subset) -> Claude (scarce, context-threaded) -> friendly message (+hint).
         question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
@@ -465,10 +543,16 @@ async def _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds=
 
 
 async def chat_json(system: str, user: str) -> dict:
-    resp = await _client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        response_format={"type": "json_object"},
-        temperature=0.2,
-    )
+    if groq_capped():
+        raise _sticky_429()              # callers (router/memory/skills) already handle 429s
+    try:
+        resp = await _client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+    except RateLimitError as e:
+        _stick_cap(e)
+        raise
     return json.loads(resp.choices[0].message.content)

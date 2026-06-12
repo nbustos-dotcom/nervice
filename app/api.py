@@ -540,6 +540,7 @@ async def ladder():
     no header probing (the residue effect makes tiny probes lie). ollama: a real is_up() ping.
     claude: how many account config dirs exist. today: real per-rung distribution from turns.log."""
     from app import ollama_client
+    from app import llm as _llm
     from app.agent import CLAUDE_ACCOUNTS
     today = datetime.datetime.now(_TZ).strftime("%Y-%m-%d")
     rows = await asyncio.to_thread(_today_lines, today)
@@ -548,6 +549,12 @@ async def ladder():
         if r["rung"] in _LLM_RUNGS:
             groq = "up" if r["rung"] == "groq" else "capped"
             break
+    # Fix 2.3: the sticky cap-state is authoritative while active — and it carries the until time.
+    cu = _llm.capped_until()
+    if cu:
+        groq = "capped"
+    capped_until_iso = (datetime.datetime.fromtimestamp(cu, _TZ).isoformat(timespec="seconds")
+                        if cu else None)
     try:
         ollama_up = await asyncio.wait_for(ollama_client.is_up(), timeout=3)
     except Exception:
@@ -561,6 +568,7 @@ async def ladder():
     for rung, d in dist.items():
         d["avg_s"] = round(d.pop("_sum") / d["count"], 2)
     return {"groq": groq, "ollama": bool(ollama_up), "claude": accounts,
+            "capped_until": capped_until_iso,
             "today": {"turns": len(rows), "rungs": dist}}
 
 
