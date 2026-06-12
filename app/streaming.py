@@ -31,7 +31,7 @@ from app.agent import current_rung
 from app.turnlog import log_turn
 from app.router import classify
 from app import sysinfo
-from app.chat import build_system_prompt, execute_route, save_exchange, _ACK
+from app.chat import build_system_prompt, execute_route, save_exchange, apply_local_memory, _ACK
 
 _SENT_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 
@@ -278,6 +278,7 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
     await _trace(send, "routing", ms=_ms())
     system, route = await asyncio.gather(
         build_system_prompt(user_id, text, voice_mode=voice), classify(text))
+    apply_local_memory()                 # publish the compact local-rung memory block (Fix 2.2)
     # Fix-1 enrichment: the route frame carries the router's extracted args (action/target/
     # question/trigger/op/...) so the HUD trace can show WHAT was decided, not just the route.
     _args = {k: v for k, v in route.items() if k != "route" and v not in (None, "", [])}

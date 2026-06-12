@@ -24,9 +24,31 @@ from app.models import Message
 TZ = ZoneInfo("America/Chicago")
 
 
-def _format_memories(r):
+def _format_memories(r, cap_chars: int = 1600):
+    """Memory block with a hard size cap (Fix 2.2): ~400 tokens (1600 chars) for the Groq rung,
+    ~150 tokens (600 chars) for the compact local-rung block. Essentials first, then topical —
+    the cap trims from the least-relevant end."""
     items = r["core"] + r["topic"]
-    return "\n".join(f"- [{m.category}] {m.content}" for m in items) if items else "(nothing stored yet)"
+    lines, used = [], 0
+    for m in items:
+        ln = f"- [{m.category}] {m.content}"
+        if used + len(ln) > cap_chars:
+            break
+        lines.append(ln)
+        used += len(ln) + 1
+    return "\n".join(lines) if lines else "(nothing stored yet)"
+
+
+# Compact memory block for the LOCAL rung, stashed by build_system_prompt. Module state (not a
+# contextvar) on purpose: build_system_prompt runs inside asyncio.gather — a CHILD task — so a
+# contextvar set there would never reach the parent turn. respond()/stream_reply() call
+# apply_local_memory() right after the gather to publish it into the turn's context (Fix 2.2).
+_pending_local_mem = ""
+
+
+def apply_local_memory():
+    from app.llm import local_memory_block
+    local_memory_block.set(_pending_local_mem)
 
 
 VOICE_ADDENDUM = ("VOICE MODE: your reply will be spoken aloud. Flowing conversational sentences "
@@ -37,8 +59,12 @@ VOICE_ADDENDUM = ("VOICE MODE: your reply will be spoken aloud. Flowing conversa
 
 
 async def build_system_prompt(user_id, user_message, voice_mode: bool = False):
+    global _pending_local_mem
     r = await retrieve(user_id, user_message)
     now = datetime.now(TZ).strftime("%A, %B %d, %Y at %I:%M %p")
+    compact = _format_memories({"core": r["core"], "topic": r["topic"][:3]}, cap_chars=600)
+    _pending_local_mem = ("" if compact == "(nothing stored yet)" else
+                          "WHAT YOU KNOW ABOUT NATE (context only — never volunteer):\n" + compact)
     base = f"{PERSONA}\n\nWHAT YOU KNOW ABOUT NATE:\n{_format_memories(r)}\n\nCURRENT TIME: {now}"
     return f"{base}\n\n{VOICE_ADDENDUM}" if voice_mode else base
 
@@ -137,6 +163,7 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
     system, route = await asyncio.gather(
         build_system_prompt(user_id, user_message, voice_mode=voice_mode),
         classify(user_message))
+    apply_local_memory()                 # publish the compact local-rung memory block (Fix 2.2)
 
     async def _ack(text):
         print(text)                      # immediate text feedback before the slow tool
