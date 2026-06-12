@@ -56,12 +56,6 @@
     -webkit-font-smoothing:antialiased; font-size:14px; line-height:1.4; overscroll-behavior:none;
   }
   #bg{position:fixed; inset:0; width:100%; height:100%; z-index:0; pointer-events:none;}
-  /* near layer of the depth field: directional vignette pulling focus to the reactor.
-     pure CSS radial-gradient — composited once, zero per-frame cost. */
-  #vig{position:fixed; inset:0; z-index:0; pointer-events:none;
-       background:radial-gradient(ellipse 130% 95% at 50% 36%, transparent 48%, rgba(2,4,7,.42) 76%, rgba(2,4,7,.85) 100%);}
-  #fxBtn{font-family:var(--mono); font-size:10px; letter-spacing:.12em; font-weight:600;}
-  #fxBtn[aria-pressed="false"]{opacity:.4;}
   .shell{position:relative; z-index:1; min-height:100dvh; display:flex; flex-direction:column;
          padding:calc(env(safe-area-inset-top) + 10px) clamp(10px,1.6vw,22px) calc(env(safe-area-inset-bottom) + 12px);}
 
@@ -93,57 +87,14 @@
   @media (min-width:1480px){ .grid{grid-template-columns:340px minmax(0,1fr) 340px;} }
   .col{display:flex; flex-direction:column; gap:var(--gap); min-width:0;}
 
-  /* ---------- HUD panel: broken-geometry frames (Arwes-derived, original) ----------
-     NEVER a closed 1px box. Open corner brackets with unequal arms (42px run / 14px drop,
-     2px stroke) + a top hairline, all layered background gradients — zero extra DOM.
-     Hierarchy by alpha + bracket count: center = 4 corners, left rail = TL/BR + left edge
-     accent, right rail = TR/BL + right edge accent, fainter. No glass, no blur, no glow. */
-  .panel{position:relative; border:none; overflow:hidden;
-         --bk:rgba(176,124,255,.5); --hair:rgba(176,124,255,.13);
-         background-color:rgba(11,14,24,.42);
-         background-image:
-           linear-gradient(var(--bk),var(--bk)), linear-gradient(var(--bk),var(--bk)),
-           linear-gradient(var(--bk),var(--bk)), linear-gradient(var(--bk),var(--bk)),
-           linear-gradient(var(--hair),var(--hair));
-         background-repeat:no-repeat;
-         background-position:0 0, 0 0, 100% 100%, 100% 100%, 0 0;
-         background-size:42px 2px, 2px 14px, 42px 2px, 2px 14px, 100% 1px;
-         padding:13px 14px 14px; min-width:0;
+  /* ---------- HUD panel (thin frame + corner brackets, NOT glass) ---------- */
+  .panel{position:relative; border:1px solid var(--line); background:rgba(11,14,24,.45);   /* flat — no gradient panels */
+         padding:12px 13px 13px; min-width:0;
          opacity:0; transform:translateY(8px); animation:boot .5s var(--ease,cubic-bezier(.2,.7,.3,1)) forwards;}
-  /* center column = hero tier: all four corners (extra TR/BL pair on ::before) */
-  .col:nth-child(2) .panel{background-color:rgba(11,14,24,.5);}
-  .col:nth-child(2) .panel::before{content:""; position:absolute; inset:0; pointer-events:none;
-         background-image:
-           linear-gradient(var(--bk),var(--bk)), linear-gradient(var(--bk),var(--bk)),
-           linear-gradient(var(--bk),var(--bk)), linear-gradient(var(--bk),var(--bk));
-         background-repeat:no-repeat;
-         background-position:100% 0, 100% 0, 0 100%, 0 100%;
-         background-size:42px 2px, 2px 14px, 42px 2px, 2px 14px;}
-  /* rail tiers: single edge accent (static inset shadow — never animated) */
-  .col:first-child .panel{box-shadow:inset 2px 0 0 rgba(176,124,255,.26);}
-  .col:last-child .panel{box-shadow:inset -2px 0 0 rgba(176,124,255,.20); background-color:rgba(11,14,24,.34);
-         background-position:100% 0, 100% 0, 0 100%, 0 100%, 0 0;}   /* TR/BL corners instead (asymmetry) */
-  /* DATA-REFRESH SCANLINE: a full-size gradient band translated through the panel by its own
-     height (transform-only, GPU). Fired by JS ONLY when a panel's real fetch resolves. */
-  .panel::after{content:""; position:absolute; inset:0; pointer-events:none; opacity:0;
-         background:linear-gradient(to bottom, transparent 0%, rgba(25,227,227,.14) 46%,
-                    rgba(25,227,227,.55) 50%, rgba(25,227,227,.14) 54%, transparent 100%);
-         transform:translateY(-101%);}
-  .panel.sweep::after{animation:pSweep .46s cubic-bezier(.3,.6,.4,1);}
-  @keyframes pSweep{0%{transform:translateY(-101%); opacity:.95;} 100%{transform:translateY(101%); opacity:.55;}}
+  .panel::before,.panel::after{content:""; position:absolute; width:11px; height:11px; pointer-events:none;}
+  .panel::before{top:-1px; left:-1px; border-top:1px solid var(--accent); border-left:1px solid var(--accent);}
+  .panel::after{bottom:-1px; right:-1px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent);}
   @keyframes boot{to{opacity:1; transform:none;}}
-  /* ---------- power-on sequence (<=1.6s, fresh tab sessions only) ----------
-     grid draws in -> reactor ignites -> panels cascade radially outward from the orb
-     (JS assigns the stagger by real distance) -> VER stamps. transform/opacity only.
-     boot-skip (reconnect / re-auth / same-session reload): everything lands instantly. */
-  @keyframes bFade{from{opacity:0;}}
-  @keyframes bIgnite{from{transform:scale(.86); opacity:0;}}
-  @keyframes bStamp{from{opacity:0; transform:translateY(4px);}}
-  body.booting #bg, body.booting #vig{animation:bFade .35s ease-out backwards;}
-  body.booting header{animation:bFade .3s ease-out backwards;}
-  body.booting .reactor{animation:bIgnite .5s .18s cubic-bezier(.2,.7,.3,1) backwards;}
-  body.boot-skip .panel{animation:none; opacity:1; transform:none;}
-  .brainstrip.stamp{animation:bStamp .35s ease-out backwards;}
   .ph{display:flex; align-items:center; gap:8px; margin:0 0 11px; font-family:var(--mono); font-size:10px;
       letter-spacing:.22em; text-transform:uppercase; color:var(--accent);}
   .ph .ln{flex:1; height:1px; background:var(--line-soft);}
@@ -187,20 +138,37 @@
   .reactor-wrap{display:flex; flex-direction:column; align-items:center; gap:12px; padding:6px 0 4px;}
   /* overflow:hidden + circle clip = the core can NEVER paint outside the orb container, whatever
      the amplitude does (the overdrive safeguard). */
-  .reactor{--amp:0; position:relative; width:clamp(230px,min(46vw,40vh),430px); aspect-ratio:1; cursor:pointer;
+  .reactor{--amp:0; position:relative; width:clamp(220px,40vw,330px); aspect-ratio:1; cursor:pointer;
            overflow:hidden; border-radius:50%;
            touch-action:manipulation; user-select:none; -webkit-user-select:none;}
   .reactor svg{position:absolute; inset:0; width:100%; height:100%; overflow:hidden;}
-  /* the pseudo-3D body (corona bloom, depth-shaded core, orbiting particle rings) lives on
-     this canvas, UNDER the SVG instruments (tick rings + amp arc stay real-signal SVG). */
-  .reactor canvas{position:absolute; inset:0; width:100%; height:100%; pointer-events:none;}
   .reactor .static-track{fill:none; stroke:var(--line);}
+  /* THE one hero gradient: purple identity at the core -> cyan data energy at the rings. */
   .ring-ticks line{stroke:var(--accent); stroke-width:1;}
   #ringOuter line{stroke:var(--accent2);}                    /* outer energy ring = cyan */
+  /* amplitude is clamped twice: JS normalizes to [0,1], and min(var(--amp),1) bounds the CSS map.
+     core 1.0-1.12, fill <=0.74, glow <=1.2 of r26 (~31+blur) — always inside the r58 inner ring. */
+  .core-glow{fill:var(--accent); opacity:calc(.10 + min(var(--amp),1)*.4); filter:blur(10px);
+             transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + min(var(--amp),1)*.2)); transition:opacity .1s linear;}
+  .core{fill:none !important; stroke:var(--accent); stroke-width:1.4;   /* stroke-only ring — backstop against refill */
+        transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + min(var(--amp),1)*.12));}
+  .core-fill{fill:url(#coreGrad); opacity:calc(.5 + min(var(--amp),1)*.5);
+             transform-box:fill-box; transform-origin:center; transform:scale(calc(.34 + min(var(--amp),1)*.4));}
   .amp-arc{fill:none !important; stroke:url(#reactorGrad); stroke-width:2; stroke-linecap:round; filter:drop-shadow(0 0 4px var(--accent-soft));}   /* open path: a fill paints a giant chord-segment — never fill */
-  /* state recolors for the SVG instruments; the canvas body lerps its own state palette in JS */
-  .reactor.listening .ring-ticks line,.reactor.listening #ringOuter line,.reactor.listening .amp-arc{stroke:#37e0ff;}
-  .reactor.speaking .ring-ticks line,.reactor.speaking #ringOuter line,.reactor.speaking .amp-arc{stroke:#ff8a4c;}  /* warm */
+  .reactor.listening{--rc:#37e0ff;}  .reactor.speaking{--rc:#ff8a4c;}  .reactor.thinking{--rc:#cf9bff;}  /* violet shimmer */
+  /* State recolors are PROPERTY-SPECIFIC. Never set fill on .amp-arc/.core: filling an OPEN arc
+     path paints the giant solid segment under its chord (the half-disc bug) — stroke-only there. */
+  .reactor.listening .ring-ticks line,.reactor.listening #ringOuter line,.reactor.listening .core,.reactor.listening .amp-arc{stroke:#37e0ff;}
+  .reactor.listening .core-fill{fill:#37e0ff;}
+  .reactor.speaking .ring-ticks line,.reactor.speaking #ringOuter line,.reactor.speaking .core,.reactor.speaking .amp-arc{stroke:#ff8a4c;}  /* warm */
+  .reactor.speaking .core-fill{fill:#ff8a4c;}
+  .reactor.listening .core-glow,.reactor.speaking .core-glow,.reactor.thinking .core-glow{fill:var(--rc);}
+  /* distinct calm states. listening/speaking are amplitude-driven via --amp (JS); idle + thinking
+     get gentle CSS loops so each state reads differently. */
+  @keyframes rx-breathe{0%,100%{transform:scale(1);opacity:.12}50%{transform:scale(1.07);opacity:.2}}
+  @keyframes rx-shimmer{0%,100%{opacity:.14}50%{opacity:.44}}
+  .reactor.idle .core-glow{animation:rx-breathe 5s ease-in-out infinite;}      /* slow breathe */
+  .reactor.thinking .core-glow{animation:rx-shimmer 1.25s ease-in-out infinite;}  /* steady shimmer */
   .reactor.listening.hearing .ring-ticks line{stroke-width:1.7;}                /* VAD: actively hearing speech */
   .mic-label{font-family:var(--mono); font-size:10px; letter-spacing:.22em; text-transform:uppercase; color:var(--dim); min-height:14px;}
   .pill{display:inline-flex; align-items:center; gap:8px; padding:10px 18px; min-height:44px; cursor:pointer;
@@ -303,24 +271,18 @@
          letter-spacing:.04em; opacity:0; pointer-events:none; transition:.25s; max-width:84%;}
   #toast.show{opacity:1; transform:translateX(-50%);}
 
-  @media (max-width:1079px){ .reactor .ring-outer{display:none;} .reactor{width:clamp(220px,62vw,330px);} }   /* mobile: drop the outer tick ring */
-  /* desktop: the reactor owns the center column's vertical space — clock above, conversation
-     below, the orb centered in everything left over. It must visibly dominate. */
-  @media (min-width:1080px){
-    .grid{align-items:stretch;}
-    .reactor-wrap{flex:1; justify-content:center; padding:10px 0; min-height:0;}
-  }
+  @media (max-width:1079px){ .reactor .ring-outer{display:none;} }   /* mobile: drop the outer tick ring */
   @media (prefers-reduced-motion:reduce){
     .panel{animation:none !important; opacity:1; transform:none;}
     .gval{transition:none !important;}
     .bub{animation:none !important;}
+    .reactor .core-glow{animation:none !important;}   /* no breathe/shimmer loops */
     *{scroll-behavior:auto !important;}
   }
 </style>
 </head>
 <body>
   <canvas id="bg" aria-hidden="true"></canvas>
-  <div id="vig" aria-hidden="true"></div>
   <div class="shell">
     <header>
       <span class="brand">NER<b>VICE</b><span class="v">HUD&nbsp;v3</span></span>
@@ -329,7 +291,6 @@
       <span class="hsep"></span>
       <span class="stat">UPTIME&nbsp;<b id="upStat">--</b></span>
       <span class="spacer"></span>
-      <button class="ibtn" id="fxBtn" aria-label="Toggle visual effects" aria-pressed="true">FX</button>
       <button class="ibtn" id="newBtn" aria-label="New chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
       <button class="ibtn" id="gearBtn" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg></button>
     </header>
@@ -337,12 +298,12 @@
     <main class="grid">
       <!-- LEFT RAIL -->
       <section class="col" style="animation:none">
-        <div class="panel" id="pSys" style="animation-delay:.04s">
+        <div class="panel" style="animation-delay:.04s">
           <h3 class="ph">SYSTEM <span class="ln"></span><span class="n" id="hostTag">·</span></h3>
           <div class="gauges" id="gauges"></div>
           <div class="rd" id="sysReadout"></div>
         </div>
-        <div class="panel" id="pAct" style="animation-delay:.22s">
+        <div class="panel" style="animation-delay:.22s">
           <h3 class="ph">ACTIVITY <span class="ln"></span><span class="n">LIVE</span></h3>
           <div class="feed" id="feed"><div class="empty">acquiring…</div></div>
         </div>
@@ -360,9 +321,11 @@
         </div>
         <div class="reactor-wrap">
           <div class="reactor idle" id="reactor" role="button" tabindex="0" aria-label="Hold to talk to Nervice">
-            <canvas id="orbCv" aria-hidden="true"></canvas>
             <svg viewBox="0 0 200 200">
               <defs>
+                <radialGradient id="coreGrad">
+                  <stop offset="0%" style="stop-color:var(--accent)"/><stop offset="55%" style="stop-color:var(--accent)"/><stop offset="100%" style="stop-color:var(--accent2)"/>
+                </radialGradient>
                 <linearGradient id="reactorGrad" x1="0" y1="1" x2="1" y2="0">
                   <stop offset="0%" style="stop-color:var(--accent)"/><stop offset="100%" style="stop-color:var(--accent2)"/>
                 </linearGradient>
@@ -371,6 +334,9 @@
               <g class="ring-mid" id="ringMid"></g>
               <circle class="static-track" cx="100" cy="100" r="58" stroke-width="1" opacity=".5"/>
               <path class="amp-arc" id="ampArc" d=""/>
+              <circle class="core-glow" cx="100" cy="100" r="26"/>
+              <circle class="core" cx="100" cy="100" r="30"/>
+              <circle class="core-fill" cx="100" cy="100" r="30"/>
             </svg>
           </div>
           <div class="mic-label" id="micLabel" aria-live="polite">tap to talk</div>
@@ -399,12 +365,12 @@
 
       <!-- RIGHT RAIL -->
       <section class="col">
-        <div class="panel" id="pWx" style="animation-delay:.06s">
+        <div class="panel" style="animation-delay:.06s">
           <h3 class="ph">WEATHER <span class="ln"></span><span class="n" id="wxPlace">—</span></h3>
           <div id="wxNow"><div class="empty">acquiring…</div></div>
           <div class="fc" id="forecast"></div>
         </div>
-        <div class="panel" id="pCore" style="animation-delay:.16s">
+        <div class="panel" style="animation-delay:.16s">
           <h3 class="ph">NERVICE CORE <span class="ln"></span><span class="n" id="engineTag">--</span></h3>
           <div class="stats" id="coreStats"></div>
         </div>
@@ -460,15 +426,6 @@ $('#tokenInput').addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.isCom
 $('#gearBtn').onclick=openToken;
 $('#newBtn').onclick=()=>{localStorage.removeItem(CID_KEY); getCID(); $('#msgs').innerHTML='<div class="convo-empty">// new session</div>'; toast('New session');};
 
-/* ---- data-refresh scanline: fired ONLY when a panel's real fetch resolves ---- */
-function sweep(sel){
-  if(!FX.isOn()) return;
-  const p=document.querySelector(sel); if(!p) return;
-  p.classList.remove('sweep'); void p.offsetWidth;     // restart the one-shot
-  p.classList.add('sweep');
-}
-document.addEventListener('animationend',e=>{ if(e.animationName==='pSweep') e.target.classList.remove('sweep'); });
-
 /* ---- authed fetch ---- */
 async function api(path){
   const token=getToken(); if(!token){openToken(); throw new Error('no token');}
@@ -478,102 +435,26 @@ async function api(path){
   return r.json();
 }
 
-/* ================= DEPTH FIELD: 3-layer background + FX core =================
-   far  = perspective grid (offscreen canvas, redrawn at reduced rate, blitted each frame)
-   mid  = particle dust (flat-array pool, pre-baked glow sprites, z-continuum)
-   near = CSS vignette (#vig — painted once by the compositor, zero per-frame cost)
-   ONE clock: hud() calls FX.frame(t,dt). FX only READS app state (orbState) — it never
-   touches data fetches, WS, or the audio pipeline. Flat mode (toggle off / reduced motion)
-   is the original v3 static draw, kept verbatim in drawFlat(). Perf: DPR cap (2 desktop,
-   1.5 narrow), document.hidden pauses the whole clock (see hud), rolling-avg auto-throttle
-   ladder with hysteresis. No shadowBlur/filters anywhere in the per-frame path. */
-const FX_KEY='nervice_fx';
-const FX=(function(){
-  const cv=$('#bg'), ctx=cv.getContext('2d');
-  const phone=()=>innerWidth<700;
-  let W=0,H=0,dpr=1;
-  let on=!REDUCED && localStorage.getItem(FX_KEY)!=='off';
-  let tier=0, gridEvery=2, frameN=0;
-  let avgMs=16.7, hotN=0, coolN=0;          // throttle ladder w/ hysteresis
-  let px=0,py=0,tx=0,ty=0;                  // eased pointer-parallax vector
-  const DUST_MAX=60;
-  const dX=new Float32Array(DUST_MAX), dY=new Float32Array(DUST_MAX),
-        dZ=new Float32Array(DUST_MAX), dPh=new Float32Array(DUST_MAX);
-  let dustN=DUST_MAX;
-  let spr=[];                               // [band 0..2] {p:purpleSprite, c:cyanSprite, s:px}
-  let grid=null, gctx=null, drift=0;        // offscreen grid layer
-  const STATE_MULT={idle:1, listening:1.25, speaking:1.6, thinking:2.2};
-  let seed=20260610;
-  const rnd=()=>{seed=(seed*16807)%2147483647; return seed/2147483647;};
-
-  function bakeSprites(){
-    // glow = pre-rendered radial gradients; far band fog-lerped toward the bg (depth cue).
-    // The hot loop only ever drawImage()s these — no gradients, no blur per frame.
-    spr=[];
-    const bands=[ {s:10, core:.5, fog:.62}, {s:16, core:.7, fog:.3}, {s:22, core:.95, fog:0} ];
-    const mix=(a,b,t)=>Math.round(a+(b-a)*t);
-    for(const b of bands){
-      const make=(r,g,bl)=>{
-        const c=document.createElement('canvas'); c.width=c.height=b.s;
-        const x=c.getContext('2d'), h=b.s/2;
-        const fr=mix(r,4,b.fog), fg=mix(g,7,b.fog), fb=mix(bl,11,b.fog);   // fog toward #04070b
-        const g2=x.createRadialGradient(h,h,0,h,h,h);
-        g2.addColorStop(0,`rgba(${fr},${fg},${fb},${b.core})`);
-        g2.addColorStop(.45,`rgba(${fr},${fg},${fb},${b.core*.35})`);
-        g2.addColorStop(1,`rgba(${fr},${fg},${fb},0)`);
-        x.fillStyle=g2; x.fillRect(0,0,b.s,b.s); return c;
-      };
-      spr.push({p:make(176,124,255), c:make(25,227,227), s:b.s});
-    }
-  }
-  function spawnDust(i, anywhere){
-    dZ[i]=rnd();                                       // z continuum: 0 far .. 1 near
-    dX[i]=rnd()*W;
-    dY[i]=anywhere? rnd()*H : H + 8 + rnd()*30;        // respawn enters from below, offscreen
-    dPh[i]=rnd()*6.28318;
-  }
-  function drawGrid(){
-    // perspective floor+ceiling receding to a vanishing point behind the reactor.
-    // alpha = (1-z)^2 distance fade — the fade IS the depth. ~30 strokes, off-main-rate.
-    const g=gctx; g.clearRect(0,0,W,H);
-    const hy=H*0.42 + py*0.15, vx=W/2 + px*0.15;
-    const ROWS=11, COLS=13;
-    for(let i=0;i<ROWS;i++){
-      const z=((i/ROWS)+drift)%1;                      // 0 = horizon, 1 = near edge
-      const fall=Math.pow(z,2.4);
-      const a=0.028+ (z*z)*0.115;
-      g.strokeStyle=`rgba(176,124,255,${a.toFixed(3)})`; g.lineWidth=1;
-      const yF=hy + (H-hy)*fall;                       // floor rung
-      g.beginPath(); g.moveTo(0,yF); g.lineTo(W,yF); g.stroke();
-      const yC=hy - hy*fall*0.62;                      // fainter ceiling mirror
-      g.globalAlpha=0.55; g.beginPath(); g.moveTo(0,yC); g.lineTo(W,yC); g.stroke(); g.globalAlpha=1;
-    }
-    g.strokeStyle='rgba(176,124,255,0.045)';
-    for(let j=0;j<COLS;j++){
-      const xb=(j/(COLS-1))*W*1.5 - W*0.25;            // radial spokes from the VP, clipped
-      const t0=0.22;                                   // start away from the VP (no dense hub)
-      g.beginPath();
-      g.moveTo(vx+(xb-vx)*t0, hy+(H-hy)*Math.pow(t0,2.4));
-      g.lineTo(xb, H); g.stroke();
-      g.globalAlpha=0.5;
-      g.beginPath();
-      g.moveTo(vx+(xb-vx)*t0, hy - hy*Math.pow(t0,2.4)*0.62);
-      g.lineTo(xb, 0); g.stroke(); g.globalAlpha=1;
-    }
-  }
-  function drawFlat(){
-    // the original v3 static background, verbatim — flat mode + reduced-motion fallback
+/* ================= background grid + circuit traces (drawn once) ================= */
+(function bg(){
+  const cv=$('#bg'), ctx=cv.getContext('2d'); const DPR=Math.min(devicePixelRatio||1,2);
+  function draw(){
+    const W=innerWidth, H=innerHeight; cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
     ctx.clearRect(0,0,W,H);
-    const acc='176,124,255';
+    const acc='176,124,255';   /* circuit traces + grid = structure = Nervice purple */
+    // faint grid
     ctx.strokeStyle=`rgba(${acc},0.035)`; ctx.lineWidth=1; const step=46;
     ctx.beginPath();
     for(let x=step;x<W;x+=step){ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,H);}
     for(let y=step;y<H;y+=step){ctx.moveTo(0,y+.5);ctx.lineTo(W,y+.5);}
     ctx.stroke();
-    let s0=20260610; const r0=()=>{s0=(s0*16807)%2147483647; return s0/2147483647;};
+    // starfield
+    let seed=20260610;
+    const rnd=()=>{seed=(seed*16807)%2147483647; return seed/2147483647;};
     ctx.fillStyle=`rgba(${acc},0.5)`;
-    for(let i=0;i<70;i++){const x=r0()*W,y=r0()*H,s=r0()*1.3; ctx.globalAlpha=0.08+r0()*0.22; ctx.fillRect(x,y,s,s);}
+    for(let i=0;i<70;i++){const x=rnd()*W,y=rnd()*H,s=rnd()*1.3; ctx.globalAlpha=0.08+rnd()*0.22; ctx.fillRect(x,y,s,s);}
     ctx.globalAlpha=1;
+    // circuit traces: a few right-angled paths with node dots
     ctx.strokeStyle=`rgba(${acc},0.10)`; ctx.lineWidth=1; ctx.fillStyle=`rgba(${acc},0.30)`;
     function trace(x,y,segs){ ctx.beginPath(); ctx.moveTo(x,y); let cx=x,cy=y;
       for(const[dx,dy]of segs){cx+=dx;cy+=dy;ctx.lineTo(cx,cy);} ctx.stroke();
@@ -583,68 +464,8 @@ const FX=(function(){
     trace(W*0.5,0,[[0,40],[-90,0],[0,30]]);
     trace(W*0.5,H,[[0,-46],[110,0],[0,-26]]);
   }
-  function applyTier(){
-    const base=phone()? [30,18,10] : [60,30,15];
-    dustN=Math.min(DUST_MAX, base[tier]); gridEvery=[2,3,4][tier];
-    window.__fxTier=tier;
-  }
-  function resize(){
-    W=innerWidth; H=innerHeight; dpr=Math.min(devicePixelRatio||1, phone()?1.5:2);
-    cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
-    if(!grid){ grid=document.createElement('canvas'); gctx=grid.getContext('2d'); }
-    grid.width=W*dpr; grid.height=H*dpr; gctx.setTransform(dpr,0,0,dpr,0,0);
-    bakeSprites();
-    for(let i=0;i<DUST_MAX;i++) spawnDust(i,true);
-    applyTier();
-    if(on) drawGrid(); else drawFlat();
-  }
-  function frame(t,dtMs){
-    if(!on) return;
-    // --- auto-throttle: rolling avg + hysteresis; tiers shrink loop bounds, never realloc
-    avgMs=avgMs*0.95+dtMs*0.05; window.__fps=Math.round(1000/avgMs);
-    if(avgMs>22){ if(++hotN>60 && tier<2){ tier++; applyTier(); hotN=0; } }
-    else hotN=0;
-    if(avgMs<14){ if(++coolN>120 && tier>0){ tier--; applyTier(); coolN=0; } }
-    else coolN=0;
-    // --- parallax easing + state-coupled drift
-    px+=(tx-px)*0.06; py+=(ty-py)*0.06;
-    const mult=STATE_MULT[orbState]||1;
-    drift=(drift + dtMs*0.0000115*mult)%1;
-    if(frameN++%gridEvery===0) drawGrid();
-    // --- composite: grid blit, then dust
-    ctx.clearRect(0,0,W,H);
-    ctx.drawImage(grid,0,0,W,H);
-    const dt=Math.min(50,dtMs);
-    for(let i=0;i<dustN;i++){
-      const z=dZ[i], sp=(0.10+z*0.42)*mult;
-      dY[i]-=sp*dt*0.022;
-      dX[i]+=Math.sin(t*0.0004+dPh[i])*0.07;
-      if(dY[i]<-12) spawnDust(i,false);
-      const band=z<0.34?0 : z<0.72?1 : 2;
-      const s=spr[band], sz=s.s*(0.55+z*0.75);
-      const twk=0.5+0.5*Math.abs(Math.sin(t*0.0011+i));    // phase-offset twinkle, no RNG
-      ctx.globalAlpha=(0.30+z*0.55)*twk;
-      const fx=dX[i]+px*(0.3+z*0.7), fy=dY[i]+py*(0.3+z*0.7);
-      ctx.drawImage(i%8===0? s.c : s.p, fx-sz/2, fy-sz/2, sz, sz);
-    }
-    ctx.globalAlpha=1;
-  }
-  function setOn(v){
-    on=v && !REDUCED;
-    localStorage.setItem(FX_KEY, v?'on':'off');
-    const b=$('#fxBtn'); if(b) b.setAttribute('aria-pressed', String(on));
-    if(!on) drawFlat(); else drawGrid();
-  }
-  // pointer parallax: desktop hover devices only; handlers only set a target (eased in frame)
-  if(matchMedia('(hover:hover)').matches){
-    addEventListener('pointermove',e=>{ tx=(e.clientX/innerWidth-0.5)*16; ty=(e.clientY/innerHeight-0.5)*10; },{passive:true});
-  }
-  let rsT; addEventListener('resize',()=>{ clearTimeout(rsT); rsT=setTimeout(resize,150); },{passive:true});
-  resize();
-  return { frame, setOn, isOn:()=>on };
+  draw(); addEventListener('resize',draw,{passive:true});
 })();
-$('#fxBtn').setAttribute('aria-pressed', String(FX.isOn()));
-$('#fxBtn').onclick=()=>{ FX.setOn(!FX.isOn()); toast(FX.isOn()?'Effects on':'Effects off — flat mode'); };
 
 /* ================= amplitude system (ported from v2 — the working analyser rAF) ================= */
 const reactor=$('#reactor'), micLabel=$('#micLabel');
@@ -702,134 +523,6 @@ function ampLoop(){
 const ampArc=$('#ampArc');
 const spec=$('#spectrum'), sctx=spec.getContext('2d');
 let aOuter=0, aMid=0, lastT=0;
-
-/* ================= REACTOR BODY: layered pseudo-3D orb =================
-   Canvas under the SVG instruments. Layers back-to-front: volumetric corona (pre-baked
-   sprites drawn with 'lighter' — the app's ONLY additive pass), BACK half of two orbiting
-   particle rings, depth-shaded core (offset-highlight + limb-darkening gradients, cached
-   per state), FRONT half of the rings. Occlusion = the back/front split around the core.
-   Everything breathes on REAL signals: mid-bloom alpha + ring speed + core scale ride
-   ampSmooth (the live analyser); state palette lerps via a 250ms crossfade. The .reactor
-   container's border-radius+overflow clip is the hard overdrive boundary, as before. */
-const ORB=(function(){
-  const cv=$('#orbCv'), ctx=cv.getContext('2d');
-  const COLORS={idle:[176,124,255], listening:[55,224,255], thinking:[207,155,255], speaking:[255,138,76]};
-  let size=0, half=0, dpr=1;
-  let curState='idle', prevState='idle', mix=1, a1=0, a2=0;
-  let CORONA={}, PART={}, CORE={};
-  const R1=28, R2=22, TILT1=0.30, TILT2=0.42, PHI1=-0.32, PHI2=0.26;
-  const TH1=new Float32Array(R1), TH2=new Float32Array(R2);
-  for(let i=0;i<R1;i++) TH1[i]=i/R1*6.28318;
-  for(let i=0;i<R2;i++) TH2[i]=i/R2*6.28318;
-  const mk=(px,stops)=>{ const c=document.createElement('canvas'); c.width=c.height=px;
-    const x=c.getContext('2d'), h=px/2, gr=x.createRadialGradient(h,h,0,h,h,h);
-    for(const [o,col] of stops) gr.addColorStop(o,col);
-    x.fillStyle=gr; x.fillRect(0,0,px,px); return c; };
-  function bake(){
-    CORONA={}; PART={};
-    const S=Math.max(64, Math.round(size*0.5));        // half-res sprites; upscale = free softness
-    for(const st in COLORS){
-      const [r,g,b]=COLORS[st];
-      CORONA[st]=[
-        mk(S,               [[0,`rgba(${r},${g},${b},.26)`],[.5,`rgba(${r},${g},${b},.09)`],[1,`rgba(${r},${g},${b},0)`]]),
-        mk(Math.round(S*.62),[[0,`rgba(${r},${g},${b},.5)`],[.55,`rgba(${r},${g},${b},.15)`],[1,`rgba(${r},${g},${b},0)`]]),
-        mk(Math.round(S*.34),[[0,'rgba(245,250,255,.8)'],[.35,`rgba(${r},${g},${b},.5)`],[1,`rgba(${r},${g},${b},0)`]]),
-      ];
-      PART[st]={
-        sharp: mk(12,[[0,'rgba(235,242,255,.95)'],[.4,`rgba(${r},${g},${b},.8)`],[1,`rgba(${r},${g},${b},0)`]]),
-        soft:  mk(18,[[0,`rgba(${r},${g},${b},.5)`],[1,`rgba(${r},${g},${b},0)`]]),
-      };
-    }
-  }
-  function buildCore(){
-    CORE={};
-    const cx=half, cy=half, cr=half*0.34;
-    const li=(v,t)=>Math.round(v+(255-v)*t);
-    for(const st in COLORS){
-      const [r,g,b]=COLORS[st];
-      const fg=ctx.createRadialGradient(cx-cr*0.38, cy-cr*0.42, cr*0.08, cx, cy, cr);
-      fg.addColorStop(0, `rgba(${li(r,.55)},${li(g,.55)},${li(b,.45)},.95)`);   // offset highlight = the 3D
-      fg.addColorStop(.45,`rgba(${r},${g},${b},.78)`);
-      fg.addColorStop(1, `rgba(${Math.round(r*.30)},${Math.round(g*.30)},${Math.round(b*.36)},.92)`);
-      const rg=ctx.createRadialGradient(cx,cy,cr*0.8, cx,cy,cr*1.02);
-      rg.addColorStop(0,'rgba(2,4,7,0)'); rg.addColorStop(1,'rgba(2,4,7,.55)'); // limb darkening
-      CORE[st]={fg,rg,cr,col:`rgba(${r},${g},${b},.8)`};
-    }
-  }
-  function resize(){
-    const w=reactor.getBoundingClientRect().width;
-    if(!w) return;
-    size=Math.round(w); half=size/2;
-    dpr=Math.min(devicePixelRatio||1, innerWidth<700?1.5:2);
-    cv.width=size*dpr; cv.height=size*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
-    bake(); buildCore();
-  }
-  function drawCorona(st,a,t,amp){
-    if(a<=0.01) return;
-    const [outer,midS,hot]=CORONA[st];
-    const breathe = st==='idle'     ? 0.5+0.5*Math.sin(t*0.0012)
-                  : st==='thinking' ? 0.5+0.5*Math.sin(t*0.005)  : 1;   // 5s breathe / 1.25s shimmer
-    const con = st==='listening'?0.96:1;                                 // listening = contraction
-    const sO=size*0.98*con*(1+0.05*breathe+Math.min(amp,1)*0.10);
-    ctx.globalAlpha=a*(0.40+0.25*breathe+Math.min(amp,1)*0.3);
-    ctx.drawImage(outer, half-sO/2, half-sO/2, sO, sO);
-    const sM=size*0.60*con*(1+Math.min(amp,1)*0.12);
-    ctx.globalAlpha=a*(0.30+Math.min(amp,1)*0.65)*(st==='thinking'?(0.5+0.5*breathe):1);
-    ctx.drawImage(midS, half-sM/2, half-sM/2, sM, sM);
-    const sH=size*0.34*con;
-    ctx.globalAlpha=a*(0.45+Math.min(amp,1)*0.55);
-    ctx.drawImage(hot, half-sH/2, half-sH/2, sH, sH);
-    ctx.globalAlpha=1;
-  }
-  function ring(back, TH, n, base, R, tilt, phi, st){
-    const P=PART[st], cp=Math.cos(phi), sp=Math.sin(phi);
-    for(let i=0;i<n;i++){
-      const th=TH[i]+base, s=Math.sin(th), z=(s+1)/2;
-      if(back ? z>=0.5 : z<0.5) continue;             // occlusion split around the core
-      const x0=R*Math.cos(th), y0=R*s*tilt;
-      const x=half + x0*cp - y0*sp, y=half + x0*sp + y0*cp;
-      const sprite=z>0.5?P.sharp:P.soft, sz=(z>0.5?9:13)*(0.6+z*0.7)*(size/330);
-      ctx.globalAlpha=(0.30+z*0.65);
-      ctx.drawImage(sprite, x-sz/2, y-sz/2, sz, sz);
-    }
-    ctx.globalAlpha=1;
-  }
-  function drawCore(st,a,amp){
-    if(a<=0.01) return;
-    const C=CORE[st];
-    const s=(st==='listening'?0.97:1)*(1+Math.min(amp,1)*0.10);
-    ctx.save();
-    ctx.translate(half,half); ctx.scale(s,s); ctx.translate(-half,-half);
-    ctx.globalAlpha=a;
-    ctx.fillStyle=C.fg; ctx.beginPath(); ctx.arc(half,half,C.cr,0,6.28318); ctx.fill();
-    ctx.fillStyle=C.rg; ctx.beginPath(); ctx.arc(half,half,C.cr*1.02,0,6.28318); ctx.fill();
-    ctx.strokeStyle=C.col; ctx.lineWidth=1.4;
-    ctx.beginPath(); ctx.arc(half,half,C.cr,0,6.28318); ctx.stroke();
-    ctx.restore(); ctx.globalAlpha=1;
-  }
-  function frame(t,dtMs){
-    if(!size){ resize(); if(!size) return; }
-    if(orbState!==curState){ prevState=curState; curState=orbState; mix=0; }
-    if(mix<1) mix=Math.min(1, mix+dtMs*0.004);        // ~250ms state crossfade
-    ctx.clearRect(0,0,size,size);
-    const amp=ampSmooth||0, tier=window.__fxTier||0, fx=FX.isOn();
-    if(fx && tier<2){
-      ctx.save(); ctx.globalCompositeOperation='lighter';
-      drawCorona(prevState,1-mix,t,amp); drawCorona(curState,mix,t,amp);
-      ctx.restore();
-    }
-    const spd=0.00030*(1+Math.min(amp,1)*1.6)*(curState==='thinking'?1.5:1)*dtMs;
-    a1+=spd; a2-=spd*0.72;
-    const n1=tier===0?R1:tier===1?18:0, n2=tier===0?R2:tier===1?14:0;
-    const r1=half*0.46, r2=half*0.62;
-    if(fx){ ring(true,TH1,n1,a1,r1,TILT1,PHI1,curState); ring(true,TH2,n2,a2,r2,TILT2,PHI2,curState); }
-    drawCore(prevState,1-mix,amp); drawCore(curState,mix,amp);
-    if(fx){ ring(false,TH1,n1,a1,r1,TILT1,PHI1,curState); ring(false,TH2,n2,a2,r2,TILT2,PHI2,curState); }
-  }
-  let rsT; addEventListener('resize',()=>{ clearTimeout(rsT); rsT=setTimeout(resize,160); },{passive:true});
-  resize();
-  return { frame, resize };
-})();
 function arcPath(frac){ // amplitude arc on r=64, from top, clockwise, fraction 0..1
   frac=Math.max(0.001,Math.min(1,frac)); const r=64, a0=-Math.PI/2, a1=a0+frac*6.28318;
   const x0=100+r*Math.cos(a0), y0=100+r*Math.sin(a0), x1=100+r*Math.cos(a1), y1=100+r*Math.sin(a1);
@@ -852,12 +545,9 @@ function drawSpectrum(){
   }
   sctx.globalAlpha=1;
 }
-let hudRaf=0;
 function hud(t){
-  hudRaf=requestAnimationFrame(hud);
+  requestAnimationFrame(hud);
   const dt=lastT?Math.min(0.05,(t-lastT)/1000):0.016; lastT=t;
-  FX.frame(t, dt*1000);                                // depth field shares this ONE clock
-  ORB.frame(t, dt*1000);                               // reactor body too
   const amp=ampSmooth, sp=(orbState==='thinking'?2.0:1)*(1+amp*0.9);   // calmer amp->speed coupling
   aOuter += dt*0.18*sp; aMid -= dt*0.32*sp;
   $('#ringOuter').setAttribute('transform',`rotate(${(aOuter*57.2958).toFixed(2)} 100 100)`);
@@ -865,16 +555,10 @@ function hud(t){
   ampArc.setAttribute('d', arcPath(0.06 + amp*0.9));   // inner arc = live audio level (real signal)
   drawSpectrum();
 }
-// one synchronous render so the arc + spectrum + orb are never blank before the rAF kicks
-// in; under reduced-motion this IS the final frame (no rAF -> static instrument).
-ampArc.setAttribute('d', arcPath(0.16)); drawSpectrum(); ORB.frame(performance.now(),16);
-if(!REDUCED) hudRaf=requestAnimationFrame(hud);
-// hidden tab: stop the entire visual clock (background, rings, spectrum). Data pollers are
-// untouched. lastT resets so the first resumed frame gets a sane dt instead of a huge jump.
-document.addEventListener('visibilitychange',()=>{
-  if(document.hidden){ if(hudRaf) cancelAnimationFrame(hudRaf); hudRaf=0; }
-  else if(!REDUCED && !hudRaf){ lastT=0; hudRaf=requestAnimationFrame(hud); }
-});
+// one synchronous render so the arc + spectrum are never blank before the rAF kicks in;
+// under reduced-motion this IS the final frame (no rAF -> no rotation, static instrument).
+ampArc.setAttribute('d', arcPath(0.16)); drawSpectrum();
+if(!REDUCED) requestAnimationFrame(hud);
 
 /* ================= Web Audio: playback + analysers (ported) ================= */
 let audioCtx=null, analyser=null, ampData=null, micAnalyser=null, nextStart=0, scheduled=0;
@@ -911,7 +595,6 @@ function handleFrame(f){
     // transcript completeness safeguard: text frames are paired with audio (sync reveal), so if
     // anything was missed, the done frame's full reply fills the bubble.
     if(doneBubble && f.reply && doneBubble.textContent.trim().length < f.reply.trim().length - 4){ doneBubble.textContent=f.reply; }
-    sweep('.panel.convo');                       // a completed reply IS this panel's data refresh
     if(scheduled<=0 && orbState!=='speaking'){ if(convoMode) setTimeout(nextTurn,180); else setState('idle'); } setTimeout(loadActivity,800); setTimeout(loadStats,800); setTimeout(()=>loadLastTurn(doneBubble),500); }
 }
 function openWS(path){
@@ -1100,9 +783,6 @@ async function loadSystem(){
     ];
     if(g.available){ rows.push(['VRAM', g.vram_used+' / '+g.vram_total+' MB']); rows.push(['GPU °C', g.temp+'°']); }
     $('#sysReadout').innerHTML=rows.map(r=>`<div class="k">${r[0]}</div><div class="x">${r[1]}</div>`).join('');
-    // SYSTEM polls every 2s — its moving gauges ARE the live signal, so it sweeps only on
-    // first acquisition; a sweep every 2s would be decorative noise, not information.
-    if(!loadSystem._swept){ loadSystem._swept=true; sweep('#pSys'); }
   }catch(e){ if(String(e.message).indexOf('401')<0){} }
 }
 
@@ -1122,7 +802,6 @@ async function loadWeather(){
     $('#forecast').innerHTML=(w.forecast||[]).slice(0,7).map((d,i)=>
       `<div class="fd">${i===0?'TODAY':d.day.toUpperCase()}</div><div class="fi">${wxSvg(d.condition)}</div>`+
       `<div class="fh">${d.hi}&deg;</div><div class="fl">${d.lo}&deg;</div>`).join('');
-    sweep('#pWx');
   }catch(e){ if(String(e.message).indexOf('401')<0) $('#wxNow').innerHTML='<div class="empty">unavailable</div>'; }
 }
 
@@ -1133,16 +812,13 @@ async function loadStats(){
     const cells=[ ['MEMORIES', s.memories, ''],['MESSAGES', s.messages, ''],['TODAY', s.today, ''],
       ['ENGINE', (s.engine||'kokoro').split('/')[0], 'sm'] ];
     $('#coreStats').innerHTML=cells.map(c=>`<div class="stat-cell"><div class="v ${c[2]}">${c[1]}</div><div class="l">${c[0]}</div></div>`).join('');
-    sweep('#pCore');
   }catch(e){}
 }
 async function loadHealth(){
   const dot=$('#sysDot'), st=$('#sysStat');
   try{ const h=await api('/health'); const warm=h.voice==='warm';
     dot.className='dot '+(warm?'on':'warn'); st.textContent= warm?'system online':'warming core';
-    if(h.git){ const bs=$('#brainStrip'); $('#bsVer').textContent=h.git;
-      if(bs.style.display==='none') bs.classList.add('stamp');   // VER stamps on first reveal
-      bs.style.display=''; }                                     // version banner (stale-server killer)
+    if(h.git){ $('#bsVer').textContent=h.git; $('#brainStrip').style.display=''; }  // version banner (stale-server killer)
   }catch(e){ dot.className='dot off'; st.textContent= String(e.message).indexOf('401')>=0?'no token':'offline'; }
 }
 
@@ -1153,7 +829,6 @@ async function loadActivity(){
   try{ const j=await api('/activity'); const f=$('#feed'); const items=(j&&j.items)||[];
     if(!items.length){ f.innerHTML='<div class="empty">no recent activity</div>'; return; }
     f.innerHTML=items.map(it=>`<div class="frow"><span class="mk">${ACTMK[it.kind]||'●'}</span><span class="tx">${esc(it.text)}</span><span class="ag">${esc(it.ago)}</span></div>`).join('');
-    sweep('#pAct');
   }catch(e){ if(String(e.message).indexOf('401')<0) $('#feed').innerHTML='<div class="empty">unavailable</div>'; }
 }
 
@@ -1164,7 +839,6 @@ async function loadNews(){
     $('#newsSrc').textContent=(j.source||'RSS').toUpperCase();
     $('#newsPanel').style.display='';
     $('#news').innerHTML=items.map(it=>`<div class="frow"><span class="tx">${esc(it.title)}</span><span class="ag">${esc(it.ago)}</span></div>`).join('');
-    sweep('#newsPanel');
   }catch(e){ $('#newsPanel').style.display='none'; }
 }
 
@@ -1209,7 +883,6 @@ async function loadUpdates(){
     $('#updPanel').style.display='';
     $('#updList').innerHTML=items.map(u=>
       `<div class="urow"><span class="ud">${esc(u.date)}</span><span class="us">${esc(u.summary)}</span></div>`).join('');
-    sweep('#updPanel');
   }catch(e){ $('#updPanel').style.display='none'; }
 }
 
@@ -1224,25 +897,6 @@ setInterval(loadWeather, 600000);
 setInterval(loadNews, 600000);
 setInterval(loadLastTurn, 4000);
 setInterval(loadUpdates, 300000);
-/* ---- power-on choreography: computed radial cascade, one shot per tab session ----
-   The stagger is keyed to each panel's REAL distance from the reactor (rank x 70ms after a
-   500ms base), so power-on radiates outward from the orb as one readable gesture: last panel
-   starts at ~0.99s + .4s enter = 1.39s, inside the 1.6s budget. Reduced-motion and FX-off
-   keep the original v3 entrances; same-session reloads (reconnect/re-auth) land instantly. */
-(function powerOn(){
-  const fresh=!sessionStorage.getItem('nervice_booted');
-  sessionStorage.setItem('nervice_booted','1');
-  if(REDUCED || !FX.isOn()) return;                       // v3 baseline (reduced kills anims via CSS)
-  if(!fresh){ document.body.classList.add('boot-skip'); return; }
-  document.body.classList.add('booting');
-  const rb=reactor.getBoundingClientRect(), rcx=rb.left+rb.width/2, rcy=rb.top+rb.height/2;
-  Array.from(document.querySelectorAll('.panel'))
-    .map(p=>{ const b=p.getBoundingClientRect();
-              return {p, d:Math.hypot(b.left+b.width/2-rcx, b.top+b.height/2-rcy)}; })
-    .sort((a,b)=>a.d-b.d)
-    .forEach((e,i)=>{ e.p.style.animationDelay=(0.5+i*0.07).toFixed(2)+'s';
-                      e.p.style.animationDuration='.4s'; });
-})();
 getCID();
 if(!getToken()) openToken(); else refreshAll();
 </script>
