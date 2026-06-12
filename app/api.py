@@ -585,14 +585,25 @@ async def pending():
 _DAILY_CACHE = _REPO / "data" / "daily_summary.json"
 
 
+# Only these rungs are BRAINS (LLM engines). control/skill/direct/music/extractive/exhausted
+# are routes or non-LLM mechanisms — they must never be phrased as the thing that "handled" turns.
+_BRAIN_RUNGS = {"groq", "ollama", "claude-pro", "claude-max"}
+_BAD_HANDLER = re.compile(r"\b(?:handled\s+by|by)\s+(?:[\w\s,-]*\b)?"
+                          r"(control|skill|direct|music|extractive|exhausted)\b", re.I)
+
+
 def _daily_template(facts: dict) -> str:
-    """Deterministic sentence from the aggregates — the no-LLM fallback. Never invents."""
+    """Deterministic sentence from the aggregates — the no-LLM fallback. Never invents; the
+    handled-by clause lists brains only (the non-brain remainder is implicit in the total)."""
     if not facts["turns"]:
         return f"Yesterday ({facts['date']}): no turns."
-    rungs = ", ".join(f"{c} {r}" for r, c in sorted(facts["rungs"].items(), key=lambda x: -x[1]))
+    head = f"Yesterday: {facts['turns']} turns"
+    if facts["brains"]:
+        b = ", ".join(f"{c} by {r}" for r, c in sorted(facts["brains"].items(), key=lambda x: -x[1]))
+        head += f" ({b})"
     mem = (f"{facts['memories_added']} memories added" if facts["memories_added"] != 1
            else "1 memory added")
-    return f"Yesterday: {facts['turns']} turns ({rungs}); {mem}."
+    return f"{head}; {mem}."
 
 
 @app.get("/daily-summary", dependencies=[Depends(auth)])
@@ -628,7 +639,10 @@ async def daily_summary():
                 Memory.created_at < y_mid))).scalar() or 0
     except Exception:
         pass
-    facts = {"date": y_key, "turns": len(rows), "rungs": rung_counts, "memories_added": int(mems)}
+    brains = {r: c for r, c in rung_counts.items() if r in _BRAIN_RUNGS}
+    other = {r: c for r, c in rung_counts.items() if r not in _BRAIN_RUNGS}
+    facts = {"date": y_key, "turns": len(rows), "brains": brains,
+             "non_llm_turns": other, "memories_added": int(mems)}
     sentence = None
     if facts["turns"] or facts["memories_added"]:
         try:
@@ -636,12 +650,14 @@ async def daily_summary():
             out = await chat_json(
                 "You write ONE short factual sentence (max 28 words) summarizing yesterday's "
                 "assistant activity for a status display. Cover the turn count, which brains "
-                "(rungs) handled them, and memories added if nonzero. Use ONLY the numbers "
-                "provided — no opinions, no advice, nothing not in the data. "
-                'Return JSON: {"sentence": "..."}',
+                "handled them, and memories added if nonzero. The 'handled by' clause may ONLY "
+                "name entries from `brains` (LLM engines); `non_llm_turns` are routes/mechanisms, "
+                "NOT handlers — mention them, if at all, only as separate counts. Use ONLY the "
+                'numbers provided — nothing not in the data. Return JSON: {"sentence": "..."}',
                 _json.dumps(facts))
             cand = (out or {}).get("sentence", "")
-            if isinstance(cand, str) and 10 <= len(cand) <= 220:
+            if (isinstance(cand, str) and 10 <= len(cand) <= 220
+                    and not _BAD_HANDLER.search(cand)):   # grounding guard: routes are never handlers
                 sentence = cand.strip()
         except Exception:
             sentence = None

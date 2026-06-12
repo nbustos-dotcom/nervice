@@ -653,12 +653,22 @@ function addBubble(role,text){ const m=host(); const d=document.createElement('d
 function appendNervice(text){ const m=host(); if(!curBubble){ curBubble=document.createElement('div'); curBubble.className='bub nervice'; curBubble.textContent=text; m.appendChild(curBubble);} else { curBubble.textContent += (curBubble.textContent?' ':'')+text; } m.scrollTop=m.scrollHeight; }
 /* ---- reasoning trace console: REAL pipeline moments from WS trace frames only ---- */
 const _trc={lines:[], idleT:0};
+function _fmtArgs(a){   // router args -> compact display, hard-capped at 60 chars
+  if(!a||typeof a!=='object') return '';
+  let s;
+  if(a.action) s=a.action+'("'+String(a.target||'')+'")';
+  else if(a.question) s=a.question+(a.path?'("'+a.path+'")':'');
+  else if(a.trigger) s='"'+a.trigger+'"';
+  else if(a.op) s=a.op+(a.artists&&a.artists.length?'('+a.artists.join(', ')+')':'');
+  else s=Object.entries(a).map(([k,v])=>k+':'+String(v)).join(' ');
+  return s.length>60? s.slice(0,57)+'…' : s;
+}
 function _fmtTrace(f){
   let txt;
   switch(f.stage){
     case 'received':  txt='received'; break;
     case 'routing':   txt='routing'; break;
-    case 'route':     txt='route · '+String(f.route||'?'); break;
+    case 'route':     txt='route · '+String(f.route||'?')+(f.args?' · '+_fmtArgs(f.args):''); break;
     case 'answering': txt='answering · '+String(f.rung||''); break;
     case 'executing': txt='executing · '+String(f.route||'')+(f.args&&f.args.tool?' · '+String(f.args.tool):''); break;
     case 'done':      txt='done · '+String(f.route||'')+' · '+String(f.rung||''); break;

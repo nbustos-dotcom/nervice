@@ -278,7 +278,10 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
     await _trace(send, "routing", ms=_ms())
     system, route = await asyncio.gather(
         build_system_prompt(user_id, text, voice_mode=voice), classify(text))
-    await _trace(send, "route", route=route.get("route", "?"), ms=_ms())
+    # Fix-1 enrichment: the route frame carries the router's extracted args (action/target/
+    # question/trigger/op/...) so the HUD trace can show WHAT was decided, not just the route.
+    _args = {k: v for k, v in route.items() if k != "route" and v not in (None, "", [])}
+    await _trace(send, "route", route=route.get("route", "?"), ms=_ms(), args=_args or None)
 
     reply, streamed = None, False
     if route.get("route") == "normal":
