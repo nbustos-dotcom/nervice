@@ -93,13 +93,44 @@
   @media (min-width:1480px){ .grid{grid-template-columns:340px minmax(0,1fr) 340px;} }
   .col{display:flex; flex-direction:column; gap:var(--gap); min-width:0;}
 
-  /* ---------- HUD panel (thin frame + corner brackets, NOT glass) ---------- */
-  .panel{position:relative; border:1px solid var(--line); background:rgba(11,14,24,.45);   /* flat — no gradient panels */
-         padding:12px 13px 13px; min-width:0;
+  /* ---------- HUD panel: broken-geometry frames (Arwes-derived, original) ----------
+     NEVER a closed 1px box. Open corner brackets with unequal arms (42px run / 14px drop,
+     2px stroke) + a top hairline, all layered background gradients — zero extra DOM.
+     Hierarchy by alpha + bracket count: center = 4 corners, left rail = TL/BR + left edge
+     accent, right rail = TR/BL + right edge accent, fainter. No glass, no blur, no glow. */
+  .panel{position:relative; border:none; overflow:hidden;
+         --bk:rgba(176,124,255,.5); --hair:rgba(176,124,255,.13);
+         background-color:rgba(11,14,24,.42);
+         background-image:
+           linear-gradient(var(--bk),var(--bk)), linear-gradient(var(--bk),var(--bk)),
+           linear-gradient(var(--bk),var(--bk)), linear-gradient(var(--bk),var(--bk)),
+           linear-gradient(var(--hair),var(--hair));
+         background-repeat:no-repeat;
+         background-position:0 0, 0 0, 100% 100%, 100% 100%, 0 0;
+         background-size:42px 2px, 2px 14px, 42px 2px, 2px 14px, 100% 1px;
+         padding:13px 14px 14px; min-width:0;
          opacity:0; transform:translateY(8px); animation:boot .5s var(--ease,cubic-bezier(.2,.7,.3,1)) forwards;}
-  .panel::before,.panel::after{content:""; position:absolute; width:11px; height:11px; pointer-events:none;}
-  .panel::before{top:-1px; left:-1px; border-top:1px solid var(--accent); border-left:1px solid var(--accent);}
-  .panel::after{bottom:-1px; right:-1px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent);}
+  /* center column = hero tier: all four corners (extra TR/BL pair on ::before) */
+  .col:nth-child(2) .panel{background-color:rgba(11,14,24,.5);}
+  .col:nth-child(2) .panel::before{content:""; position:absolute; inset:0; pointer-events:none;
+         background-image:
+           linear-gradient(var(--bk),var(--bk)), linear-gradient(var(--bk),var(--bk)),
+           linear-gradient(var(--bk),var(--bk)), linear-gradient(var(--bk),var(--bk));
+         background-repeat:no-repeat;
+         background-position:100% 0, 100% 0, 0 100%, 0 100%;
+         background-size:42px 2px, 2px 14px, 42px 2px, 2px 14px;}
+  /* rail tiers: single edge accent (static inset shadow — never animated) */
+  .col:first-child .panel{box-shadow:inset 2px 0 0 rgba(176,124,255,.26);}
+  .col:last-child .panel{box-shadow:inset -2px 0 0 rgba(176,124,255,.20); background-color:rgba(11,14,24,.34);
+         background-position:100% 0, 100% 0, 0 100%, 0 100%, 0 0;}   /* TR/BL corners instead (asymmetry) */
+  /* DATA-REFRESH SCANLINE: a full-size gradient band translated through the panel by its own
+     height (transform-only, GPU). Fired by JS ONLY when a panel's real fetch resolves. */
+  .panel::after{content:""; position:absolute; inset:0; pointer-events:none; opacity:0;
+         background:linear-gradient(to bottom, transparent 0%, rgba(25,227,227,.14) 46%,
+                    rgba(25,227,227,.55) 50%, rgba(25,227,227,.14) 54%, transparent 100%);
+         transform:translateY(-101%);}
+  .panel.sweep::after{animation:pSweep .46s cubic-bezier(.3,.6,.4,1);}
+  @keyframes pSweep{0%{transform:translateY(-101%); opacity:.95;} 100%{transform:translateY(101%); opacity:.55;}}
   @keyframes boot{to{opacity:1; transform:none;}}
   .ph{display:flex; align-items:center; gap:8px; margin:0 0 11px; font-family:var(--mono); font-size:10px;
       letter-spacing:.22em; text-transform:uppercase; color:var(--accent);}
@@ -294,12 +325,12 @@
     <main class="grid">
       <!-- LEFT RAIL -->
       <section class="col" style="animation:none">
-        <div class="panel" style="animation-delay:.04s">
+        <div class="panel" id="pSys" style="animation-delay:.04s">
           <h3 class="ph">SYSTEM <span class="ln"></span><span class="n" id="hostTag">·</span></h3>
           <div class="gauges" id="gauges"></div>
           <div class="rd" id="sysReadout"></div>
         </div>
-        <div class="panel" style="animation-delay:.22s">
+        <div class="panel" id="pAct" style="animation-delay:.22s">
           <h3 class="ph">ACTIVITY <span class="ln"></span><span class="n">LIVE</span></h3>
           <div class="feed" id="feed"><div class="empty">acquiring…</div></div>
         </div>
@@ -356,12 +387,12 @@
 
       <!-- RIGHT RAIL -->
       <section class="col">
-        <div class="panel" style="animation-delay:.06s">
+        <div class="panel" id="pWx" style="animation-delay:.06s">
           <h3 class="ph">WEATHER <span class="ln"></span><span class="n" id="wxPlace">—</span></h3>
           <div id="wxNow"><div class="empty">acquiring…</div></div>
           <div class="fc" id="forecast"></div>
         </div>
-        <div class="panel" style="animation-delay:.16s">
+        <div class="panel" id="pCore" style="animation-delay:.16s">
           <h3 class="ph">NERVICE CORE <span class="ln"></span><span class="n" id="engineTag">--</span></h3>
           <div class="stats" id="coreStats"></div>
         </div>
@@ -416,6 +447,15 @@ $('#tokenSave').onclick=()=>{const t=$('#tokenInput').value.trim(); if(!t){$('#t
 $('#tokenInput').addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.isComposing){ e.preventDefault(); $('#tokenSave').click(); } });
 $('#gearBtn').onclick=openToken;
 $('#newBtn').onclick=()=>{localStorage.removeItem(CID_KEY); getCID(); $('#msgs').innerHTML='<div class="convo-empty">// new session</div>'; toast('New session');};
+
+/* ---- data-refresh scanline: fired ONLY when a panel's real fetch resolves ---- */
+function sweep(sel){
+  if(!FX.isOn()) return;
+  const p=document.querySelector(sel); if(!p) return;
+  p.classList.remove('sweep'); void p.offsetWidth;     // restart the one-shot
+  p.classList.add('sweep');
+}
+document.addEventListener('animationend',e=>{ if(e.animationName==='pSweep') e.target.classList.remove('sweep'); });
 
 /* ---- authed fetch ---- */
 async function api(path){
@@ -859,6 +899,7 @@ function handleFrame(f){
     // transcript completeness safeguard: text frames are paired with audio (sync reveal), so if
     // anything was missed, the done frame's full reply fills the bubble.
     if(doneBubble && f.reply && doneBubble.textContent.trim().length < f.reply.trim().length - 4){ doneBubble.textContent=f.reply; }
+    sweep('.panel.convo');                       // a completed reply IS this panel's data refresh
     if(scheduled<=0 && orbState!=='speaking'){ if(convoMode) setTimeout(nextTurn,180); else setState('idle'); } setTimeout(loadActivity,800); setTimeout(loadStats,800); setTimeout(()=>loadLastTurn(doneBubble),500); }
 }
 function openWS(path){
@@ -1047,6 +1088,9 @@ async function loadSystem(){
     ];
     if(g.available){ rows.push(['VRAM', g.vram_used+' / '+g.vram_total+' MB']); rows.push(['GPU °C', g.temp+'°']); }
     $('#sysReadout').innerHTML=rows.map(r=>`<div class="k">${r[0]}</div><div class="x">${r[1]}</div>`).join('');
+    // SYSTEM polls every 2s — its moving gauges ARE the live signal, so it sweeps only on
+    // first acquisition; a sweep every 2s would be decorative noise, not information.
+    if(!loadSystem._swept){ loadSystem._swept=true; sweep('#pSys'); }
   }catch(e){ if(String(e.message).indexOf('401')<0){} }
 }
 
@@ -1066,6 +1110,7 @@ async function loadWeather(){
     $('#forecast').innerHTML=(w.forecast||[]).slice(0,7).map((d,i)=>
       `<div class="fd">${i===0?'TODAY':d.day.toUpperCase()}</div><div class="fi">${wxSvg(d.condition)}</div>`+
       `<div class="fh">${d.hi}&deg;</div><div class="fl">${d.lo}&deg;</div>`).join('');
+    sweep('#pWx');
   }catch(e){ if(String(e.message).indexOf('401')<0) $('#wxNow').innerHTML='<div class="empty">unavailable</div>'; }
 }
 
@@ -1076,6 +1121,7 @@ async function loadStats(){
     const cells=[ ['MEMORIES', s.memories, ''],['MESSAGES', s.messages, ''],['TODAY', s.today, ''],
       ['ENGINE', (s.engine||'kokoro').split('/')[0], 'sm'] ];
     $('#coreStats').innerHTML=cells.map(c=>`<div class="stat-cell"><div class="v ${c[2]}">${c[1]}</div><div class="l">${c[0]}</div></div>`).join('');
+    sweep('#pCore');
   }catch(e){}
 }
 async function loadHealth(){
@@ -1093,6 +1139,7 @@ async function loadActivity(){
   try{ const j=await api('/activity'); const f=$('#feed'); const items=(j&&j.items)||[];
     if(!items.length){ f.innerHTML='<div class="empty">no recent activity</div>'; return; }
     f.innerHTML=items.map(it=>`<div class="frow"><span class="mk">${ACTMK[it.kind]||'●'}</span><span class="tx">${esc(it.text)}</span><span class="ag">${esc(it.ago)}</span></div>`).join('');
+    sweep('#pAct');
   }catch(e){ if(String(e.message).indexOf('401')<0) $('#feed').innerHTML='<div class="empty">unavailable</div>'; }
 }
 
@@ -1103,6 +1150,7 @@ async function loadNews(){
     $('#newsSrc').textContent=(j.source||'RSS').toUpperCase();
     $('#newsPanel').style.display='';
     $('#news').innerHTML=items.map(it=>`<div class="frow"><span class="tx">${esc(it.title)}</span><span class="ag">${esc(it.ago)}</span></div>`).join('');
+    sweep('#newsPanel');
   }catch(e){ $('#newsPanel').style.display='none'; }
 }
 
@@ -1147,6 +1195,7 @@ async function loadUpdates(){
     $('#updPanel').style.display='';
     $('#updList').innerHTML=items.map(u=>
       `<div class="urow"><span class="ud">${esc(u.date)}</span><span class="us">${esc(u.summary)}</span></div>`).join('');
+    sweep('#updPanel');
   }catch(e){ $('#updPanel').style.display='none'; }
 }
 
