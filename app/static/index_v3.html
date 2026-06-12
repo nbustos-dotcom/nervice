@@ -186,14 +186,15 @@
   /* ---------- audio spectrum ---------- */
   .spectrum{width:100%; max-width:560px; height:64px; margin:2px auto 0; display:block;}
 
-  /* ---------- daily line: one quiet grounded sentence near the clock (NO box) ----------
+  /* ---------- daily line: one quiet grounded sentence in the telemetry footer (NO box) ----------
      Yesterday's REAL aggregates phrased as one sentence (/daily-summary, facts-only, cached
-     per-day server-side). T3 ambient plane: faint, centered, a micro-prefix, nothing else. */
+     per-day server-side). Lives UNDER the brain strip — moved out of the clock->reactor gap
+     (it was in the way there). T3 ambient: faint, centered, a micro-prefix, nothing else. */
   .dayline{display:flex; align-items:baseline; justify-content:center; gap:9px; width:100%;
-           max-width:640px; margin:0 auto; padding:0 14px; pointer-events:none; text-align:center;}
+           max-width:640px; margin:7px auto 0; padding:0 14px; pointer-events:none; text-align:center;}
   .dayline .dl-k{font-family:var(--mono); font-size:8.5px; letter-spacing:.22em; color:var(--accent);
-                 opacity:.55; flex:none;}
-  .dayline #dlText{font-size:11.5px; color:var(--faint); line-height:1.4;}
+                 opacity:.45; flex:none;}
+  .dayline #dlText{font-size:10.5px; color:var(--faint); opacity:.8; line-height:1.4;}
 
   /* AWAITING NATE: leader-line callout in the lower-right void — EXISTS only when something
      is actually waiting (absence = silence, grammar v4.1 #8). Spawn fades up once on first
@@ -382,9 +383,6 @@
           <div class="ruler" id="ruler"></div>
         </div>
         <div class="reactor-wrap">
-          <div class="dayline" id="dayLine" style="display:none" aria-hidden="true">
-            <span class="dl-k">YESTERDAY</span><span id="dlText"></span>
-          </div>
           <div class="orbzone">
           <svg id="ladderSvg" aria-hidden="true"></svg>
           <div class="reactor idle" id="reactor" role="button" tabindex="0" aria-label="Hold to talk to Nervice">
@@ -420,6 +418,9 @@
             <span class="bs-k">LAST</span><span class="bs-v" id="bsTime">—</span>
             <span class="bs-sep"></span>
             <span class="bs-k">VER</span><span class="bs-v instant" id="bsVer">—</span>
+          </div>
+          <div class="dayline" id="dayLine" style="display:none" aria-hidden="true">
+            <span class="dl-k">YESTERDAY</span><span id="dlText"></span>
           </div>
         </div>
         <div class="panel convo" style="animation-delay:.12s">
