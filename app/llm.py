@@ -404,6 +404,12 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
     token = claude_turn_ctx.set({"system": system, "messages": list(messages), "voice_mode": voice_mode})
     try:
         if groq_capped():
+            if force_tool:
+                # FORCED agent tools (consult/build/browse/selfmod) run on Claude/the SDK, not
+                # Groq — the sticky skip must not eat them (a confusion escalation while capped
+                # must still reach Claude). Drive the tool mechanically, same synthesis as the
+                # tool_use_failed branch; no Groq round-trip anywhere.
+                return await _forced_tool_direct(force_tool, messages, tool_funcs)
             raise _sticky_429()          # sticky window: skip the wasted Groq round-trip entirely
         return await _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds,
                                            force_tool, voice_mode)
@@ -430,6 +436,23 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
         return LADDER_EXHAUSTED_MSG
     finally:
         claude_turn_ctx.reset(token)
+
+
+async def _forced_tool_direct(force_tool: str, messages: list, tool_funcs: dict) -> str:
+    """Capped + forced route: run the forced agent tool WITHOUT the Groq driver. The tool gets
+    the latest user message as its argument (identical synthesis to the tool_use_failed
+    branch); its result is the reply. AllClaudeExhausted propagates to the caller's handler."""
+    question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+    fn = tool_funcs.get(force_tool)
+    if fn is None:
+        raise _sticky_429()              # unknown tool: fall back to the normal capped ladder
+    arg_name = next(iter(inspect.signature(fn).parameters))
+    print(f"[capped + forced {force_tool} -> driving the tool directly, no Groq]", file=sys.stderr)
+    raw = fn(**{arg_name: question})
+    result = await raw if inspect.isawaitable(raw) else raw
+    if force_tool == "agent_build":
+        return "Build complete — here's what the builder did:\n\n" + str(result)
+    return str(result)
 
 
 async def _chat_with_tools_impl(system, messages, tools, tool_funcs, max_rounds=4,
