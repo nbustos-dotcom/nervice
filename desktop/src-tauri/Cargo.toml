@@ -1,0 +1,19 @@
+[package]
+name = "nervice-desktop"
+version = "0.1.0"
+description = "NERVICE desktop shell - native window around the local HUD"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
+tauri-plugin-single-instance = "2"
+minreq = "2"      # tiny blocking HTTP client - just for the /health liveness poke
+rfd = "0.15"      # native message dialogs (errors must never be silent)
+win32job = "2"    # OS job object: the spawned python dies with this app, guaranteed
+
+[profile.release]
+opt-level = "s"
+lto = true
