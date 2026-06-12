@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#04070b">
+<meta name="theme-color" content="#0a0a12">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Nervice">
-<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png">
+<link rel="manifest" href="/static/manifest.webmanifest">
 <title>NERVICE · HUD</title>
 <!--
   ============================ JARVIS HUD — LAYOUT PLAN ============================
@@ -57,7 +57,12 @@
   }
   #bg{position:fixed; inset:0; width:100%; height:100%; z-index:0; pointer-events:none;}
   .shell{position:relative; z-index:1; min-height:100dvh; display:flex; flex-direction:column;
-         padding:calc(env(safe-area-inset-top) + 10px) clamp(10px,1.6vw,22px) calc(env(safe-area-inset-bottom) + 12px);}
+         /* full safe-area coverage for standalone mode: notch (top), home bar (bottom), AND
+            the landscape notch sides — the HUD never clips under hardware in any orientation */
+         padding:calc(env(safe-area-inset-top) + 10px)
+                 calc(env(safe-area-inset-right) + clamp(10px,1.6vw,22px))
+                 calc(env(safe-area-inset-bottom) + 12px)
+                 calc(env(safe-area-inset-left) + clamp(10px,1.6vw,22px));}
 
   /* ---------- header ---------- */
   header{display:flex; align-items:center; gap:14px; padding-bottom:10px; margin-bottom:var(--gap);
@@ -1113,6 +1118,13 @@ setInterval(loadLadder, 15000);
 setInterval(loadPending, 60000);
 setInterval(loadDaily, 600000);
 setInterval(loadUpdates, 300000);
+/* PWA service worker: network-first HTML (never a stale index), cache-first icons/manifest
+   only, API/WS untouched. Secure contexts only — over a plain-http tailnet IP,
+   navigator.serviceWorker is absent and this is a silent no-op (the PWA still installs
+   fullscreen via the apple-* meta tags; the SW just adds the offline page + icon cache). */
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(e=>console.warn('sw register failed', e));
+}
 getCID();
 if(!getToken()) openToken(); else refreshAll();
 </script>

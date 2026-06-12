@@ -122,8 +122,22 @@ app = FastAPI(title="Nervice API", lifespan=lifespan)
 # The phone client (static files) is served UNauthenticated — acceptable ONLY because the page is
 # inert without a token and is reachable only over the private tailnet. Every API route below keeps
 # its Bearer auth; the static mount does not bypass it.
+import mimetypes
+mimetypes.add_type("application/manifest+json", ".webmanifest")   # StaticFiles consults mimetypes
 _STATIC = pathlib.Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
+
+
+@app.get("/sw.js")
+async def service_worker():
+    """The PWA service worker, served at the TOP level so its scope covers /v3 (a worker served
+    under /static could only control /static/*). __VER__ becomes this process's git hash, so each
+    commit gets a fresh cache name. Like the static pages: unauthenticated but inert — the worker
+    only ever caches icons + the manifest, never API responses or anything authed."""
+    from fastapi.responses import Response
+    js = (_STATIC / "sw.js").read_text(encoding="utf-8").replace("__VER__", _GIT_HASH)
+    return Response(js, media_type="application/javascript",
+                    headers={"Cache-Control": "no-cache"})   # browser revalidates the SW itself
 
 
 @app.get("/")
