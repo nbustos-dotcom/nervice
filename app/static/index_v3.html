@@ -132,6 +132,18 @@
   .panel.sweep::after{animation:pSweep .46s cubic-bezier(.3,.6,.4,1);}
   @keyframes pSweep{0%{transform:translateY(-101%); opacity:.95;} 100%{transform:translateY(101%); opacity:.55;}}
   @keyframes boot{to{opacity:1; transform:none;}}
+  /* ---------- power-on sequence (<=1.6s, fresh tab sessions only) ----------
+     grid draws in -> reactor ignites -> panels cascade radially outward from the orb
+     (JS assigns the stagger by real distance) -> VER stamps. transform/opacity only.
+     boot-skip (reconnect / re-auth / same-session reload): everything lands instantly. */
+  @keyframes bFade{from{opacity:0;}}
+  @keyframes bIgnite{from{transform:scale(.86); opacity:0;}}
+  @keyframes bStamp{from{opacity:0; transform:translateY(4px);}}
+  body.booting #bg, body.booting #vig{animation:bFade .35s ease-out backwards;}
+  body.booting header{animation:bFade .3s ease-out backwards;}
+  body.booting .reactor{animation:bIgnite .5s .18s cubic-bezier(.2,.7,.3,1) backwards;}
+  body.boot-skip .panel{animation:none; opacity:1; transform:none;}
+  .brainstrip.stamp{animation:bStamp .35s ease-out backwards;}
   .ph{display:flex; align-items:center; gap:8px; margin:0 0 11px; font-family:var(--mono); font-size:10px;
       letter-spacing:.22em; text-transform:uppercase; color:var(--accent);}
   .ph .ln{flex:1; height:1px; background:var(--line-soft);}
@@ -1128,7 +1140,9 @@ async function loadHealth(){
   const dot=$('#sysDot'), st=$('#sysStat');
   try{ const h=await api('/health'); const warm=h.voice==='warm';
     dot.className='dot '+(warm?'on':'warn'); st.textContent= warm?'system online':'warming core';
-    if(h.git){ $('#bsVer').textContent=h.git; $('#brainStrip').style.display=''; }  // version banner (stale-server killer)
+    if(h.git){ const bs=$('#brainStrip'); $('#bsVer').textContent=h.git;
+      if(bs.style.display==='none') bs.classList.add('stamp');   // VER stamps on first reveal
+      bs.style.display=''; }                                     // version banner (stale-server killer)
   }catch(e){ dot.className='dot off'; st.textContent= String(e.message).indexOf('401')>=0?'no token':'offline'; }
 }
 
@@ -1210,6 +1224,25 @@ setInterval(loadWeather, 600000);
 setInterval(loadNews, 600000);
 setInterval(loadLastTurn, 4000);
 setInterval(loadUpdates, 300000);
+/* ---- power-on choreography: computed radial cascade, one shot per tab session ----
+   The stagger is keyed to each panel's REAL distance from the reactor (rank x 70ms after a
+   500ms base), so power-on radiates outward from the orb as one readable gesture: last panel
+   starts at ~0.99s + .4s enter = 1.39s, inside the 1.6s budget. Reduced-motion and FX-off
+   keep the original v3 entrances; same-session reloads (reconnect/re-auth) land instantly. */
+(function powerOn(){
+  const fresh=!sessionStorage.getItem('nervice_booted');
+  sessionStorage.setItem('nervice_booted','1');
+  if(REDUCED || !FX.isOn()) return;                       // v3 baseline (reduced kills anims via CSS)
+  if(!fresh){ document.body.classList.add('boot-skip'); return; }
+  document.body.classList.add('booting');
+  const rb=reactor.getBoundingClientRect(), rcx=rb.left+rb.width/2, rcy=rb.top+rb.height/2;
+  Array.from(document.querySelectorAll('.panel'))
+    .map(p=>{ const b=p.getBoundingClientRect();
+              return {p, d:Math.hypot(b.left+b.width/2-rcx, b.top+b.height/2-rcy)}; })
+    .sort((a,b)=>a.d-b.d)
+    .forEach((e,i)=>{ e.p.style.animationDelay=(0.5+i*0.07).toFixed(2)+'s';
+                      e.p.style.animationDuration='.4s'; });
+})();
 getCID();
 if(!getToken()) openToken(); else refreshAll();
 </script>
