@@ -18,6 +18,7 @@ from app.weather import get_weather
 from app import computer
 from app import skills
 from app import music
+from app import confusion
 from app.db import AsyncSessionLocal
 from app.models import Message
 
@@ -165,16 +166,28 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         classify(user_message))
     apply_local_memory()                 # publish the compact local-rung memory block (Fix 2.2)
 
+    # Fix 2.4: deterministic confusion signals. Level 1 = hint in the system prompt;
+    # level 2 (consecutive) = this turn goes to consult_claude regardless of topic.
+    conf = confusion.check(user_id, user_message)
+    if conf == "hint":
+        system += confusion.HINT
+    elif conf == "escalate":
+        route = {"route": "hard"}
+
     async def _ack(text):
         print(text)                      # immediate text feedback before the slow tool
         if voice_mode and speak:
             speak(text)                  # voice: spoken immediately, before the await
 
+    from app.llm import guard_tripped
+    guard_tripped.set(False)             # fresh per turn; the 4B guard sets it on a trip
     reply = await execute_route(user_id, system, route, user_message, window,
                                 voice_mode=voice_mode, on_ack=_ack)
     print(reply)
     rung = "exhausted" if (reply or "").startswith(LADDER_EXHAUSTED_MSG) else current_rung.get()
-    log_turn(route.get("route", "?"), rung, time.monotonic() - t0, "rest")
+    log_turn(route.get("route", "?"), rung, time.monotonic() - t0, "rest",
+             extra=("reason=confusion" if conf == "escalate" else ""))
+    confusion.note_turn_end(user_id, rung, guard_tripped.get())
     return reply
 
 

@@ -27,6 +27,7 @@ from groq import RateLimitError
 from app import computer
 from app import skills
 from app import music
+from app import confusion
 from app.agent import current_rung
 from app.turnlog import log_turn
 from app.router import classify
@@ -281,9 +282,18 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
     system, route = await asyncio.gather(
         build_system_prompt(user_id, text, voice_mode=voice), classify(text))
     apply_local_memory()                 # publish the compact local-rung memory block (Fix 2.2)
+    # Fix 2.4: deterministic confusion signals — hint on the first, consult_claude on consecutive.
+    conf = confusion.check(user_id, text)
+    if conf == "hint":
+        system += confusion.HINT
+    elif conf == "escalate":
+        route = {"route": "hard"}
+    llm.guard_tripped.set(False)         # fresh per turn; the 4B guard sets it on a trip
     # Fix-1 enrichment: the route frame carries the router's extracted args (action/target/
     # question/trigger/op/...) so the HUD trace can show WHAT was decided, not just the route.
     _args = {k: v for k, v in route.items() if k != "route" and v not in (None, "", [])}
+    if conf == "escalate":
+        _args = {**_args, "reason": "confusion"}
     await _trace(send, "route", route=route.get("route", "?"), ms=_ms(), args=_args or None)
 
     reply, streamed = None, False
@@ -369,5 +379,7 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
     await _trace(send, "done", route=route.get("route", "?"), rung=rung, ms=_ms())
     await send({"type": "done", "reply": reply or ""})
     _store(user_id, conversation_id, text, reply or "")
-    log_turn(route.get("route", "?"), rung, time.monotonic() - t0, "ws")
+    log_turn(route.get("route", "?"), rung, time.monotonic() - t0, "ws",
+             extra=("reason=confusion" if conf == "escalate" else ""))
+    confusion.note_turn_end(user_id, rung, llm.guard_tripped.get())
     return reply or ""
