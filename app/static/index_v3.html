@@ -181,6 +181,22 @@
   /* ---------- audio spectrum ---------- */
   .spectrum{width:100%; max-width:560px; height:64px; margin:2px auto 0; display:block;}
 
+  /* ---------- WHAT I KNOW: one rotating memory line (information layer — NO box) ----------
+     A single real memory floating in the center void above the reactor: content in quiet
+     sentence type, a salience-bright category tick + age in micro-caps below, one thin rule
+     as the anchor. Crossfades to the next memory ~12s; reduced-motion shows static text. */
+  .knowline{display:flex; flex-direction:column; align-items:center; gap:3px; min-height:46px;
+            width:100%; max-width:560px; margin:0 auto; pointer-events:none; text-align:center;}
+  .knowline::before{content:""; width:120px; height:1px; background:rgba(176,124,255,.30); margin-bottom:3px;}
+  .kl-content{font-size:12.5px; color:rgba(207,233,236,.78); line-height:1.35; padding:0 12px;
+              max-width:56ch; transition:opacity .6s;}
+  .kl-meta{font-family:var(--mono); font-size:9px; letter-spacing:.18em; text-transform:uppercase;
+           color:var(--faint); transition:opacity .6s;}
+  .kl-meta .kl-tick{display:inline-block; width:4px; height:9px; margin-right:7px; vertical-align:-1px;
+                    border-left:2px solid var(--accent2);}
+  .knowline.fade .kl-content,.knowline.fade .kl-meta{opacity:0;}
+  @media (prefers-reduced-motion:reduce){ .kl-content,.kl-meta{transition:none;} }
+
   /* ---------- brain ladder: three floating arc clusters (information layer — NO box) ----------
      Open arc fragments in the void at the reactor's diagonal periphery, openings facing the
      orb (grammar v4.1 #5/#9). Dim purple track = the range, cyan fill = today's REAL share of
@@ -361,6 +377,10 @@
           <div class="ruler" id="ruler"></div>
         </div>
         <div class="reactor-wrap">
+          <div class="knowline" id="knowLine" style="display:none" aria-hidden="true">
+            <div class="kl-content" id="klContent"></div>
+            <div class="kl-meta" id="klMeta"></div>
+          </div>
           <div class="orbzone">
           <svg id="ladderSvg" aria-hidden="true"></svg>
           <div class="reactor idle" id="reactor" role="button" tabindex="0" aria-label="Hold to talk to Nervice">
@@ -958,6 +978,33 @@ async function loadLastTurn(bubble){
   }catch(e){}
 }
 
+/* ---- WHAT I KNOW: rotating memory line (real /memories/recent, 60s poll, ~12s crossfade) ----
+   One memory at a time floats in the center void: content + a category tick whose brightness
+   is the REAL salience (1-5) + how long ago it was learned. Rotation skips while the tab is
+   hidden; reduced-motion gets static text (no rotation). Absence of memories = silence. */
+const _know={items:[], i:0};
+function _klRender(){
+  const items=_know.items; if(!items.length) return;
+  const m=items[_know.i % items.length];
+  $('#klContent').textContent=m.content;
+  $('#klMeta').innerHTML=`<span class="kl-tick" style="opacity:${(0.3+(m.salience||1)*0.14).toFixed(2)}"></span>`
+    +esc(String(m.category||''))+' · learned '+esc(String(m.age_human||'recently'));
+}
+function _klTick(){
+  if(document.hidden || REDUCED || _know.items.length<2) return;
+  const kl=$('#knowLine');
+  kl.classList.add('fade');
+  setTimeout(()=>{ _know.i++; _klRender(); kl.classList.remove('fade'); }, 620);
+}
+async function loadMemories(){
+  if(document.hidden) return;                            // perf budget: nothing fetches while hidden
+  try{ const j=await api('/memories/recent?n=8'); const items=(j&&j.items)||[];
+    _know.items=items;
+    if(items.length){ if($('#knowLine').style.display==='none'){ $('#knowLine').style.display=''; _klRender(); } }
+    else $('#knowLine').style.display='none';
+  }catch(e){}
+}
+
 /* ---- brain ladder: three floating arc clusters near the reactor (real /ladder, 15s poll) ----
    Geometry per grammar v4.1: open 240° arcs with the gap facing the orb; dim purple track =
    range, cyan fill = today's REAL share of turns; 2-segment leader elbow (45° then horizontal
@@ -1035,7 +1082,7 @@ async function loadUpdates(){
 }
 
 /* ================= boot ================= */
-function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); loadUpdates(); loadLastTurn(); loadLadder(); requestLocation(false); }
+function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); loadUpdates(); loadLastTurn(); loadLadder(); loadMemories(); requestLocation(false); }
 buildGauges();
 setInterval(loadSystem, 2000);
 setInterval(loadHealth, 15000);
@@ -1045,6 +1092,8 @@ setInterval(loadWeather, 600000);
 setInterval(loadNews, 600000);
 setInterval(loadLastTurn, 4000);
 setInterval(loadLadder, 15000);
+setInterval(loadMemories, 60000);
+setInterval(_klTick, 12000);
 setInterval(loadUpdates, 300000);
 getCID();
 if(!getToken()) openToken(); else refreshAll();
