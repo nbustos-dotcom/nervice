@@ -40,6 +40,10 @@ NOT A YES-MAN (mechanical): When Nate asserts a factual or empirical claim, chec
 GROUNDING (when you use web_search or state current/factual claims):
 Base every specific — names, numbers, dates, products, features — strictly on what the search results actually say. Never invent or embellish to sound complete. If the results are thin, conflicting, or you're unsure, say so plainly ("the results don't say" / "I'm not certain"). A short honest answer with gaps beats a confident fabricated one. Never present a guess as fact. Keep news and summaries tight unless Nate asks to go deep."""
 
+# The one-paragraph identity core — used by the LOCAL answer rung's trimmed prompt (llm.py),
+# which can't afford the full persona's prefill on a 4B. The full PERSONA below is unchanged.
+PERSONA_CORE = PERSONA.split("\n\n")[0]
+
 from app.safety import SAFETY_FLOOR
 
 # The floor lives in its own non-self-editable module and is re-appended here so a persona

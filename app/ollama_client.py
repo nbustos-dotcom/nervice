@@ -36,10 +36,11 @@ async def is_up() -> bool:
 
 
 async def chat(messages: list[dict], tools: list[dict] | None = None,
-               timeout: float = _CHAT_TIMEOUT) -> dict:
+               timeout: float = _CHAT_TIMEOUT, options: dict | None = None) -> dict:
     """One non-streamed chat call with the mandatory configs ALWAYS baked in. Returns Ollama's
     message dict: {"role","content"[,"tool_calls"]}. Raises OllamaUnavailable on any transport
-    failure so the ladder can advance."""
+    failure so the ladder can advance. `options` passes Ollama generation options through
+    (e.g. num_predict — the 4B demotion caps its generation length)."""
     payload = {
         "model": OLLAMA_MODEL,
         "messages": messages,
@@ -49,6 +50,8 @@ async def chat(messages: list[dict], tools: list[dict] | None = None,
     }
     if tools:
         payload["tools"] = tools
+    if options:
+        payload["options"] = options
     try:
         async with httpx.AsyncClient(timeout=timeout) as c:
             r = await c.post(f"{OLLAMA_URL}/api/chat", json=payload)

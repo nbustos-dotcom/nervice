@@ -77,26 +77,92 @@ async def extractive_news() -> str | None:
 # (consult/build/browse/selfmod) never run on a 4B.
 _OLLAMA_TOOL_NAMES = {"get_weather", "get_system_info", "get_top_processes", "count_files"}
 
+# ---- Fix 2.1: 4B demotion + honesty contract ----
+# The local rung confabulated action claims ("Opening example.com" with zero audit entry) and
+# rambled against the terse persona. Three layers of defense:
+#  1. TRIMMED system prompt: persona core + SAFETY_FLOOR + hard rules (built per turn below) —
+#     not the full 3k-token persona+memories prefill.
+#  2. Generation cap (num_predict 120) — a 4B given room rambles into trouble.
+#  3. Deterministic OUTPUT GUARD on freeform replies (below): action-success claims are replaced
+#     with an honest line. Tool-grounded replies (a REAL local tool ran) are exempt — "I checked
+#     your CPU" after get_system_info actually fired is truthful, not confabulation. Control-route
+#     templated replies never pass through this function at all.
+from contextvars import ContextVar
+from app.persona import PERSONA_CORE
+from app.safety import SAFETY_FLOOR
+from app.turnlog import log_event
+
+guard_tripped: ContextVar[bool] = ContextVar("guard_tripped", default=False)   # read by Fix 2.4
+
+_LOCAL_RULES = (
+    "HARD RULES for this reply:\n"
+    "- Maximum 2 sentences. Brief, direct, human.\n"
+    "- You CANNOT take actions on the computer in this state (open/play/launch/send/create/"
+    "save) — NEVER claim you did or will. If asked to act, say you can't right now.\n"
+    "- The only things you can do are the read-only info tools attached (weather, system "
+    "stats, file counts). If you did not call one, do not invent its result.\n"
+    "- Never volunteer stored memories or facts about Nate unprompted.\n"
+    "- No self-narration about models, rungs, speed, or infrastructure.")
+
+# Compact memory block for the local rung, set per turn by chat.build_system_prompt (Fix 2.2).
+local_memory_block: ContextVar[str] = ContextVar("local_memory_block", default="")
+
+
+def _local_system() -> str:
+    """The 4B's trimmed system prompt: identity core + safety floor + honesty rules (+ the
+    compact memory block when Fix 2.2 has set one this turn)."""
+    parts = [PERSONA_CORE, SAFETY_FLOOR, _LOCAL_RULES]
+    mem = local_memory_block.get()
+    if mem:
+        parts.append(mem)
+    return "\n\n".join(parts)
+
+
+# Action-success claims a tool-less 4B can never truthfully make (spec: opening/opened/playing/
+# launched/sent/done —/I've + verb). Bias toward tripping: a false honest-line beats a false
+# action claim.
+_GUARD_RE = re.compile(
+    r"\b(open(?:ing|ed)|play(?:ing|ed)|launch(?:ing|ed)|sent\b|done\s*[—\-–:]|"
+    r"i'?ve\s+(?:\w+ed|set|sent|run|made|put)\b)", re.I)
+_GUARD_MSG = "Groq's capped — I can chat briefly, but I can't take actions right now."
+
+
+def _guard_local_reply(out: str, used_tool: bool) -> str:
+    """Deterministic honesty guard on ollama-rung FREEFORM replies. Replies grounded in a real
+    local tool call are exempt; templated control-route replies never reach this code path."""
+    if used_tool or not _GUARD_RE.search(out or ""):
+        return out
+    guard_tripped.set(True)
+    log_event(f"GUARD-TRIP\trung=ollama\tclaim={out[:80]!r}")
+    print(f"[GUARD-TRIP] ollama action-claim suppressed: {out[:120]!r}", file=sys.stderr)
+    return _GUARD_MSG
+
 
 async def _ollama_fallback(system: str | None, messages: list,
                            tool_specs: list | None = None, tool_funcs: dict | None = None) -> str | None:
-    """Groq is capped: answer on the local qwen3.5:4b rung with the SAME system prompt (persona +
-    memories + safety floor) and conversation window the Groq path had, plus the local-only tool
-    subset — so weather/machine-control questions keep working when capped. Returns the answer, or
-    None when Ollama is unavailable/empty (the caller ladders on to Claude)."""
+    """Groq is capped: answer on the local qwen3.5:4b rung. Fix 2.1 DEMOTED this rung: it gets a
+    TRIMMED system prompt (identity core + safety floor + honesty rules + compact memories —
+    never the full persona prefill), a 120-token generation cap, and a deterministic output
+    guard against confabulated action claims. The local-only read tool subset stays attached so
+    capped weather/sysinfo questions keep working. Returns the answer, or None when Ollama is
+    unavailable/empty (the caller ladders on to Claude). The `system` arg is accepted for call
+    compatibility but deliberately NOT sent to the 4B."""
     try:
-        msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
+        msgs = [{"role": "system", "content": _local_system()}] + list(messages)
         specs = [t for t in (tool_specs or []) if t.get("function", {}).get("name") in _OLLAMA_TOOL_NAMES]
         funcs = {k: v for k, v in (tool_funcs or {}).items() if k in _OLLAMA_TOOL_NAMES}
+        used_tool = False
         for _ in range(3):                                   # small tool loop, hard-capped
-            m = await ollama.chat(msgs, tools=specs or None)
+            m = await ollama.chat(msgs, tools=specs or None, options={"num_predict": 120})
             calls = m.get("tool_calls") or []
             if not calls:
                 out = (m.get("content") or "").strip()
                 if out:
+                    out = _guard_local_reply(out, used_tool)
                     current_rung.set("ollama")               # telemetry: this turn answered locally
                     print("[groq 429 -> answered on the local ollama rung]", file=sys.stderr)
                 return out or None
+            used_tool = True                                 # tool-grounded replies skip the guard
             msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
             for tc in calls:
                 name = tc.get("function", {}).get("name", "")
