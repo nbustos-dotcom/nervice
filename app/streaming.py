@@ -44,6 +44,25 @@ _PIVOT_ACK = {"web_search": "Let me check that — one sec.",
 _pending: set = set()
 
 
+async def _trace(send, stage: str, *, route=None, rung=None, ms=None, args=None):
+    """HUD reasoning-trace frame at a REAL pipeline moment (WS path only). Stages:
+    received -> routing -> route -> executing|answering -> done. `args` is reserved for the
+    router's structured args (populated by a later build). A trace may NEVER break a turn."""
+    f = {"type": "trace", "stage": stage}
+    if route is not None:
+        f["route"] = route
+    if rung is not None:
+        f["rung"] = rung
+    if ms is not None:
+        f["ms"] = int(ms)
+    if args is not None:
+        f["args"] = args
+    try:
+        await send(f)
+    except Exception:
+        pass
+
+
 def _store(user_id: str, conversation_id: str, user_message: str, reply: str) -> None:
     """Same fire-and-forget persistence pattern as the REST endpoints and local loops."""
     async def _run():
@@ -209,7 +228,9 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
     """One full streamed turn. `send` is an async callable taking one JSON-able frame dict.
     Returns the final reply; the caller advances its window. Persistence fires here."""
     t0 = time.monotonic()
+    _ms = lambda: (time.monotonic() - t0) * 1000   # noqa: E731 — trace clock for this turn
     current_rung.set("groq")             # reset per turn; ask_claude flips it on a Claude escalation
+    await _trace(send, "received", ms=0)
     # A pending local-action confirmation answers the prior RISKY ask — never streamed, never
     # re-classified. Delivered as one complete text+audio reply, same as a tool turn.
     pending = computer.resolve_pending(user_id, text)
@@ -219,6 +240,7 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
             b64 = await asyncio.to_thread(_synth_full_b64, pending)
             if b64:
                 await send({"type": "audio", "wav_base64": b64})
+        await _trace(send, "done", route="control", rung="control", ms=_ms())
         await send({"type": "done", "reply": pending})
         _store(user_id, conversation_id, text, pending)
         log_turn("control", "control", time.monotonic() - t0, "ws")
@@ -233,6 +255,7 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
             b64 = await asyncio.to_thread(_synth_full_b64, sk_pending)
             if b64:
                 await send({"type": "audio", "wav_base64": b64})
+        await _trace(send, "done", route="skill", rung="skill", ms=_ms())
         await send({"type": "done", "reply": sk_pending})
         _store(user_id, conversation_id, text, sk_pending)
         log_turn("skill", "skill", time.monotonic() - t0, "ws")
@@ -246,18 +269,22 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
             b64 = await asyncio.to_thread(_synth_full_b64, skill_reply)
             if b64:
                 await send({"type": "audio", "wav_base64": b64})
+        await _trace(send, "done", route="skill", rung="skill", ms=_ms())
         await send({"type": "done", "reply": skill_reply})
         _store(user_id, conversation_id, text, skill_reply)
         log_turn("skill", "skill", time.monotonic() - t0, "ws")
         return skill_reply
 
+    await _trace(send, "routing", ms=_ms())
     system, route = await asyncio.gather(
         build_system_prompt(user_id, text, voice_mode=voice), classify(text))
+    await _trace(send, "route", route=route.get("route", "?"), ms=_ms())
 
     reply, streamed = None, False
     if route.get("route") == "normal":
         rate_limited = False
         try:
+            await _trace(send, "answering", rung="groq", ms=_ms())
             reply, pivot = await _stream_normal(system, text, window, send, voice)
         except RateLimitError:
             # Groq daily cap hit at the streaming create (before any token/audio went out).
@@ -271,10 +298,13 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
                 if ans:
                     print("[groq 429 in stream_reply -> extractive news]", file=sys.stderr)
                     current_rung.set("extractive")
+                    await _trace(send, "answering", rung="extractive", ms=_ms())
             if ans is None:
+                await _trace(send, "answering", rung="ollama", ms=_ms())
                 ans = await llm._ollama_fallback(system, msgs, tools.TOOLS, tools.TOOL_FUNCS)
             if ans is None:
                 print("[groq 429 in stream_reply -> claude ladder]", file=sys.stderr)
+                await _trace(send, "answering", rung="claude", ms=_ms())
                 ans = await llm._claude_fallback(system=system, messages=msgs)
             reply, pivot, rate_limited = (ans or await llm._exhausted_msg()), None, True
         if rate_limited:
@@ -283,6 +313,7 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
             streamed = True               # _stream_normal emitted sentences live as it generated
         else:                             # model pivoted to a tool mid-stream
             print(f"[STREAM pivot -> {pivot}]", file=sys.stderr)
+            await _trace(send, "executing", route="normal", ms=_ms(), args={"tool": pivot})
             ack = _PIVOT_ACK.get(pivot)
             if ack:
                 await send({"type": "ack", "text": ack})
@@ -295,6 +326,7 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
             reply = await execute_route(user_id, system, "normal", text, window, voice_mode=voice)
 
     if reply is None:                     # forced tool route or control — never token-streamed
+        await _trace(send, "executing", route=route.get("route", "?"), ms=_ms())
         async def on_ack(a):
             await send({"type": "ack", "text": a})
             if voice:
@@ -326,8 +358,9 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
                     if b64:
                         await send({"type": "audio", "wav_base64": b64})
 
+    rung = "exhausted" if (reply or "").startswith(llm.LADDER_EXHAUSTED_MSG) else current_rung.get()
+    await _trace(send, "done", route=route.get("route", "?"), rung=rung, ms=_ms())
     await send({"type": "done", "reply": reply or ""})
     _store(user_id, conversation_id, text, reply or "")
-    rung = "exhausted" if (reply or "").startswith(llm.LADDER_EXHAUSTED_MSG) else current_rung.get()
     log_turn(route.get("route", "?"), rung, time.monotonic() - t0, "ws")
     return reply or ""

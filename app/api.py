@@ -469,6 +469,194 @@ async def activity():
     return {"items": await _activity_items()}
 
 
+# ================== HUD INFORMATION LAYER: Nervice's real internal state ==================
+# Four read-only streams + one grounded daily line. Everything here reports what already
+# exists (DB rows, turns.log, proposals/, memory_requeue.jsonl) — nothing is fabricated.
+
+@app.get("/memories/recent", dependencies=[Depends(auth)])
+async def memories_recent(n: int = 8):
+    """Active memories as a newest + highest-salience mix: half the slots go to the most recent,
+    the rest to the highest-salience not already included. No embeddings, no IDs — display only."""
+    n = max(1, min(int(n), 20))
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.models import Memory
+    async with AsyncSessionLocal() as s:
+        newest = (await s.execute(
+            select(Memory).where(Memory.user_id == USER, Memory.is_active == True)   # noqa: E712
+            .order_by(Memory.created_at.desc()).limit(n))).scalars().all()
+        salient = (await s.execute(
+            select(Memory).where(Memory.user_id == USER, Memory.is_active == True)   # noqa: E712
+            .order_by(Memory.salience.desc(), Memory.created_at.desc()).limit(n))).scalars().all()
+    now = time.time()
+    out, seen = [], set()
+    half = (n + 1) // 2
+    for m in list(newest[:half]) + salient + newest:    # newest half first, then top-salience fill
+        if m.id in seen or len(out) >= n:
+            continue
+        seen.add(m.id)
+        age = _ago(now, m.created_at.timestamp()) if m.created_at else ""
+        out.append({"content": m.content, "category": m.category,
+                    "salience": int(m.salience), "age_human": age})
+    return {"items": out}
+
+
+def _today_lines(prefix: str) -> list:
+    """turns.log lines whose timestamp starts with the given YYYY-MM-DD prefix, parsed."""
+    rows = []
+    try:
+        for line in _TURNS_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.startswith(prefix):
+                continue
+            m = _TURN_LINE.match(line.strip())
+            if m:
+                rows.append({"route": m.group(2), "rung": m.group(3), "s": float(m.group(4))})
+    except Exception:
+        pass
+    return rows
+
+
+_LLM_RUNGS = {"groq", "ollama", "claude-pro", "claude-max", "extractive", "exhausted"}
+
+
+@app.get("/ladder", dependencies=[Depends(auth)])
+async def ladder():
+    """Live brain-ladder state. groq: inferred from the LAST turn that involved an LLM rung —
+    a turn that laddered past Groq (ollama/claude/extractive/exhausted) means capped; there is
+    no header probing (the residue effect makes tiny probes lie). ollama: a real is_up() ping.
+    claude: how many account config dirs exist. today: real per-rung distribution from turns.log."""
+    from app import ollama_client
+    from app.agent import CLAUDE_ACCOUNTS
+    today = datetime.datetime.now(_TZ).strftime("%Y-%m-%d")
+    rows = await asyncio.to_thread(_today_lines, today)
+    groq = "up"
+    for r in reversed(rows):
+        if r["rung"] in _LLM_RUNGS:
+            groq = "up" if r["rung"] == "groq" else "capped"
+            break
+    try:
+        ollama_up = await asyncio.wait_for(ollama_client.is_up(), timeout=3)
+    except Exception:
+        ollama_up = False
+    accounts = sum(1 for _name, d in CLAUDE_ACCOUNTS if pathlib.Path(d).expanduser().is_dir())
+    dist: dict = {}
+    for r in rows:
+        d = dist.setdefault(r["rung"], {"count": 0, "_sum": 0.0})
+        d["count"] += 1
+        d["_sum"] += r["s"]
+    for rung, d in dist.items():
+        d["avg_s"] = round(d.pop("_sum") / d["count"], 2)
+    return {"groq": groq, "ollama": bool(ollama_up), "claude": accounts,
+            "today": {"turns": len(rows), "rungs": dist}}
+
+
+@app.get("/pending", dependencies=[Depends(auth)])
+async def pending():
+    """What's waiting on Nate: selfmod proposals still pending (real records in proposals/) and
+    the memory re-verification queue counts by kind (data/memory_requeue.jsonl). Empty = silence."""
+    def _scan():
+        props = []
+        try:
+            import json as _json
+            for p in sorted((_REPO / "proposals").glob("*.json")):
+                try:
+                    d = _json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if d.get("status") == "pending":
+                    title = " ".join(str(d.get("instruction", "")).split())[:80]
+                    props.append({"id": d.get("id", p.stem), "title": title})
+        except Exception:
+            pass
+        requeue: dict = {}
+        try:
+            import json as _json
+            with open(_REPO / "data" / "memory_requeue.jsonl", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        k = _json.loads(line).get("kind", "?")
+                        requeue[k] = requeue.get(k, 0) + 1
+        except Exception:
+            pass
+        return {"proposals": props, "requeue": requeue}
+    return await asyncio.to_thread(_scan)
+
+
+_DAILY_CACHE = _REPO / "data" / "daily_summary.json"
+
+
+def _daily_template(facts: dict) -> str:
+    """Deterministic sentence from the aggregates — the no-LLM fallback. Never invents."""
+    if not facts["turns"]:
+        return f"Yesterday ({facts['date']}): no turns."
+    rungs = ", ".join(f"{c} {r}" for r, c in sorted(facts["rungs"].items(), key=lambda x: -x[1]))
+    mem = (f"{facts['memories_added']} memories added" if facts["memories_added"] != 1
+           else "1 memory added")
+    return f"Yesterday: {facts['turns']} turns ({rungs}); {mem}."
+
+
+@app.get("/daily-summary", dependencies=[Depends(auth)])
+async def daily_summary():
+    """ONE sentence built from YESTERDAY's real aggregates (turn count, rung split, memories
+    added). Groq phrases it under a strict facts-only prompt; any failure falls back to a
+    deterministic template over the SAME numbers. Cached per-day in data/daily_summary.json —
+    the polls hit the cache, never the LLM."""
+    import json as _json
+    today_key = datetime.datetime.now(_TZ).strftime("%Y-%m-%d")
+    try:
+        cached = _json.loads(_DAILY_CACHE.read_text(encoding="utf-8"))
+        if cached.get("date") == today_key and cached.get("sentence"):
+            return {"available": True, "sentence": cached["sentence"], "date": cached["of"]}
+    except Exception:
+        pass
+    # ---- yesterday's REAL aggregates ----
+    y_mid = datetime.datetime.now(_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    y_start = y_mid - datetime.timedelta(days=1)
+    y_key = y_start.strftime("%Y-%m-%d")
+    rows = await asyncio.to_thread(_today_lines, y_key)
+    rung_counts: dict = {}
+    for r in rows:
+        rung_counts[r["rung"]] = rung_counts.get(r["rung"], 0) + 1
+    mems = 0
+    try:
+        from sqlalchemy import select, func
+        from app.db import AsyncSessionLocal
+        from app.models import Memory
+        async with AsyncSessionLocal() as s:
+            mems = (await s.execute(select(func.count()).select_from(Memory).where(
+                Memory.user_id == USER, Memory.created_at >= y_start,
+                Memory.created_at < y_mid))).scalar() or 0
+    except Exception:
+        pass
+    facts = {"date": y_key, "turns": len(rows), "rungs": rung_counts, "memories_added": int(mems)}
+    sentence = None
+    if facts["turns"] or facts["memories_added"]:
+        try:
+            from app.llm import chat_json
+            out = await chat_json(
+                "You write ONE short factual sentence (max 28 words) summarizing yesterday's "
+                "assistant activity for a status display. Cover the turn count, which brains "
+                "(rungs) handled them, and memories added if nonzero. Use ONLY the numbers "
+                "provided — no opinions, no advice, nothing not in the data. "
+                'Return JSON: {"sentence": "..."}',
+                _json.dumps(facts))
+            cand = (out or {}).get("sentence", "")
+            if isinstance(cand, str) and 10 <= len(cand) <= 220:
+                sentence = cand.strip()
+        except Exception:
+            sentence = None
+    if not sentence:
+        sentence = _daily_template(facts)
+    try:
+        _DAILY_CACHE.parent.mkdir(exist_ok=True)
+        _DAILY_CACHE.write_text(_json.dumps(
+            {"date": today_key, "of": y_key, "sentence": sentence, "facts": facts}),
+            encoding="utf-8")
+    except Exception:
+        pass
+    return {"available": True, "sentence": sentence, "date": y_key}
+
+
 @app.post("/chat", dependencies=[Depends(auth)])
 async def chat(inp: ChatIn):
     cid = inp.conversation_id or str(uuid.uuid4())

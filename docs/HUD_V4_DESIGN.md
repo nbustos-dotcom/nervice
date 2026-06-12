@@ -118,3 +118,19 @@ No simulated metrics, no cosmetic-timer sweeps, no persistent CRT/scanline textu
 glassmorphism/backdrop-filter, no idle pulsing chrome, no third accent hue, no closed boxes,
 no randomized boot delays, no chained setTimeout choreography, no canvas text, no uniform
 glow on every panel.
+
+## Information layer grammar (v4.1)
+
+Sources: jayse.tv (Avengers/IM3 portfolio + interviews), hudsandguis.com Iron Man/JARVIS
+entries, Cantina Creative / Territory breakdowns (principles only — zero asset copying).
+
+1. **Function-only rule** — every arc, tick, digit, and micro-label binds to a real telemetry value or it does not exist; no decorative geometry, no lorem noise — audiences feel randomness.
+2. **No containers, ever** — the void is the box: a cluster = bright value + small tracked-caps label + one 1px hairline rule (purple ~35% alpha) it sits on or hangs from; separation is empty space, belonging is shared alignment edge + proximity.
+3. **Two hues, two jobs** — purple #b07cff exclusively for structure (rules, arcs, ticks, leader lines, labels); cyan #19e3e3 exclusively for live data (values, pointers, sweep heads); one rationed hot accent appears only during alerts and vanishes after.
+4. **Leader-line callouts** — three parts: origin node on the subject (2-3px dot/ring), a 1px elbow line at 0/45/90 degrees with max two segments (never curved), a horizontal landing rule the label sits on, text justified away from the subject; line dimmer than label, drawn on via stroke-dashoffset on spawn, retracted on dismiss.
+5. **Open arcs, graduated ticks** — never close a circle: gauges are 90-270 degree arc fragments with the readout floating in the gap; radial ticks follow avionics major/minor rhythm; bright cyan partial arc over dim purple track = value-over-range; orient arc openings toward the focal subject.
+6. **Hierarchy = brightness x scale** — exactly three planes: T1 focus (large cyan tabular numerals, max 2-3 on screen), T2 structure (small letterspaced caps, mid-alpha purple), T3 ambient micro-text at 15-25% alpha read as pattern; promote/demote by animating opacity+scale, never by adding frames.
+7. **Motion is status, never decoration** — IDLE = slow breathing alpha (4-8s); LIVE = steady pulse / rolling digits; ACTIVATING = build-out (rule -> arc sweep -> ticks -> line draws -> label last); ALERT = brightness step + 1-2Hz pulse confined to the cluster; DISMISS = reverse collapse; never reuse one motion for two meanings.
+8. **Event-driven presence; absence = silence** — sparse seeds by default; elements bloom only when relevant (scale 115%->100%, 200-400ms fast-out, no blur) and collapse when resolved; appearance itself is the status display.
+9. **One stage anchors the field** — a single master reference geometry (the reactor's radial axis) every floating cluster aligns to by radius, tangent, or baseline; protected central exclusion zone kept empty; clusters in the annular mid-periphery point the eye inward.
+10. **One hand, one budget** — lock tokens (1px structure / 2px emphasis, 3/6/10px ticks, one letterspacing, one easing, 30-60ms stagger) and cap attention: one T1 focal cluster + 5-7 mid-tier elements lit at once; new data buys brightness by being new, then decays a tier.
