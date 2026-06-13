@@ -192,6 +192,10 @@ async def _looks_like_login(page) -> bool:
 # skeleton ("Dashboard", no assignments). These are the regions/selectors where upcoming work
 # actually renders; we wait for one to attach, then read.
 _CANVAS_MAX = 12000   # bigger cap than a normal page — two Canvas regions, dated lists
+# Dashboard chars above which the To Do / Coming Up sidebar has clearly rendered real content — at
+# that point it already answers "what's due soonest", so we SKIP the second (costly) navigation to
+# the calendar agenda. Below it the dashboard came back thin, so the agenda is fetched as a fallback.
+_DASH_RICH = 200
 _DASH_CONTENT = [".PlannerApp", ".planner-item", "[data-testid='todo-list']",
                  ".Sidebar__TodoListContainer", ".coming_up", ".ic-DashboardCard", "#content"]
 _AGENDA_CONTENT = [".fc-listView", ".fc-agendaView", ".agenda-wrapper", "#agenda-view",
@@ -211,25 +215,29 @@ _CANVAS_TEXT_JS = """() => {
 }"""
 
 
-async def _wait_for_render(page, selectors, settle_ms: int = 1500) -> str | None:
-    """Wait for async-hydrated content before reading: let the network settle, then wait for any of
-    `selectors` to attach, then a short settle. Every step is tolerant — a timeout just falls through
-    (so a genuinely empty agenda still reads, it isn't mistaken for a load failure). Returns the
-    selector that matched, or None (fell through to the settle)."""
+# Returns the first of `sels` actually present in the DOM (no waiting) — just for the audit log.
+_WHICH_PRESENT_JS = """(sels) => { for (const s of sels) { try { if (document.querySelector(s)) return s; } catch(e){} } return null; }"""
+
+
+async def _wait_for_render(page, selectors, settle_ms: int = 600, budget_ms: int = 6000) -> str | None:
+    """Wait for async-hydrated content before reading. Canvas is a long-polling SPA, so it never
+    reaches "networkidle" — the old wait_for_load_state("networkidle") just burned its full 15s
+    timeout on every read (the dominant latency). The real "content is here" signal is a content
+    region attaching, so wait for ANY of `selectors` in ONE bounded race (not a summed per-selector
+    loop), then a short capped settle for late siblings. Tolerant — a timeout falls through (a
+    genuinely empty agenda still reads, never mistaken for a load failure). Returns which selector
+    matched (for the log), "content" if it matched but we couldn't tell which, or None."""
+    hit = None
     try:
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        await page.wait_for_selector(", ".join(selectors), timeout=budget_ms, state="attached")
+        try:
+            hit = await page.evaluate(_WHICH_PRESENT_JS, selectors)   # which one — no wait, log only
+        except Exception:
+            hit = "content"
     except Exception:
         pass
-    hit = None
-    for sel in selectors:
-        try:
-            await page.wait_for_selector(sel, timeout=3000, state="attached")
-            hit = sel
-            break
-        except Exception:
-            continue
     try:
-        await page.wait_for_timeout(settle_ms)
+        await page.wait_for_timeout(settle_ms)                        # capped: late siblings only
     except Exception:
         pass
     return hit
@@ -272,28 +280,36 @@ async def read_canvas() -> dict:
     # that sidebar region (the sparse card-dashboard main is why it only saw "Dashboard" before).
     dash_hit = await _wait_for_render(page, _DASH_CONTENT)
     dash = await _canvas_text(page)
-    # The dated "what's due" list lives in the calendar AGENDA view — navigate there explicitly
-    # (URL hash sets the view; still read-only, no clicks) and read it too.
-    agenda, agenda_hit, agenda_url = "", None, CANVAS_URL.rstrip("/") + "/calendar#view_name=agenda"
-    try:
-        await page.goto(agenda_url, wait_until="domcontentloaded", timeout=30000)
-        agenda_hit = await _wait_for_render(page, _AGENDA_CONTENT)
-        agenda = await _canvas_text(page)
-    except Exception as e:
-        print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)
+    # The To Do / Coming Up sidebar above usually already lists what's due soonest. Only pay the
+    # SECOND navigation to the calendar AGENDA when the dashboard came back THIN — that extra page
+    # load + its waits were a big chunk of the old latency, and it's wasted when the dashboard
+    # already rendered. (Still read-only: URL hash sets the view, no clicks.)
+    agenda, agenda_hit = "", None
+    agenda_url = CANVAS_URL.rstrip("/") + "/calendar#view_name=agenda"
+    need_agenda = len(dash.strip()) < _DASH_RICH
+    if need_agenda:
+        try:
+            await page.goto(agenda_url, wait_until="domcontentloaded", timeout=30000)
+            agenda_hit = await _wait_for_render(page, _AGENDA_CONTENT)
+            agenda = await _canvas_text(page)
+        except Exception as e:
+            print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)
     parts = []
     if dash.strip():
         parts.append("DASHBOARD — To Do / Coming Up:\n" + dash[:_CANVAS_MAX // 2])
     if agenda.strip():
         parts.append("CALENDAR AGENDA — upcoming items by date:\n" + agenda[:_CANVAS_MAX // 2])
     text = ("\n\n".join(parts))[:_CANVAS_MAX]
-    region = f"{CANVAS_URL} (dashboard, waited={dash_hit or 'settle'}) + /calendar#agenda (waited={agenda_hit or 'settle'})"
+    region = (f"{CANVAS_URL} (dashboard, waited={dash_hit or 'settle'})"
+              + (f" + /calendar#agenda (waited={agenda_hit or 'settle'})" if need_agenda
+                 else " [agenda skipped: dashboard sufficient]"))
     # Honest "empty vs failed": we loaded + waited; if there's genuinely almost no content, say so
     # (the smart brain will tell Nate nothing's due) rather than pretend it failed.
     sparse = len(text.strip()) < 60
     await _emit("read_canvas", region, f"ok dash={len(dash)} agenda={len(agenda)} chars sparse={sparse}")
     return {"ok": True, "url": region, "title": title, "text": text,
-            "regions": {"dashboard_chars": len(dash), "agenda_chars": len(agenda)}, "sparse": sparse}
+            "regions": {"dashboard_chars": len(dash), "agenda_chars": len(agenda)},
+            "agenda_fetched": need_agenda, "sparse": sparse}
 
 
 async def close_browser() -> dict:
