@@ -117,7 +117,7 @@ async def execute_route(user_id, system, route, user_message, window, voice_mode
         current_rung.set("direct")
         return music.apply(rd.get("op"), rd.get("artists"))
     if r == "canvas":
-        return await _execute_canvas(user_message)
+        return await _execute_canvas(user_message, voice_mode=voice_mode)
     force = _FORCE.get(r)
     if force:
         print(f"[ROUTE: {r} -> {force}]", file=sys.stderr)
@@ -135,14 +135,48 @@ async def execute_route(user_id, system, route, user_message, window, voice_mode
     return await coro
 
 
-async def _synthesize_canvas(question: str, page_text: str) -> str:
+# Grounding rules shared by the spoken and on-screen Canvas answers: only the real page text, never
+# a fabricated item/date/grade, and conservative course naming (a code is fine; never guess what a
+# code "is"). Canvas labels courses by code (CS2321, SAT2343); the natural title is used only when
+# the page actually shows it.
+_CANVAS_GROUND = (
+    "You are reading Nate's LIVE school Canvas page. Use ONLY the page text below — the real "
+    "assignments, due dates, announcements, and grades that actually appear in it. If the answer "
+    "isn't in the text, say so plainly. NEVER invent or guess an assignment, a date, or a grade. "
+    "Canvas labels courses by code (like CS2321 or SAT2343); if the page shows a course's real "
+    "title you may use the natural name (\"your data structures class\"), but if only the code "
+    "appears, use the code as-is — never guess what a code stands for. Items may be marked completed "
+    "or not completed — when Nate asks what's due, focus on what is NOT done yet; you can note in "
+    "passing how many are already done, but don't dwell on completed work.")
+# SPOKEN: lead with the real SCOPE. The earlier "name 1-3, offer the rest" rule backfired when many
+# items share one due date — the model named one and buried the others. So: when several are due the
+# same day/window, STATE THE COUNT first and name them compactly in one flowing sentence. Still no
+# markdown/tables/lists in the spoken stream, but it must convey the true scope.
+_CANVAS_VOICE = (
+    "\n\nThis answer will be SPOKEN ALOUD: flowing sentences only — NO markdown, NO tables, NO "
+    "bullet points, NO numbered lists. Count what's still NOT done and lead with that SCOPE. When "
+    "several items are due the same day or within the window Nate asked about, STATE THE COUNT "
+    "first, then name them compactly in one sentence — e.g. \"You've got six things due tomorrow: "
+    "Lab 9, Quiz 4, Subnet Quiz 7, Assignment 6, and two more — want me to run through all of "
+    "them?\". Do NOT bury the count by naming only one item. If there are a lot, name the first "
+    "several and say how many remain, then offer the full list; if there are only one or two, just "
+    "name them with their due dates. For \"what's due this week / tomorrow,\" getting the COUNT "
+    "right matters more than being brief. If nothing's coming up, say so in a sentence.")
+# ON-SCREEN: fuller is fine here (this is the HUD transcript, not the voice) — a short list/table is
+# acceptable; still lead with what's urgent and only what's actually on the page.
+_CANVAS_SCREEN = (
+    "\n\nLead with what's most urgent, then give a clear, organized rundown — a short list or table "
+    "of the items with their due dates is fine on screen. Include only what's actually on the page; "
+    "don't pad.")
+
+
+async def _synthesize_canvas(question: str, page_text: str, voice_mode: bool = False) -> str:
     """Interpret the REAL Canvas page text into an answer, on the smart brain (Groq). Grounded:
-    answer only from the page text, never fabricate an assignment/date/grade."""
+    answer only from the page text, never fabricate an assignment/date/grade. In voice_mode the
+    instruction is a SHORT spoken summary (lead with the most urgent, 1-3 due soonest, offer the
+    rest, no tables); on screen it may be fuller."""
     from app.llm import _client, TOOL_MODEL, _effort
-    sys_p = ("You are reading Nate's LIVE school Canvas page. Answer his question using ONLY the page "
-             "text below — the real assignments, due dates, announcements, and grades that actually "
-             "appear in it. If the answer isn't in the text, say so plainly. NEVER invent or guess an "
-             "assignment, a date, or a grade. Keep it tight and conversational, like you're telling him.")
+    sys_p = _CANVAS_GROUND + (_CANVAS_VOICE if voice_mode else _CANVAS_SCREEN)
     msgs = [{"role": "system", "content": sys_p},
             {"role": "user", "content": f"CANVAS PAGE TEXT:\n{page_text}\n\nQUESTION: {question}"}]
     resp = await _client.chat.completions.create(model=TOOL_MODEL, messages=msgs,
@@ -150,10 +184,11 @@ async def _synthesize_canvas(question: str, page_text: str) -> str:
     return (resp.choices[0].message.content or "").strip()
 
 
-async def _execute_canvas(user_message: str) -> str:
+async def _execute_canvas(user_message: str, voice_mode: bool = False) -> str:
     """Canvas/browse-READ. Smart brain ONLY — never the 4B (it must not confabulate assignments).
     Page-action requests are refused (read-only phase). Reads the live page, then interprets the
-    real text on Groq; if Groq is capped/sticky, an honest decline — no local guess."""
+    real text on Groq; if Groq is capped/sticky, an honest decline — no local guess. voice_mode
+    flows to synthesis so the SPOKEN answer is a short summary (full detail stays on screen)."""
     from app.llm import groq_capped
     from groq import RateLimitError
     if browser.is_page_action(user_message):
@@ -171,7 +206,7 @@ async def _execute_canvas(user_message: str) -> str:
         current_rung.set("browse-read")
         return read.get("error", "Couldn't read Canvas right now.")
     try:
-        answer = await _synthesize_canvas(user_message, read["text"])
+        answer = await _synthesize_canvas(user_message, read["text"], voice_mode=voice_mode)
         current_rung.set("groq")
         return answer
     except RateLimitError:

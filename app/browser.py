@@ -31,6 +31,9 @@ _PROFILE_DIR = _ROOT / "data" / "nervice_browser_profile"
 # fresh launch — re-injected before each Canvas read so the session actually carries. Gitignored.
 _AUTH_STATE = _ROOT / "data" / "nervice_browser_auth.json"
 _AUDIT_LOG = _ROOT / "logs" / "browser_actions.log"
+# Full text of the LATEST Canvas scrape (both sources), overwritten each read. Lets us SEE exactly
+# what was scraped from the real authenticated site instead of inferring it. Read-only artifact.
+_CANVAS_DEBUG = _ROOT / "logs" / "canvas_last_read.log"
 _MAX_TEXT = 8000   # cap the read text so a huge page can't blow the LLM context
 
 # Nate fills this in with his school's Canvas dashboard URL, e.g. "https://<school>.instructure.com".
@@ -70,6 +73,21 @@ async def _emit(action: str, target: str, outcome: str) -> None:
             await cb(action, target, outcome)
         except Exception:
             pass
+
+
+def _debug_dump(sources) -> None:
+    """Write the FULL captured text of each Canvas source to _CANVAS_DEBUG (overwritten each read),
+    so a real-site read can be inspected directly. `sources` = [(label, url, title, text), ...]."""
+    try:
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        _CANVAS_DEBUG.parent.mkdir(exist_ok=True)
+        with open(_CANVAS_DEBUG, "w", encoding="utf-8") as f:
+            f.write(f"# Nervice read_canvas debug — {ts}\n")
+            for label, url, title, text in sources:
+                f.write(f"\n=== {label} ===\nurl:   {url}\ntitle: {title}\nchars: {len(text)}\n"
+                        f"----- text -----\n{text}\n")
+    except Exception:
+        pass
 
 
 async def _ensure_context():
@@ -194,8 +212,6 @@ async def _looks_like_login(page) -> bool:
 _CANVAS_MAX = 12000   # bigger cap than a normal page — two Canvas regions, dated lists
 _DASH_CONTENT = [".PlannerApp", ".planner-item", "[data-testid='todo-list']",
                  ".Sidebar__TodoListContainer", ".coming_up", ".ic-DashboardCard", "#content"]
-_AGENDA_CONTENT = [".fc-listView", ".fc-agendaView", ".agenda-wrapper", "#agenda-view",
-                   ".fc-list-item", ".fc-event", ".fc-view-container", "#content"]
 # Read the main content column + the right sidebar (To Do / Coming Up) + the planner/agenda — NOT
 # the global nav chrome. Falls back to the whole app/body if those regions are sparse.
 _CANVAS_TEXT_JS = """() => {
@@ -211,28 +227,73 @@ _CANVAS_TEXT_JS = """() => {
 }"""
 
 
-async def _wait_for_render(page, selectors, settle_ms: int = 1500) -> str | None:
-    """Wait for async-hydrated content before reading: let the network settle, then wait for any of
-    `selectors` to attach, then a short settle. Every step is tolerant — a timeout just falls through
-    (so a genuinely empty agenda still reads, it isn't mistaken for a load failure). Returns the
-    selector that matched, or None (fell through to the settle)."""
+# Returns the first of `sels` actually present in the DOM (no waiting) — just for the audit log.
+_WHICH_PRESENT_JS = """(sels) => { for (const s of sels) { try { if (document.querySelector(s)) return s; } catch(e){} } return null; }"""
+
+
+async def _wait_for_render(page, selectors, settle_ms: int = 600, budget_ms: int = 6000) -> str | None:
+    """Wait for async-hydrated content before reading. Canvas is a long-polling SPA, so it never
+    reaches "networkidle" — the old wait_for_load_state("networkidle") just burned its full 15s
+    timeout on every read (the dominant latency). The real "content is here" signal is a content
+    region attaching, so wait for ANY of `selectors` in ONE bounded race (not a summed per-selector
+    loop), then a short capped settle for late siblings. Tolerant — a timeout falls through (a
+    genuinely empty agenda still reads, never mistaken for a load failure). Returns which selector
+    matched (for the log), "content" if it matched but we couldn't tell which, or None."""
+    hit = None
     try:
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        await page.wait_for_selector(", ".join(selectors), timeout=budget_ms, state="attached")
+        try:
+            hit = await page.evaluate(_WHICH_PRESENT_JS, selectors)   # which one — no wait, log only
+        except Exception:
+            hit = "content"
     except Exception:
         pass
-    hit = None
-    for sel in selectors:
-        try:
-            await page.wait_for_selector(sel, timeout=3000, state="attached")
-            hit = sel
-            break
-        except Exception:
-            continue
     try:
-        await page.wait_for_timeout(settle_ms)
+        await page.wait_for_timeout(settle_ms)                        # capped: late siblings only
     except Exception:
         pass
     return hit
+
+
+# The Canvas agenda fetches its events by XHR AFTER the shell loads; reading at shell-load captured
+# only a "Loading" placeholder (the real bug — the SAT2343 items live ONLY in the agenda). These are
+# the agenda EVENT-ROW selectors (Canvas's own agenda renderer, plus fullcalendar list/grid views as
+# fallbacks). _wait_for_agenda waits until real rows render — or an explicit empty state — and the
+# "Loading" indicator is gone, before reading.
+_AGENDA_EVENT_SEL = (".agenda-event__item, .ig-row, .agenda-day, .fc-list-item, .fc-list-event, "
+                     ".fc-event, .calendar-event, .agenda-wrapper .ig-details")
+_AGENDA_READY_JS = """(sel) => {
+  const rows = document.querySelectorAll(sel).length;
+  if (rows > 0) return true;                       // real event rows rendered -> done
+  const root = document.querySelector('.agenda-wrapper,#agenda-view,#calendar-app,#content,#application') || document.body;
+  const txt = (root.innerText || '');
+  if (/\\bloading\\b/i.test(txt)) return false;    // no rows yet AND still loading -> keep waiting
+  return /(nothing|no events|no assignments|no more items|you have no)/i.test(txt);  // empty state -> done
+}"""
+
+
+async def _wait_for_agenda(page, budget_ms: int = 10000) -> str:
+    """Wait for the Canvas agenda to SETTLE before reading: real event rows rendered, OR an explicit
+    'nothing scheduled' state — and the 'Loading' placeholder gone. The agenda is slower than the
+    dashboard so the budget is larger. Tolerant: a timeout just proceeds to a best-effort read, and
+    the debug dump records whatever was captured so a stuck agenda is visible, not silently empty.
+    Returns a state string for the audit log: events(N) | settled-empty | timeout."""
+    try:
+        await page.wait_for_function(_AGENDA_READY_JS, arg=_AGENDA_EVENT_SEL, timeout=budget_ms)
+        settled = True
+    except Exception:
+        settled = False
+    try:
+        await page.wait_for_timeout(400)                # tiny settle for the final rows
+    except Exception:
+        pass
+    try:
+        n = await page.evaluate("(sel) => document.querySelectorAll(sel).length", _AGENDA_EVENT_SEL)
+    except Exception:
+        n = -1
+    if n and n > 0:
+        return f"events({n})"
+    return "settled-empty" if settled else "timeout"
 
 
 async def _canvas_text(page) -> str:
@@ -242,6 +303,130 @@ async def _canvas_text(page) -> str:
         text = ""
     text = re.sub(r"[ \t]+\n", "\n", text or "")
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+# The agenda EVENT LIST only — the dated day/event rows — NOT the whole calendar body (reading
+# #content/body pulled in the mini-month grid + toolbar AND the list TWICE, which confused the
+# synthesis). Each row is collapsed to one line and deduped by text, so Canvas's repeated/overlapping
+# render of the list becomes a clean, dated, deduped item list. Per-item "Open event menu" chrome is
+# stripped. Returns '' if no agenda rows are found (caller falls back to the broad reader).
+_AGENDA_TEXT_JS = """() => {
+  const pick = ['.agenda-wrapper', '#agenda-view', '.fc-listView', '.fc-list'];
+  let box = null;
+  for (const s of pick) { const e = document.querySelector(s);
+    if (e && (e.innerText||'').trim().length > 20) { box = e; break; } }
+  const scope = box || document;
+  const rows = scope.querySelectorAll('.agenda-day, .agenda-event__item, .fc-list-day, .fc-list-heading, .fc-list-item, .fc-list-event');
+  if (!rows.length) return '';
+  const seen = new Set(); const out = [];
+  for (const n of rows) {
+    let t = (n.innerText || '').replace(/\\s+/g,' ').trim();
+    t = t.replace(/\\s*open event menu( for .*)?$/i, '').trim();   // drop the per-item kebab-menu label
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;                                     // dedupe repeated event blocks
+    seen.add(k); out.push(t);
+  }
+  return out.join('\\n');
+}"""
+
+# Calendar UI chrome / month-grid lines to drop from the FALLBACK (broad-read) agenda text. Anchored
+# whole-line (^(?:...)$) so it only kills unmistakable UI rows, never an assignment whose title merely
+# starts with one of these words.
+_CHROME_LINE = re.compile(
+    r"^(?:open event menu\b.*|create new event\b.*|add event\b.*|change view\b.*|"
+    r"select calendars?\b.*|find appointment\b.*|calendars?:?|"
+    r"previous(?: month| week| day)?|next(?: month| week| day)?|today|go to today|"
+    r"agenda|week|month|day|"
+    r"(?:su|mo|tu|we|th|fr|sa)(?:\s+(?:su|mo|tu|we|th|fr|sa)){3,}|"   # weekday-abbrev header row
+    r"\d{1,2}(?:\s+\d{1,2}){4,})$", re.I)                            # a row of month-grid day numbers
+
+
+def _strip_chrome(text: str) -> str:
+    """Drop calendar UI chrome + month-grid noise from broad-read agenda text. Line-by-line, NO
+    dedupe (broad text is multi-line per event, so deduping lines would wrongly collapse repeated
+    'Not Completed' rows). The structured reader above already excludes this noise; this is the net."""
+    out = [s for ln in (text or "").splitlines() if (s := ln.strip()) and not _CHROME_LINE.match(s)]
+    return "\n".join(out).strip()
+
+
+async def _agenda_text(page) -> str:
+    """Clean agenda EVENT-LIST text for the smart brain: the dated rows only, deduped, chrome-free.
+    Structured read first (clean + deduped); falls back to the broad reader + chrome strip if the
+    agenda-row selectors don't match, so items are never lost."""
+    try:
+        text = await page.evaluate(_AGENDA_TEXT_JS)
+    except Exception:
+        text = ""
+    if (text or "").strip():
+        return text.strip()[:_CANVAS_MAX // 2]
+    broad = await _canvas_text(page)                 # safety net: the broad reader that already worked
+    return _strip_chrome(broad)[:_CANVAS_MAX // 2]
+
+
+async def _read_dash_region(page) -> dict:
+    """Open the Canvas dashboard (read-only), detect a login wall, wait for the To Do / Coming Up
+    content to hydrate, return its text. Shape: {error} | {needs_login,title,url} | {text,hit,title,url}."""
+    try:
+        await page.goto(CANVAS_URL, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        return {"error": f"Couldn't open Canvas ({type(e).__name__})."}
+    title = (await page.title()) or ""
+    if await _looks_like_login(page):
+        return {"needs_login": True, "title": title, "url": page.url}
+    hit = await _wait_for_render(page, _DASH_CONTENT)
+    return {"text": await _canvas_text(page), "hit": hit, "title": title, "url": page.url}
+
+
+async def _read_agenda_region(page, url) -> dict:
+    """Open the Canvas calendar AGENDA view (read-only — the URL hash sets the view, no clicks),
+    wait for its dated list to hydrate, return its text. Best-effort: a failure yields empty text
+    (the dashboard still answers) rather than sinking the whole read."""
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        # Wait for the AGENDA EVENTS to hydrate (not just the shell) — don't read while "Loading".
+        state = await _wait_for_agenda(page)
+        return {"text": await _agenda_text(page), "hit": f"agenda:{state}",
+                "url": page.url, "title": (await page.title()) or ""}
+    except Exception as e:
+        print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)
+        return {"text": "", "hit": None, "url": url, "title": ""}
+
+
+def _norm_line(s: str) -> str:
+    """Normalize a line for dedupe: drop leading bullet/dash markers, collapse whitespace, lowercase."""
+    return re.sub(r"\s+", " ", re.sub(r"^[\s•‣●\-\*]+", "", s)).strip().lower()
+
+
+def _merge_canvas(dash: str, agenda: str) -> str:
+    """Combine BOTH sources into one clean block for the smart brain, deduped at the line level so an
+    item that appears in both the To Do pane AND the agenda is listed once. The dashboard section is
+    kept in full; the agenda section then contributes only lines not already shown (so the dup lands
+    in the dashboard section, not both). Each section and the whole are length-capped."""
+    seen: set = set()
+
+    def keep(block: str, cap: int) -> str:
+        out = []
+        for ln in block.splitlines():
+            if not ln.strip():
+                out.append("")
+                continue
+            k = _norm_line(ln)
+            if k and k in seen:
+                continue
+            if k:
+                seen.add(k)
+            out.append(ln)
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()[:cap]
+
+    parts = []
+    d = keep(dash, _CANVAS_MAX // 2)
+    if d:
+        parts.append("DASHBOARD — To Do / Coming Up:\n" + d)
+    a = keep(agenda, _CANVAS_MAX // 2)   # seen now holds the dashboard lines -> agenda dups dropped
+    if a:
+        parts.append("CALENDAR AGENDA — upcoming items by date:\n" + a)
+    return ("\n\n".join(parts))[:_CANVAS_MAX]
 
 
 async def read_canvas() -> dict:
@@ -254,44 +439,56 @@ async def read_canvas() -> dict:
                                       "See the Canvas setup steps."}
     ctx = await _ensure_context()
     injected = await _inject_auth(ctx)          # re-add saved session cookies BEFORE navigating
-    opened = await open_page(CANVAS_URL)
-    if not opened["ok"]:
-        return opened
-    page = await _current_page(_context)
-    title = (await page.title()) or ""
-    if await _looks_like_login(page):
-        # Capture WHAT it landed on (point-4 diagnostics) and tailor the honest message: no saved
-        # auth -> log in; auth present but still bounced -> the session expired, refresh it.
-        await _emit("read_canvas", page.url, f"needs login (auth_cookies={injected}) landed={title!r}")
+    page = await _current_page(ctx)
+    agenda_url = CANVAS_URL.rstrip("/") + "/calendar#view_name=agenda"
+    # Read BOTH sources, but SEQUENTIALLY on ONE page/session. Reading two pages CONCURRENTLY in the
+    # same authenticated context raced Canvas's session (a Set-Cookie / CSRF rotation on one response
+    # invalidated the other in-flight read) and BOTH came back empty on the REAL site, even though
+    # the stand-in tolerated it. The original sequential read worked; its only problem was the
+    # networkidle dead-wait, already removed — so sequential + the fast selector waits is both
+    # correct AND ~2-3s. Read-only throughout. Per-source URL/title/char-count is logged, and the
+    # full captured text of each source is dumped to _CANVAS_DEBUG so the real scrape is observable.
+
+    # --- SOURCE 1: dashboard To Do / Coming Up ---
+    dash_res = await _read_dash_region(page)
+    if "error" in dash_res:                      # the dashboard navigation itself failed -> honest fail
+        await _emit("read_canvas", CANVAS_URL, f"FAIL {dash_res['error']}")
+        return {"ok": False, "error": dash_res["error"], "url": CANVAS_URL}
+    title = dash_res.get("title", "")
+    if dash_res.get("needs_login"):
+        # Capture WHAT it landed on and tailor the honest message: no saved auth -> log in; auth
+        # present but still bounced -> the session expired, refresh it. Never a fabricated list.
+        landed = dash_res.get("url", CANVAS_URL)
+        await _emit("read_canvas", landed, f"needs login (auth_cookies={injected}) landed={title!r}")
         msg = ("Canvas needs a login first — run scripts/canvas_login.py, log in once, then ask again."
                if injected == 0 else
                "Canvas logged me out (the saved session expired). Re-run scripts/canvas_login.py to "
                "refresh it, then ask again.")
-        return {"ok": False, "needs_login": True, "landed_title": title, "landed_url": page.url, "error": msg}
-    # Logged in. Canvas hydrates async — WAIT for the To Do / Coming Up content to render, then read
-    # that sidebar region (the sparse card-dashboard main is why it only saw "Dashboard" before).
-    dash_hit = await _wait_for_render(page, _DASH_CONTENT)
-    dash = await _canvas_text(page)
-    # The dated "what's due" list lives in the calendar AGENDA view — navigate there explicitly
-    # (URL hash sets the view; still read-only, no clicks) and read it too.
-    agenda, agenda_hit, agenda_url = "", None, CANVAS_URL.rstrip("/") + "/calendar#view_name=agenda"
-    try:
-        await page.goto(agenda_url, wait_until="domcontentloaded", timeout=30000)
-        agenda_hit = await _wait_for_render(page, _AGENDA_CONTENT)
-        agenda = await _canvas_text(page)
-    except Exception as e:
-        print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)
-    parts = []
-    if dash.strip():
-        parts.append("DASHBOARD — To Do / Coming Up:\n" + dash[:_CANVAS_MAX // 2])
-    if agenda.strip():
-        parts.append("CALENDAR AGENDA — upcoming items by date:\n" + agenda[:_CANVAS_MAX // 2])
-    text = ("\n\n".join(parts))[:_CANVAS_MAX]
-    region = f"{CANVAS_URL} (dashboard, waited={dash_hit or 'settle'}) + /calendar#agenda (waited={agenda_hit or 'settle'})"
+        return {"ok": False, "needs_login": True, "landed_title": title, "landed_url": landed, "error": msg}
+    dash, dash_hit = dash_res.get("text", ""), dash_res.get("hit")
+    dash_url = dash_res.get("url", CANVAS_URL)
+    await _emit("read_canvas:dashboard", dash_url,
+                f"title={title!r} chars={len(dash)} waited={dash_hit or 'settle'}")
+
+    # --- SOURCE 2: calendar agenda (SAME page, navigated AFTER the dashboard read finished) ---
+    agenda_res = await _read_agenda_region(page, agenda_url)
+    agenda, agenda_hit = agenda_res.get("text", ""), agenda_res.get("hit")
+    agenda_landed, agenda_title = agenda_res.get("url", agenda_url), agenda_res.get("title", "")
+    await _emit("read_canvas:agenda", agenda_landed,
+                f"title={agenda_title!r} chars={len(agenda)} waited={agenda_hit or 'settle'}")
+
+    # Full-text dump of BOTH raw sources (pre-merge) so the real scrape is visible, not inferred.
+    _debug_dump([("SOURCE 1: DASHBOARD", dash_url, title, dash),
+                 ("SOURCE 2: CALENDAR AGENDA", agenda_landed, agenda_title, agenda)])
+
+    text = _merge_canvas(dash, agenda)           # both sources, deduped at the line level
+    region = (f"{CANVAS_URL} (dashboard, waited={dash_hit or 'settle'}) "
+              f"+ /calendar#agenda (waited={agenda_hit or 'settle'}) [sequential, both read]")
     # Honest "empty vs failed": we loaded + waited; if there's genuinely almost no content, say so
     # (the smart brain will tell Nate nothing's due) rather than pretend it failed.
     sparse = len(text.strip()) < 60
-    await _emit("read_canvas", region, f"ok dash={len(dash)} agenda={len(agenda)} chars sparse={sparse}")
+    await _emit("read_canvas", region,
+                f"ok dash={len(dash)} agenda={len(agenda)} merged={len(text)} chars sparse={sparse}")
     return {"ok": True, "url": region, "title": title, "text": text,
             "regions": {"dashboard_chars": len(dash), "agenda_chars": len(agenda)}, "sparse": sparse}
 
