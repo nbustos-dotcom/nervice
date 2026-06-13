@@ -49,7 +49,7 @@ SILERO_SPEECH_PROB = 0.5     # per-window speech-probability threshold
 SILERO_MIN_SPEECH_MS = 200   # contains_speech(): sustained speech needed to accept a received clip
 # Low-confidence STT gate (whisper metrics) — a second net behind Silero on the API clip path.
 NO_SPEECH_DROP = 0.85        # whisper no_speech_prob >= this -> drop as non-speech
-LOGPROB_DROP = -1.2          # whisper avg_logprob   <= this -> drop as too unconfident
+LOGPROB_DROP = -1.0          # whisper avg_logprob   <= this -> drop as too unconfident (tightened)
 INTER_SENTENCE_PAUSE_MS = 90  # trailing silence per synthesized sentence -> natural pacing
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -444,6 +444,10 @@ _VOICE_JUNK_PHRASES = {
     "thanks for watching", "thanks for watching the video", "please subscribe", "subscribe",
     "like and subscribe", "you know", "i mean", "bye bye", "okay bye", "see you", "see you next time",
 }
+# Repeated hum / mumble: any run of m/h sounds ("mmm", "hmm", "mhm", "hm", "mm hmm" ...). Whisper
+# emits a confident-LOOKING mumble that the fixed filler set can't enumerate; matched per word
+# (after stripping punctuation) so "Mmm. Mmm." is caught. No real English word is only m's and h's.
+_MUMBLE = re.compile(r"^[mh]+$")
 
 
 def is_junk_transcript(text: str, *, no_speech_prob: float | None = None,
@@ -466,10 +470,11 @@ def is_junk_transcript(text: str, *, no_speech_prob: float | None = None,
         return True
     if not re.search(r"[a-z0-9]", s):  # punctuation/symbol-only ("...", "?!", "-")
         return True
-    words = s.split()
+    words = [w.strip(".,!?;:'\"-") for w in s.split()]   # per-word punctuation off ("mmm." -> "mmm")
+    words = [w for w in words if w]
     if len(s) < 3:                     # too short and not a known command
         return True
-    if words and all(w in _VOICE_FILLER for w in words):   # every word is filler (1+ words)
+    if words and all(w in _VOICE_FILLER or _MUMBLE.match(w) for w in words):  # all filler / humming
         return True
     return False
 
