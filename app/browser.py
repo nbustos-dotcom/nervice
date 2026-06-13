@@ -305,6 +305,65 @@ async def _canvas_text(page) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+# The agenda EVENT LIST only — the dated day/event rows — NOT the whole calendar body (reading
+# #content/body pulled in the mini-month grid + toolbar AND the list TWICE, which confused the
+# synthesis). Each row is collapsed to one line and deduped by text, so Canvas's repeated/overlapping
+# render of the list becomes a clean, dated, deduped item list. Per-item "Open event menu" chrome is
+# stripped. Returns '' if no agenda rows are found (caller falls back to the broad reader).
+_AGENDA_TEXT_JS = """() => {
+  const pick = ['.agenda-wrapper', '#agenda-view', '.fc-listView', '.fc-list'];
+  let box = null;
+  for (const s of pick) { const e = document.querySelector(s);
+    if (e && (e.innerText||'').trim().length > 20) { box = e; break; } }
+  const scope = box || document;
+  const rows = scope.querySelectorAll('.agenda-day, .agenda-event__item, .fc-list-day, .fc-list-heading, .fc-list-item, .fc-list-event');
+  if (!rows.length) return '';
+  const seen = new Set(); const out = [];
+  for (const n of rows) {
+    let t = (n.innerText || '').replace(/\\s+/g,' ').trim();
+    t = t.replace(/\\s*open event menu( for .*)?$/i, '').trim();   // drop the per-item kebab-menu label
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;                                     // dedupe repeated event blocks
+    seen.add(k); out.push(t);
+  }
+  return out.join('\\n');
+}"""
+
+# Calendar UI chrome / month-grid lines to drop from the FALLBACK (broad-read) agenda text. Anchored
+# whole-line (^(?:...)$) so it only kills unmistakable UI rows, never an assignment whose title merely
+# starts with one of these words.
+_CHROME_LINE = re.compile(
+    r"^(?:open event menu\b.*|create new event\b.*|add event\b.*|change view\b.*|"
+    r"select calendars?\b.*|find appointment\b.*|calendars?:?|"
+    r"previous(?: month| week| day)?|next(?: month| week| day)?|today|go to today|"
+    r"agenda|week|month|day|"
+    r"(?:su|mo|tu|we|th|fr|sa)(?:\s+(?:su|mo|tu|we|th|fr|sa)){3,}|"   # weekday-abbrev header row
+    r"\d{1,2}(?:\s+\d{1,2}){4,})$", re.I)                            # a row of month-grid day numbers
+
+
+def _strip_chrome(text: str) -> str:
+    """Drop calendar UI chrome + month-grid noise from broad-read agenda text. Line-by-line, NO
+    dedupe (broad text is multi-line per event, so deduping lines would wrongly collapse repeated
+    'Not Completed' rows). The structured reader above already excludes this noise; this is the net."""
+    out = [s for ln in (text or "").splitlines() if (s := ln.strip()) and not _CHROME_LINE.match(s)]
+    return "\n".join(out).strip()
+
+
+async def _agenda_text(page) -> str:
+    """Clean agenda EVENT-LIST text for the smart brain: the dated rows only, deduped, chrome-free.
+    Structured read first (clean + deduped); falls back to the broad reader + chrome strip if the
+    agenda-row selectors don't match, so items are never lost."""
+    try:
+        text = await page.evaluate(_AGENDA_TEXT_JS)
+    except Exception:
+        text = ""
+    if (text or "").strip():
+        return text.strip()[:_CANVAS_MAX // 2]
+    broad = await _canvas_text(page)                 # safety net: the broad reader that already worked
+    return _strip_chrome(broad)[:_CANVAS_MAX // 2]
+
+
 async def _read_dash_region(page) -> dict:
     """Open the Canvas dashboard (read-only), detect a login wall, wait for the To Do / Coming Up
     content to hydrate, return its text. Shape: {error} | {needs_login,title,url} | {text,hit,title,url}."""
@@ -327,7 +386,7 @@ async def _read_agenda_region(page, url) -> dict:
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         # Wait for the AGENDA EVENTS to hydrate (not just the shell) — don't read while "Loading".
         state = await _wait_for_agenda(page)
-        return {"text": await _canvas_text(page), "hit": f"agenda:{state}",
+        return {"text": await _agenda_text(page), "hit": f"agenda:{state}",
                 "url": page.url, "title": (await page.title()) or ""}
     except Exception as e:
         print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)

@@ -145,15 +145,23 @@ _CANVAS_GROUND = (
     "isn't in the text, say so plainly. NEVER invent or guess an assignment, a date, or a grade. "
     "Canvas labels courses by code (like CS2321 or SAT2343); if the page shows a course's real "
     "title you may use the natural name (\"your data structures class\"), but if only the code "
-    "appears, use the code as-is — never guess what a code stands for.")
-# SPOKEN: short, lead with the most urgent, name 1-3 due soonest, offer the rest. A table read aloud
-# was the failure mode — voice gets flowing sentences only, no markdown/tables/lists.
+    "appears, use the code as-is — never guess what a code stands for. Items may be marked completed "
+    "or not completed — when Nate asks what's due, focus on what is NOT done yet; you can note in "
+    "passing how many are already done, but don't dwell on completed work.")
+# SPOKEN: lead with the real SCOPE. The earlier "name 1-3, offer the rest" rule backfired when many
+# items share one due date — the model named one and buried the others. So: when several are due the
+# same day/window, STATE THE COUNT first and name them compactly in one flowing sentence. Still no
+# markdown/tables/lists in the spoken stream, but it must convey the true scope.
 _CANVAS_VOICE = (
-    "\n\nThis answer will be SPOKEN ALOUD, so keep it SHORT and natural: flowing sentences only — "
-    "NO markdown, NO tables, NO bullet points, NO numbered lists. Lead with the single most urgent "
-    "thing, then name just the one to three items due soonest, with their due dates, in plain "
-    "speech. Do NOT read out every assignment or announcement — after the top few, offer the rest "
-    "by asking if he wants the full list. If nothing is coming up, just say so in a sentence.")
+    "\n\nThis answer will be SPOKEN ALOUD: flowing sentences only — NO markdown, NO tables, NO "
+    "bullet points, NO numbered lists. Count what's still NOT done and lead with that SCOPE. When "
+    "several items are due the same day or within the window Nate asked about, STATE THE COUNT "
+    "first, then name them compactly in one sentence — e.g. \"You've got six things due tomorrow: "
+    "Lab 9, Quiz 4, Subnet Quiz 7, Assignment 6, and two more — want me to run through all of "
+    "them?\". Do NOT bury the count by naming only one item. If there are a lot, name the first "
+    "several and say how many remain, then offer the full list; if there are only one or two, just "
+    "name them with their due dates. For \"what's due this week / tomorrow,\" getting the COUNT "
+    "right matters more than being brief. If nothing's coming up, say so in a sentence.")
 # ON-SCREEN: fuller is fine here (this is the HUD transcript, not the voice) — a short list/table is
 # acceptable; still lead with what's urgent and only what's actually on the page.
 _CANVAS_SCREEN = (
