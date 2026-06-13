@@ -26,12 +26,16 @@ import sys
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _PROFILE_DIR = _ROOT / "data" / "nervice_browser_profile"
+# Saved login (Playwright storage_state) written by scripts/canvas_login.py. It captures the SESSION
+# cookies (MTU's CAS TGC, Canvas canvas_session) that a persistent profile dir does NOT restore on a
+# fresh launch — re-injected before each Canvas read so the session actually carries. Gitignored.
+_AUTH_STATE = _ROOT / "data" / "nervice_browser_auth.json"
 _AUDIT_LOG = _ROOT / "logs" / "browser_actions.log"
 _MAX_TEXT = 8000   # cap the read text so a huge page can't blow the LLM context
 
 # Nate fills this in with his school's Canvas dashboard URL, e.g. "https://<school>.instructure.com".
 # Left empty on purpose: read_canvas() returns an honest "not configured" message until it's set.
-CANVAS_URL = ""
+CANVAS_URL = "https://mtu.instructure.com"
 
 # Read-only by construction: there is NO click/type/fill/submit primitive in this module. A caller
 # that asks for a page ACTION gets this honest refusal — acting is a later phase.
@@ -96,6 +100,24 @@ def is_open() -> bool:
 
 async def _current_page(ctx):
     return ctx.pages[-1] if ctx.pages else await ctx.new_page()
+
+
+async def _inject_auth(ctx) -> int:
+    """Re-inject the saved login captured by scripts/canvas_login.py (Playwright storage_state),
+    which includes the SESSION cookies the persistent profile can't restore. Idempotent — called
+    before each Canvas read, so a fresh re-login is picked up without a restart. Returns the cookie
+    count injected (0 = no saved auth yet)."""
+    if not _AUTH_STATE.exists():
+        return 0
+    try:
+        import json
+        cookies = json.loads(_AUTH_STATE.read_text(encoding="utf-8")).get("cookies", [])
+        if cookies:
+            await ctx.add_cookies(cookies)
+        return len(cookies)
+    except Exception as e:
+        print(f"[browser] auth inject failed: {repr(e)[:80]}", file=sys.stderr)
+        return 0
 
 
 def _https_only(url: str) -> str | None:
@@ -174,18 +196,25 @@ async def read_canvas() -> dict:
         await _emit("read_canvas", "(unset)", "CANVAS_URL not configured")
         return {"ok": False, "error": "Canvas isn't set up yet — CANVAS_URL is blank in app/browser.py. "
                                       "See the Canvas setup steps."}
+    ctx = await _ensure_context()
+    injected = await _inject_auth(ctx)          # re-add saved session cookies BEFORE navigating
     opened = await open_page(CANVAS_URL)
     if not opened["ok"]:
         return opened
     page = await _current_page(_context)
+    title = (await page.title()) or ""
     if await _looks_like_login(page):
-        await _emit("read_canvas", page.url, "needs login")
-        return {"ok": False, "needs_login": True,
-                "error": "Canvas needs a login first. Log in once inside Nervice's browser "
-                         "(run scripts/canvas_login.py), then ask again — the session will stick."}
+        # Capture WHAT it landed on (point-4 diagnostics) and tailor the honest message: no saved
+        # auth -> log in; auth present but still bounced -> the session expired, refresh it.
+        await _emit("read_canvas", page.url, f"needs login (auth_cookies={injected}) landed={title!r}")
+        msg = ("Canvas needs a login first — run scripts/canvas_login.py, log in once, then ask again."
+               if injected == 0 else
+               "Canvas logged me out (the saved session expired). Re-run scripts/canvas_login.py to "
+               "refresh it, then ask again.")
+        return {"ok": False, "needs_login": True, "landed_title": title, "landed_url": page.url, "error": msg}
     text = await _readable(page)
     await _emit("read_canvas", page.url, f"ok {len(text)} chars")
-    return {"ok": True, "url": page.url, "text": text}
+    return {"ok": True, "url": page.url, "title": title, "text": text}
 
 
 async def close_browser() -> dict:
