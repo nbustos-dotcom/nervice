@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.persona import PERSONA
+from app.persona import PERSONA, SPOKEN_STYLE
 from app.retrieval import retrieve
 from app.agent import current_rung
 from app.turnlog import log_turn
@@ -56,7 +56,7 @@ VOICE_ADDENDUM = ("VOICE MODE: your reply will be spoken aloud. Flowing conversa
                   "only — never bullet points, numbered lists, markdown, or headers. "
                   "Lead with the answer and give the SHORTEST complete reply — one or two sentences "
                   "is ideal; 2-4 is the ceiling, not a target, so don't pad to fill it. Go longer "
-                  "only when Nate explicitly asks to go deep.")
+                  "only when Nate explicitly asks to go deep.\n\n" + SPOKEN_STYLE)
 
 
 async def build_system_prompt(user_id, user_message, voice_mode: bool = False):

@@ -50,7 +50,12 @@ SILERO_MIN_SPEECH_MS = 200   # contains_speech(): sustained speech needed to acc
 # Low-confidence STT gate (whisper metrics) — a second net behind Silero on the API clip path.
 NO_SPEECH_DROP = 0.85        # whisper no_speech_prob >= this -> drop as non-speech
 LOGPROB_DROP = -1.0          # whisper avg_logprob   <= this -> drop as too unconfident (tightened)
-INTER_SENTENCE_PAUSE_MS = 90  # trailing silence per synthesized sentence -> natural pacing
+# Structure-aware trailing pause per synthesized chunk (sized by its terminal punctuation): a fuller
+# breath after a full sentence, a lighter beat after a clause, minimal after a fragment. Deterministic,
+# free, NO speed change — long explanations breathe between sentences; short replies don't drag.
+SENTENCE_PAUSE_MS = 150   # after . ? !
+CLAUSE_PAUSE_MS = 90      # after , ; :
+TAIL_PAUSE_MS = 50        # no terminal punctuation (fragment / streamed tail)
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _KOKORO_MODEL = _ROOT / "models" / "kokoro" / "kokoro-v1.0.onnx"
@@ -189,16 +194,37 @@ def _silero_step(chunk_f32, state, context):
     return float(np.asarray(out).reshape(-1)[0]), state, inp[:, -SILERO_CONTEXT:]
 
 
-# A short trailing silence on every synthesized sentence: a natural inter-sentence pause that also
-# guarantees click-free joins when sentences are concatenated (synth_to_pcm) or streamed back-to-back
-# (speak / the WS per-sentence pipeline). Centralized here so every TTS path benefits.
-_PAUSE_SAMPLES = np.zeros(int(TTS_RATE * INTER_SENTENCE_PAUSE_MS / 1000), dtype=np.int16)
+# A trailing silence on every synthesized chunk: a natural pause that also guarantees click-free
+# joins when chunks are concatenated (synth_to_pcm) or streamed back-to-back (speak / the WS
+# pipeline). STRUCTURE-AWARE — the chunk's terminal punctuation picks the length, so a long
+# explanation breathes between sentences while a short reply gets only a light tail. Centralized
+# here so every TTS path benefits; no speed change anywhere.
+def _silence(ms: int):
+    return np.zeros(int(TTS_RATE * ms / 1000), dtype=np.int16)
+
+
+_PAUSE_SENTENCE = _silence(SENTENCE_PAUSE_MS)
+_PAUSE_CLAUSE = _silence(CLAUSE_PAUSE_MS)
+_PAUSE_TAIL = _silence(TAIL_PAUSE_MS)
+
+
+def _pause_for(text: str):
+    """Pick the trailing pause by the chunk's last meaningful character: a full breath after a
+    sentence (. ? !), a lighter beat after a clause (, ; :), minimal otherwise. (Em/en dashes were
+    already normalized to commas upstream, so they read as clause beats.)"""
+    t = text.rstrip()
+    end = t[-1] if t else ""
+    if end in ".!?":
+        return _PAUSE_SENTENCE
+    if end in ",;:":
+        return _PAUSE_CLAUSE
+    return _PAUSE_TAIL
 
 
 def _synth(text: str):
     audio, sr = _synth_raw(text)
-    if audio.size and _PAUSE_SAMPLES.size:
-        audio = np.concatenate([audio, _PAUSE_SAMPLES])
+    if audio.size:
+        audio = np.concatenate([audio, _pause_for(text)])
     return audio, sr
 
 
@@ -295,7 +321,8 @@ _NORM_AMP = re.compile(r"\s*&\s*")                   # &  -> and
 _NORM_PCT = re.compile(r"\s*%")                      # %  -> percent
 _NORM_INWORD_HYPHEN = re.compile(r"(?<=\w)-(?=\w)")  # well-known -> well known ; 2-3 -> 2 3
 _NORM_INWORD_SLASH = re.compile(r"(?<=\w)/(?=\w)")   # and/or -> and or ; TCP/IP -> TCP IP
-_NORM_EMDASH = re.compile(r"\s*[—–]\s*")             # em/en dash -> pause
+_NORM_UNIDASH = re.compile(r"[‐‑−]")   # hyphen / non-breaking hyphen / minus -> ASCII -
+_NORM_EMDASH = re.compile(r"\s*[‒–—―]\s*")   # figure/en/em dash, horizontal bar -> pause
 _NORM_SEP = re.compile(r"\s*[/|•·▪◦‣⁃]\s*|\s+-\s+")   # slash/pipe/bullet or " - " separator -> pause
 _NORM_HYPHEN_LEFT = re.compile(r"-")                 # any leftover hyphen -> space (never "dash")
 _NORM_WS = re.compile(r"[ \t]{2,}")
@@ -307,6 +334,7 @@ _NORM_LEAD = re.compile(r"^[\s,;:.]+")               # no leading pause/punctuat
 def _normalize_for_speech(text: str) -> str:
     """Convert symbols a TTS engine would read by name into spoken words or a short pause. SPOKEN
     stream only (called from _clean_for_speech) — never alters the HUD transcript."""
+    text = _NORM_UNIDASH.sub("-", text)            # fold Unicode hyphens/minus to ASCII (models emit ‑)
     text = _NORM_AMP.sub(" and ", text)            # R&D -> R and D  (before separators)
     text = _NORM_PCT.sub(" percent", text)         # 50% -> 50 percent
     text = _NORM_INWORD_HYPHEN.sub(" ", text)      # well-known -> well known
@@ -321,6 +349,75 @@ def _normalize_for_speech(text: str) -> str:
     return text.strip()
 
 
+# --- screen-only tokens: commit hashes / file paths / long IDs belong on Nate's SCREEN, not read
+# aloud. Dropped from the SPOKEN stream only (the HUD transcript keeps them verbatim). The persona
+# is told to place them parenthetically/trailing so the line still reads once they're gone. Run
+# BEFORE symbol normalization, while a path's slashes are still intact for detection.
+_SCREEN_PAREN = re.compile(r"\s*\((?:[^)]*[\\/][^)]*|\s*(?=[0-9a-f]*\d)[0-9a-f]{7,}\s*)\)")  # (path)/(hash)
+_SCREEN_PATH = re.compile(r"\b[\w.\-]+(?:[\\/][\w.\-]+)*[\\/][\w\-]+\.[A-Za-z]{1,5}\b")        # bare path w/ ext
+_SCREEN_HASH = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{7,}\b")                                  # bare commit hash
+
+
+def _strip_screen_only(text: str) -> str:
+    """Drop tokens that are exact-on-screen but should never be read aloud: parenthetical hash/path
+    notes, bare file paths (-> 'a file'), and bare commit hashes. Spoken stream only — the HUD text
+    is never run through this. A 7+ hex run must include a digit, so real words aren't mistaken for
+    a hash; bare-path detection requires a file extension, so 'and/or' and 'TCP/IP' are left alone."""
+    text = _SCREEN_PAREN.sub("", text)         # "(a918e75)" / "(docs/x.py)" -> gone
+    text = _SCREEN_PATH.sub(" a file ", text)  # bare "app/voice.py" -> "a file"
+    text = _SCREEN_HASH.sub("", text)          # bare "a918e75" -> gone
+    return text
+
+
+# --- number / unit normalization backstop (spoken-only). Runs LAST in _clean_for_speech, AFTER
+# hashes/paths are stripped (screen-only) and symbols normalized — so a commit hash is already gone
+# and can never be read digit-by-digit. num2words output is de-hyphenated so it needs no second pass.
+try:
+    from num2words import num2words as _n2w_raw
+    _HAS_N2W = True
+except Exception:
+    _HAS_N2W = False
+
+_CURRENCY = re.compile(r"\$(\d+)(?:\.(\d{1,2}))?")
+_TIME = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
+_MPH = re.compile(r"\b(\d+)\s?mph\b", re.IGNORECASE)
+# Isolated number only: NOT glued to a letter, dot, colon, $, %, slash, or hyphen — so commit hashes,
+# IDs, version strings (4.2, 2.1.6, v3, 120b) and paths are left exactly as written (never expanded).
+_BARE_NUM = re.compile(r"(?<![\w.:$%/\\-])(\d+(?:\.\d+)?)(?![\w:%/\\-])(?!\.\d)")
+
+
+def _num_words(n):
+    return _n2w_raw(n).replace("-", " ").replace(",", "")
+
+
+def _normalize_numbers(text: str) -> str:
+    """Spoken-only backstop for numbers the persona phrasing missed: currency, clock times, mph, and
+    isolated bare numbers -> spoken words. Conservative: anything glued to letters/dots/IDs is left
+    as-is, and (hashes/paths already stripped) a commit hash is never reached. No-op without num2words."""
+    if not _HAS_N2W:
+        return text
+
+    def money(m):
+        whole, cents = int(m.group(1)), m.group(2)
+        out = _num_words(whole) + (" dollar" if whole == 1 else " dollars")
+        c = int((cents + "0")[:2]) if cents else 0
+        if c:
+            out += " and " + _num_words(c) + (" cent" if c == 1 else " cents")
+        return out
+
+    def clock(m):
+        h, mm = int(m.group(1)), int(m.group(2))
+        if mm == 0:
+            return f"{_num_words(h)} o'clock"
+        return f"{_num_words(h)} oh {_num_words(mm)}" if mm < 10 else f"{_num_words(h)} {_num_words(mm)}"
+
+    text = _CURRENCY.sub(money, text)
+    text = _TIME.sub(clock, text)
+    text = _MPH.sub(lambda m: f"{_num_words(int(m.group(1)))} miles per hour", text)
+    text = _BARE_NUM.sub(lambda m: _num_words(float(m.group(1)) if "." in m.group(1) else int(m.group(1))), text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
 def _clean_for_speech(text: str) -> str:
     # code blocks are not read aloud — replaced with a single spoken note
     text = _CODE_BLOCK.sub(" I've put the code on screen. ", text)
@@ -328,8 +425,10 @@ def _clean_for_speech(text: str) -> str:
     text = _INLINE_CODE.sub(lambda m: m.group(0).strip("`"), text)
     text = _MD_LINK.sub(r"\1", text)          # keep link text, drop the URL
     text = _BARE_URL.sub(" a link ", text)    # don't read raw URLs aloud
+    text = _strip_screen_only(text)           # hashes/paths/IDs: shown on screen, never spoken
     text = re.sub(r"[#*_>`]", "", text)        # strip markdown formatting (| is a pause, handled below)
-    return _normalize_for_speech(text)         # symbols -> spoken words / pauses (spoken stream only)
+    text = _normalize_for_speech(text)         # symbols -> spoken words / pauses (spoken stream only)
+    return _normalize_numbers(text)            # numbers / currency / times / units -> spoken words
 
 
 _SYNTH_SENTINEL = object()

@@ -21,6 +21,7 @@ onnxruntime-gpu  # replaces the onnxruntime CPU dep so Kokoro runs on the CUDA E
 sounddevice
 webrtcvad-wheels   # VAD fallback only; Silero (below) is the primary ear
 silero-vad   # MIT VAD; install with --no-deps (we use ONLY its bundled ONNX via onnxruntime, no torch). app/voice.py loads models/silero/silero_vad.onnx if present, else this package's copy
+num2words   # LGPL; spoken-only number/currency normalization backstop in app/voice.py (pure-python, Windows-fine)
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
 nvidia-cuda-runtime-cu12
