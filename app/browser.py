@@ -31,6 +31,9 @@ _PROFILE_DIR = _ROOT / "data" / "nervice_browser_profile"
 # fresh launch — re-injected before each Canvas read so the session actually carries. Gitignored.
 _AUTH_STATE = _ROOT / "data" / "nervice_browser_auth.json"
 _AUDIT_LOG = _ROOT / "logs" / "browser_actions.log"
+# Full text of the LATEST Canvas scrape (both sources), overwritten each read. Lets us SEE exactly
+# what was scraped from the real authenticated site instead of inferring it. Read-only artifact.
+_CANVAS_DEBUG = _ROOT / "logs" / "canvas_last_read.log"
 _MAX_TEXT = 8000   # cap the read text so a huge page can't blow the LLM context
 
 # Nate fills this in with his school's Canvas dashboard URL, e.g. "https://<school>.instructure.com".
@@ -70,6 +73,21 @@ async def _emit(action: str, target: str, outcome: str) -> None:
             await cb(action, target, outcome)
         except Exception:
             pass
+
+
+def _debug_dump(sources) -> None:
+    """Write the FULL captured text of each Canvas source to _CANVAS_DEBUG (overwritten each read),
+    so a real-site read can be inspected directly. `sources` = [(label, url, title, text), ...]."""
+    try:
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        _CANVAS_DEBUG.parent.mkdir(exist_ok=True)
+        with open(_CANVAS_DEBUG, "w", encoding="utf-8") as f:
+            f.write(f"# Nervice read_canvas debug — {ts}\n")
+            for label, url, title, text in sources:
+                f.write(f"\n=== {label} ===\nurl:   {url}\ntitle: {title}\nchars: {len(text)}\n"
+                        f"----- text -----\n{text}\n")
+    except Exception:
+        pass
 
 
 async def _ensure_context():
@@ -269,10 +287,11 @@ async def _read_agenda_region(page, url) -> dict:
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         hit = await _wait_for_render(page, _AGENDA_CONTENT)
-        return {"text": await _canvas_text(page), "hit": hit}
+        return {"text": await _canvas_text(page), "hit": hit,
+                "url": page.url, "title": (await page.title()) or ""}
     except Exception as e:
         print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)
-        return {"text": "", "hit": None}
+        return {"text": "", "hit": None, "url": url, "title": ""}
 
 
 def _norm_line(s: str) -> str:
@@ -321,20 +340,18 @@ async def read_canvas() -> dict:
                                       "See the Canvas setup steps."}
     ctx = await _ensure_context()
     injected = await _inject_auth(ctx)          # re-add saved session cookies BEFORE navigating
+    page = await _current_page(ctx)
     agenda_url = CANVAS_URL.rstrip("/") + "/calendar#view_name=agenda"
-    # Read BOTH sources EVERY time. The dashboard To Do / Coming Up pane shows only SOME courses'
-    # items; the rest live only in the calendar agenda, so skipping it dropped most of what's due.
-    # Two pages in the SAME (shared-session) context, navigated CONCURRENTLY via gather, so this is
-    # ~one read's wall-time instead of two now that the networkidle dead-wait is gone. Read-only.
-    dash_page = await _current_page(ctx)
-    agenda_page = await ctx.new_page()
-    dash_res, agenda_res = await asyncio.gather(
-        _read_dash_region(dash_page),
-        _read_agenda_region(agenda_page, agenda_url))
-    try:
-        await agenda_page.close()               # don't accumulate tabs across reads; keep the dash tab
-    except Exception:
-        pass
+    # Read BOTH sources, but SEQUENTIALLY on ONE page/session. Reading two pages CONCURRENTLY in the
+    # same authenticated context raced Canvas's session (a Set-Cookie / CSRF rotation on one response
+    # invalidated the other in-flight read) and BOTH came back empty on the REAL site, even though
+    # the stand-in tolerated it. The original sequential read worked; its only problem was the
+    # networkidle dead-wait, already removed — so sequential + the fast selector waits is both
+    # correct AND ~2-3s. Read-only throughout. Per-source URL/title/char-count is logged, and the
+    # full captured text of each source is dumped to _CANVAS_DEBUG so the real scrape is observable.
+
+    # --- SOURCE 1: dashboard To Do / Coming Up ---
+    dash_res = await _read_dash_region(page)
     if "error" in dash_res:                      # the dashboard navigation itself failed -> honest fail
         await _emit("read_canvas", CANVAS_URL, f"FAIL {dash_res['error']}")
         return {"ok": False, "error": dash_res["error"], "url": CANVAS_URL}
@@ -350,10 +367,24 @@ async def read_canvas() -> dict:
                "refresh it, then ask again.")
         return {"ok": False, "needs_login": True, "landed_title": title, "landed_url": landed, "error": msg}
     dash, dash_hit = dash_res.get("text", ""), dash_res.get("hit")
+    dash_url = dash_res.get("url", CANVAS_URL)
+    await _emit("read_canvas:dashboard", dash_url,
+                f"title={title!r} chars={len(dash)} waited={dash_hit or 'settle'}")
+
+    # --- SOURCE 2: calendar agenda (SAME page, navigated AFTER the dashboard read finished) ---
+    agenda_res = await _read_agenda_region(page, agenda_url)
     agenda, agenda_hit = agenda_res.get("text", ""), agenda_res.get("hit")
+    agenda_landed, agenda_title = agenda_res.get("url", agenda_url), agenda_res.get("title", "")
+    await _emit("read_canvas:agenda", agenda_landed,
+                f"title={agenda_title!r} chars={len(agenda)} waited={agenda_hit or 'settle'}")
+
+    # Full-text dump of BOTH raw sources (pre-merge) so the real scrape is visible, not inferred.
+    _debug_dump([("SOURCE 1: DASHBOARD", dash_url, title, dash),
+                 ("SOURCE 2: CALENDAR AGENDA", agenda_landed, agenda_title, agenda)])
+
     text = _merge_canvas(dash, agenda)           # both sources, deduped at the line level
     region = (f"{CANVAS_URL} (dashboard, waited={dash_hit or 'settle'}) "
-              f"+ /calendar#agenda (waited={agenda_hit or 'settle'}) [parallel, both read]")
+              f"+ /calendar#agenda (waited={agenda_hit or 'settle'}) [sequential, both read]")
     # Honest "empty vs failed": we loaded + waited; if there's genuinely almost no content, say so
     # (the smart brain will tell Nate nothing's due) rather than pretend it failed.
     sparse = len(text.strip()) < 60
