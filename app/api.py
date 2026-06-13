@@ -722,23 +722,24 @@ async def voice(audio: UploadFile = File(...), conversation_id: str | None = For
     try:
         tf.write(data)
         tf.close()
-        transcript = v.transcribe_file(tf.name)   # av decodes webm/opus/ogg/wav — no ffmpeg binary
+        clip = v.transcribe_clip(tf.name)   # decode -> Silero VAD gate -> STT with confidence
     finally:
         os.unlink(tf.name)
     stt_s = time.time() - t0
+    transcript = clip["text"]
 
     cid = conversation_id or str(uuid.uuid4())
-    if not transcript.strip():
-        print(f"[voice-timing] stt={stt_s:.2f}s llm=0 tts=0 total={time.time()-t_total:.2f}s (no speech)",
-              file=sys.stderr)
-        return {"transcript": "", "reply": "(no speech detected)", "conversation_id": cid, "audio_wav_base64": ""}
-
-    if v.is_junk_transcript(transcript):
-        # junk (stray pronoun/filler/half-word) — speak a brief nudge; NO turn, NO memory, NO ladder.
-        nudge = "Didn't catch that — say it again?"
-        print(f"[voice junk-gate] transcript={transcript!r} -> nudge (no turn)", file=sys.stderr)
-        return {"transcript": transcript, "reply": nudge, "conversation_id": cid,
-                "audio_wav_base64": v.synth_to_wav_b64(nudge)}
+    # Silent drop (NO turn, NO memory, NO spoken nudge) when Silero hears no speech (room noise /
+    # silence the browser VAD let through) or the transcript is junk (empty / punct-only / filler /
+    # low-confidence). The phone just gets an empty reply — the prior no-speech response shape.
+    if not clip["speech"]:
+        print(f"[voice vad-gate] silero: no speech -> silent drop "
+              f"(stt={stt_s:.2f}s total={time.time()-t_total:.2f}s)", file=sys.stderr)
+        return {"transcript": "", "reply": "", "conversation_id": cid, "audio_wav_base64": ""}
+    if clip["junk"]:
+        print(f"[voice junk-gate] transcript={transcript!r} nsp={clip['no_speech_prob']:.2f} "
+              f"alp={clip['avg_logprob']:.2f} -> silent drop (no turn)", file=sys.stderr)
+        return {"transcript": transcript, "reply": "", "conversation_id": cid, "audio_wav_base64": ""}
 
     window = _windows.setdefault(cid, [])
     t0 = time.time()
@@ -842,23 +843,23 @@ async def ws_voice(ws: WebSocket):
             try:
                 tf.write(data)
                 tf.close()
-                transcript = await asyncio.to_thread(v.transcribe_file, tf.name)
+                clip = await asyncio.to_thread(v.transcribe_clip, tf.name)
             finally:
                 os.unlink(tf.name)
-            await send({"type": "transcript", "text": transcript})
-            if not transcript.strip():
+            # Silent drop (no transcript bubble, no spoken nudge, NO turn / memory, window untouched)
+            # when Silero hears no speech (room noise the browser VAD let through) or the transcript
+            # is junk — the client finalizes cleanly on a done/reply:"" frame (the prior no-speech path).
+            if not clip["speech"]:
+                print("[voice vad-gate] silero: no speech -> silent drop", file=sys.stderr)
                 await send({"type": "done", "reply": ""})
                 continue
-            if v.is_junk_transcript(transcript):
-                # junk — speak a brief nudge; NO turn, NO memory, NO ladder, window untouched.
-                nudge = "Didn't catch that — say it again?"
-                print(f"[voice junk-gate] transcript={transcript!r} -> nudge (no turn)", file=sys.stderr)
-                await send({"type": "text", "text": nudge})
-                b64 = await asyncio.to_thread(v.synth_to_wav_b64, nudge)
-                if b64:
-                    await send({"type": "audio", "wav_base64": b64})
-                await send({"type": "done", "reply": nudge})
+            transcript = clip["text"]
+            if clip["junk"]:
+                print(f"[voice junk-gate] transcript={transcript!r} nsp={clip['no_speech_prob']:.2f} "
+                      f"alp={clip['avg_logprob']:.2f} -> silent drop (no turn)", file=sys.stderr)
+                await send({"type": "done", "reply": ""})
                 continue
+            await send({"type": "transcript", "text": transcript})
             window = _windows.setdefault(cid, [])
             reply = await stream_reply(USER, transcript, window, send, voice=True,
                                        conversation_id=cid)

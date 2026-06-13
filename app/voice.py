@@ -39,15 +39,24 @@ def _register_cuda_dlls() -> None:
 # Nothing audio-related leaves the box; only the final TEXT goes to the existing pipeline,
 # exactly like typed input. No audio files are written; PCM lives in memory only.
 
-SAMPLE_RATE = 16000          # whisper + webrtcvad rate
-VAD_FRAME_MS = 30            # webrtcvad accepts 10/20/30ms frames
-_FRAME_LEN = SAMPLE_RATE * VAD_FRAME_MS // 1000   # 480 samples / 30ms
-_VAD = webrtcvad.Vad(2)      # aggressiveness 2 (0 lax .. 3 strict)
+SAMPLE_RATE = 16000          # whisper + Silero VAD rate
+
+# --- Silero VAD ("ears") replaces the old webrtcvad gate. Free, MIT, runs on the existing
+# onnxruntime (no torch). webrtcvad stays ONLY as a fallback if the Silero model is ever missing.
+SILERO_WINDOW = 512          # Silero's fixed 16k window (32ms)
+SILERO_CONTEXT = 64          # Silero v5 prepends this many prior samples to each window (16k)
+SILERO_SPEECH_PROB = 0.5     # per-window speech-probability threshold
+SILERO_MIN_SPEECH_MS = 200   # contains_speech(): sustained speech needed to accept a received clip
+# Low-confidence STT gate (whisper metrics) — a second net behind Silero on the API clip path.
+NO_SPEECH_DROP = 0.85        # whisper no_speech_prob >= this -> drop as non-speech
+LOGPROB_DROP = -1.2          # whisper avg_logprob   <= this -> drop as too unconfident
+INTER_SENTENCE_PAUSE_MS = 90  # trailing silence per synthesized sentence -> natural pacing
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _KOKORO_MODEL = _ROOT / "models" / "kokoro" / "kokoro-v1.0.onnx"
 _KOKORO_VOICES = _ROOT / "models" / "kokoro" / "voices-v1.0.bin"
 _PIPER_VOICE = _ROOT / "models" / "piper" / "en_US-ryan-high.onnx"
+_SILERO_MODEL = _ROOT / "models" / "silero" / "silero_vad.onnx"
 
 VOICE = "bm_george"   # Kokoro voice — swap here (e.g. am_adam, am_onyx, bm_george, bm_lewis)
 
@@ -134,39 +143,113 @@ def _load_tts():
         return synth, "piper/en_US-ryan-high", rate
 
 
-print("[voice] loading local models (STT + TTS)...", file=sys.stderr)
+def _load_silero():
+    """Silero VAD via onnxruntime (no torch). Prefer models/silero/silero_vad.onnx; fall back to the
+    pip silero-vad package's bundled model (located WITHOUT importing it — find_spec only). CPU EP:
+    the model is ~2MB, so leave the GPU for whisper/kokoro. Returns an InferenceSession, or None when
+    no model is found (callers then degrade to webrtcvad / a permissive gate)."""
+    import importlib.util
+    cands = [_SILERO_MODEL]
+    try:
+        spec = importlib.util.find_spec("silero_vad")
+        if spec and spec.submodule_search_locations:
+            cands.append(pathlib.Path(spec.submodule_search_locations[0]) / "data" / "silero_vad.onnx")
+    except Exception:
+        pass
+    path = next((p for p in cands if p.is_file()), None)
+    if path is None:
+        return None
+    import onnxruntime as ort
+    so = ort.SessionOptions()
+    so.log_severity_level = 3
+    return ort.InferenceSession(str(path), sess_options=so, providers=["CPUExecutionProvider"])
+
+
+print("[voice] loading local models (STT + TTS + VAD)...", file=sys.stderr)
 _t0 = time.time()
 _whisper, WHISPER_PATH = _load_whisper()
-_synth, TTS_ENGINE, TTS_RATE = _load_tts()
+_synth_raw, TTS_ENGINE, TTS_RATE = _load_tts()
+try:
+    _SILERO = _load_silero()
+except Exception as e:
+    print(f"[voice] silero load failed ({repr(e)[:80]}) — webrtcvad fallback", file=sys.stderr)
+    _SILERO = None
+VAD_ENGINE = "silero" if _SILERO is not None else "webrtcvad"
+_SILERO_SR = np.array(SAMPLE_RATE, dtype=np.int64)
+
+
+def _silero_step(chunk_f32, state, context):
+    """One Silero v5 step. The model is trained on [64-sample context | 512-sample window]; we
+    prepend the carried context, run, and return (speech_prob, new_state, new_context). The first
+    call passes a zero context. (The official OnnxWrapper does this with torch; we do it in numpy
+    so no torch dependency is pulled — that was the whole point of running it on onnxruntime.)"""
+    inp = np.concatenate([context, np.asarray(chunk_f32, dtype=np.float32).reshape(1, -1)], axis=1)
+    out, state = _SILERO.run(None, {"input": inp, "state": state, "sr": _SILERO_SR})
+    return float(np.asarray(out).reshape(-1)[0]), state, inp[:, -SILERO_CONTEXT:]
+
+
+# A short trailing silence on every synthesized sentence: a natural inter-sentence pause that also
+# guarantees click-free joins when sentences are concatenated (synth_to_pcm) or streamed back-to-back
+# (speak / the WS per-sentence pipeline). Centralized here so every TTS path benefits.
+_PAUSE_SAMPLES = np.zeros(int(TTS_RATE * INTER_SENTENCE_PAUSE_MS / 1000), dtype=np.int16)
+
+
+def _synth(text: str):
+    audio, sr = _synth_raw(text)
+    if audio.size and _PAUSE_SAMPLES.size:
+        audio = np.concatenate([audio, _PAUSE_SAMPLES])
+    return audio, sr
+
+
 print(f"[voice] models loaded in {time.time() - _t0:.1f}s  "
-      f"(stt=faster-whisper base.en {WHISPER_PATH}, tts={TTS_ENGINE} @ {TTS_RATE}Hz)",
+      f"(stt=faster-whisper base.en {WHISPER_PATH}, tts={TTS_ENGINE} @ {TTS_RATE}Hz, vad={VAD_ENGINE})",
       file=sys.stderr)
 
 
 def record_until_silence(max_seconds: int = 60, trailing_silence: float = 0.7,
                          allow_type_abort: bool = True, start_timeout: float | None = None):
-    """Capture 16kHz mono from the default mic, gated by webrtcvad: start collecting on the first
-    voiced frames (with a short pre-roll so onsets aren't clipped), stop after ~trailing_silence of
-    quiet, hard cap at max_seconds. Returns int16 PCM in memory. If allow_type_abort and the user
-    presses a key, returns None to signal "type this turn instead". PCM is never written to disk.
-    start_timeout (optional): if no speech ONSET occurs within this many seconds, return empty PCM
-    (size 0) — used by the wake loop's short follow-up window; default None keeps prior behavior."""
-    silence_limit = int(trailing_silence * 1000 / VAD_FRAME_MS)
-    max_frames = int(max_seconds * 1000 / VAD_FRAME_MS)
-    start_frames = int(start_timeout * 1000 / VAD_FRAME_MS) if start_timeout else None
-    preroll_len = 8  # ~240ms kept before speech onset
+    """Capture 16kHz mono from the default mic, gated by Silero VAD (webrtcvad fallback): start
+    collecting on the first voiced window (with a short pre-roll so onsets aren't clipped), stop
+    after ~trailing_silence of quiet, hard cap at max_seconds. Returns int16 PCM in memory. If
+    allow_type_abort and the user presses a key, returns None to signal "type this turn instead".
+    PCM is never written to disk. start_timeout (optional): if no speech ONSET occurs within this
+    many seconds, return empty PCM (size 0) — used by the wake loop's short follow-up window."""
+    # Pick the VAD primitive + its native frame size. Silero is stateful (its hidden state is carried
+    # across windows); webrtcvad is the fallback used only when the Silero model is absent.
+    if _SILERO is not None:
+        frame_len = SILERO_WINDOW
+        win_ms = SILERO_WINDOW * 1000.0 / SAMPLE_RATE
+        _state = np.zeros((2, 1, 128), dtype=np.float32)
+        _ctx = np.zeros((1, SILERO_CONTEXT), dtype=np.float32)
+
+        def is_speech(mono_i16):
+            nonlocal _state, _ctx
+            prob, _state, _ctx = _silero_step(mono_i16.astype(np.float32) / 32768.0, _state, _ctx)
+            return prob >= SILERO_SPEECH_PROB
+    else:
+        frame_len = SAMPLE_RATE * 30 // 1000   # webrtcvad 30ms frame (480 samples)
+        win_ms = 30.0
+        _vad = webrtcvad.Vad(2)
+
+        def is_speech(mono_i16):
+            return _vad.is_speech(mono_i16.tobytes(), SAMPLE_RATE)
+
+    silence_limit = int(trailing_silence * 1000 / win_ms)
+    max_frames = int(max_seconds * 1000 / win_ms)
+    start_frames = int(start_timeout * 1000 / win_ms) if start_timeout else None
+    preroll_len = 8  # ~250ms kept before speech onset
     preroll, collected = [], []
     started = False
     silence = 0
-    print("🎤 listening...", flush=True)
+    print("listening...", flush=True)
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
-                        blocksize=_FRAME_LEN) as stream:
+                        blocksize=frame_len) as stream:
         for fi in range(max_frames):
             if allow_type_abort and msvcrt and msvcrt.kbhit():
                 return None  # user wants to type this turn
-            data, _ = stream.read(_FRAME_LEN)
+            data, _ = stream.read(frame_len)
             mono = data[:, 0]
-            speech = _VAD.is_speech(mono.tobytes(), SAMPLE_RATE)
+            speech = is_speech(mono)
             if not started:
                 if start_frames is not None and fi >= start_frames:
                     return np.zeros(0, dtype=np.int16)   # no speech onset in the window
@@ -283,6 +366,64 @@ def transcribe_file(path: str) -> str:
     return "".join(s.text for s in segments).strip()
 
 
+def _decode_16k(path: str):
+    """Decode any audio file to 16k mono float32 once (faster-whisper's av-based decoder — no ffmpeg
+    binary), so Silero VAD and whisper can share a single decode."""
+    from faster_whisper.audio import decode_audio
+    return decode_audio(str(path), sampling_rate=SAMPLE_RATE)
+
+
+def contains_speech(audio) -> bool:
+    """Silero VAD gate for a received clip: True only when there is >= SILERO_MIN_SPEECH_MS of
+    SUSTAINED speech. This is what rejects the room noise / silence the browser's VAD let through,
+    BEFORE STT spends a turn. `audio` is 16k mono float32. Permissive (returns True) if Silero is
+    unavailable — the junk gate then remains the only net (pre-Silero behavior)."""
+    if _SILERO is None:
+        return True
+    a = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if a.size < SILERO_WINDOW:
+        return False
+    state = np.zeros((2, 1, 128), dtype=np.float32)
+    context = np.zeros((1, SILERO_CONTEXT), dtype=np.float32)
+    win_ms = SILERO_WINDOW * 1000.0 / SAMPLE_RATE
+    need = max(1, int(SILERO_MIN_SPEECH_MS / win_ms))   # sustained windows = SILERO_MIN_SPEECH_MS
+    run = best = 0
+    for i in range(0, a.size - SILERO_WINDOW + 1, SILERO_WINDOW):
+        prob, state, context = _silero_step(a[i:i + SILERO_WINDOW], state, context)
+        if prob >= SILERO_SPEECH_PROB:
+            run += 1
+            best = max(best, run)
+        else:
+            run = 0
+    return best >= need
+
+
+def _transcribe_with_metrics(audio):
+    """faster-whisper on a 16k float32 array -> (text, worst_no_speech_prob, worst_avg_logprob), so
+    the junk gate can drop low-confidence noise. Empty / zero-segment audio -> ('', 1.0, 0.0)."""
+    segments, _ = _whisper.transcribe(audio, language="en")
+    segs = list(segments)
+    text = "".join(s.text for s in segs).strip()
+    if not segs:
+        return text, 1.0, 0.0
+    return text, max(s.no_speech_prob for s in segs), min(s.avg_logprob for s in segs)
+
+
+def transcribe_clip(path: str) -> dict:
+    """Receive-side STT for the API (/voice, /ws/voice). Decode once, gate on Silero VAD, then
+    transcribe with confidence. Returns:
+      {'speech': bool, 'text': str, 'junk': bool, 'no_speech_prob': float, 'avg_logprob': float}
+    speech=False -> Silero heard no speech (silent drop, no STT cost beyond the decode);
+    junk=True    -> transcribed but not worth a turn (empty / punct-only / filler / low-confidence)."""
+    audio = _decode_16k(path)
+    if not contains_speech(audio):
+        return {"speech": False, "text": "", "junk": True, "no_speech_prob": 1.0, "avg_logprob": 0.0}
+    text, nsp, alp = _transcribe_with_metrics(audio)
+    return {"speech": True, "text": text,
+            "junk": is_junk_transcript(text, no_speech_prob=nsp, avg_logprob=alp),
+            "no_speech_prob": nsp, "avg_logprob": alp}
+
+
 # --- junk-transcript gate (voice) ----------------------------------------------------------------
 # Whisper sometimes emits a stray pronoun/filler from noise or a half-word. Don't spend a full turn
 # (LLM + memory write + the Claude ladder) on it — a garbled clip once spawned a selfmod proposal,
@@ -305,16 +446,25 @@ _VOICE_JUNK_PHRASES = {
 }
 
 
-def is_junk_transcript(text: str) -> bool:
-    """True if a transcript isn't worth running a turn on. Conservative by design: short REAL
-    commands/confirmations ('yes', 'no', 'stop', 'open notepad') pass. Junk = empty, <3 non-command
-    chars, a known whisper hallucination phrase, or an utterance whose words are ALL fillers."""
+def is_junk_transcript(text: str, *, no_speech_prob: float | None = None,
+                       avg_logprob: float | None = None) -> bool:
+    """True if a transcript isn't worth running a turn on. Conservative: short REAL commands/
+    confirmations ('yes', 'no', 'stop', 'open notepad') pass. Junk = empty, punctuation-only,
+    <3 non-command chars, a known whisper hallucination phrase, an all-filler utterance, OR (when
+    the API clip path supplies whisper metrics) a low-confidence transcript — high no_speech_prob
+    or very low avg_logprob, i.e. noise the VAD let slip through."""
     s = (text or "").strip().lower().strip(".,!?;:").strip()
     if not s:
         return True
-    if s in _VOICE_OK:                 # known short command/confirmation -> real
+    if s in _VOICE_OK:                 # known short command/confirmation -> keep (whitelist wins)
         return False
+    if no_speech_prob is not None and no_speech_prob >= NO_SPEECH_DROP:   # whisper: not speech
+        return True
+    if avg_logprob is not None and avg_logprob <= LOGPROB_DROP:           # whisper: too unconfident
+        return True
     if s in _VOICE_JUNK_PHRASES:       # known whisper hallucination / multi-word filler
+        return True
+    if not re.search(r"[a-z0-9]", s):  # punctuation/symbol-only ("...", "?!", "-")
         return True
     words = s.split()
     if len(s) < 3:                     # too short and not a known command
