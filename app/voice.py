@@ -295,7 +295,8 @@ _NORM_AMP = re.compile(r"\s*&\s*")                   # &  -> and
 _NORM_PCT = re.compile(r"\s*%")                      # %  -> percent
 _NORM_INWORD_HYPHEN = re.compile(r"(?<=\w)-(?=\w)")  # well-known -> well known ; 2-3 -> 2 3
 _NORM_INWORD_SLASH = re.compile(r"(?<=\w)/(?=\w)")   # and/or -> and or ; TCP/IP -> TCP IP
-_NORM_EMDASH = re.compile(r"\s*[—–]\s*")             # em/en dash -> pause
+_NORM_UNIDASH = re.compile(r"[‐‑−]")   # hyphen / non-breaking hyphen / minus -> ASCII -
+_NORM_EMDASH = re.compile(r"\s*[‒–—―]\s*")   # figure/en/em dash, horizontal bar -> pause
 _NORM_SEP = re.compile(r"\s*[/|•·▪◦‣⁃]\s*|\s+-\s+")   # slash/pipe/bullet or " - " separator -> pause
 _NORM_HYPHEN_LEFT = re.compile(r"-")                 # any leftover hyphen -> space (never "dash")
 _NORM_WS = re.compile(r"[ \t]{2,}")
@@ -307,6 +308,7 @@ _NORM_LEAD = re.compile(r"^[\s,;:.]+")               # no leading pause/punctuat
 def _normalize_for_speech(text: str) -> str:
     """Convert symbols a TTS engine would read by name into spoken words or a short pause. SPOKEN
     stream only (called from _clean_for_speech) — never alters the HUD transcript."""
+    text = _NORM_UNIDASH.sub("-", text)            # fold Unicode hyphens/minus to ASCII (models emit ‑)
     text = _NORM_AMP.sub(" and ", text)            # R&D -> R and D  (before separators)
     text = _NORM_PCT.sub(" percent", text)         # 50% -> 50 percent
     text = _NORM_INWORD_HYPHEN.sub(" ", text)      # well-known -> well known
@@ -321,6 +323,26 @@ def _normalize_for_speech(text: str) -> str:
     return text.strip()
 
 
+# --- screen-only tokens: commit hashes / file paths / long IDs belong on Nate's SCREEN, not read
+# aloud. Dropped from the SPOKEN stream only (the HUD transcript keeps them verbatim). The persona
+# is told to place them parenthetically/trailing so the line still reads once they're gone. Run
+# BEFORE symbol normalization, while a path's slashes are still intact for detection.
+_SCREEN_PAREN = re.compile(r"\s*\((?:[^)]*[\\/][^)]*|\s*(?=[0-9a-f]*\d)[0-9a-f]{7,}\s*)\)")  # (path)/(hash)
+_SCREEN_PATH = re.compile(r"\b[\w.\-]+(?:[\\/][\w.\-]+)*[\\/][\w\-]+\.[A-Za-z]{1,5}\b")        # bare path w/ ext
+_SCREEN_HASH = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{7,}\b")                                  # bare commit hash
+
+
+def _strip_screen_only(text: str) -> str:
+    """Drop tokens that are exact-on-screen but should never be read aloud: parenthetical hash/path
+    notes, bare file paths (-> 'a file'), and bare commit hashes. Spoken stream only — the HUD text
+    is never run through this. A 7+ hex run must include a digit, so real words aren't mistaken for
+    a hash; bare-path detection requires a file extension, so 'and/or' and 'TCP/IP' are left alone."""
+    text = _SCREEN_PAREN.sub("", text)         # "(a918e75)" / "(docs/x.py)" -> gone
+    text = _SCREEN_PATH.sub(" a file ", text)  # bare "app/voice.py" -> "a file"
+    text = _SCREEN_HASH.sub("", text)          # bare "a918e75" -> gone
+    return text
+
+
 def _clean_for_speech(text: str) -> str:
     # code blocks are not read aloud — replaced with a single spoken note
     text = _CODE_BLOCK.sub(" I've put the code on screen. ", text)
@@ -328,6 +350,7 @@ def _clean_for_speech(text: str) -> str:
     text = _INLINE_CODE.sub(lambda m: m.group(0).strip("`"), text)
     text = _MD_LINK.sub(r"\1", text)          # keep link text, drop the URL
     text = _BARE_URL.sub(" a link ", text)    # don't read raw URLs aloud
+    text = _strip_screen_only(text)           # hashes/paths/IDs: shown on screen, never spoken
     text = re.sub(r"[#*_>`]", "", text)        # strip markdown formatting (| is a pause, handled below)
     return _normalize_for_speech(text)         # symbols -> spoken words / pauses (spoken stream only)
 
