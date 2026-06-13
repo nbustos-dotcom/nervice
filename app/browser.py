@@ -192,10 +192,6 @@ async def _looks_like_login(page) -> bool:
 # skeleton ("Dashboard", no assignments). These are the regions/selectors where upcoming work
 # actually renders; we wait for one to attach, then read.
 _CANVAS_MAX = 12000   # bigger cap than a normal page — two Canvas regions, dated lists
-# Dashboard chars above which the To Do / Coming Up sidebar has clearly rendered real content — at
-# that point it already answers "what's due soonest", so we SKIP the second (costly) navigation to
-# the calendar agenda. Below it the dashboard came back thin, so the agenda is fetched as a fallback.
-_DASH_RICH = 200
 _DASH_CONTENT = [".PlannerApp", ".planner-item", "[data-testid='todo-list']",
                  ".Sidebar__TodoListContainer", ".coming_up", ".ic-DashboardCard", "#content"]
 _AGENDA_CONTENT = [".fc-listView", ".fc-agendaView", ".agenda-wrapper", "#agenda-view",
@@ -252,6 +248,69 @@ async def _canvas_text(page) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+async def _read_dash_region(page) -> dict:
+    """Open the Canvas dashboard (read-only), detect a login wall, wait for the To Do / Coming Up
+    content to hydrate, return its text. Shape: {error} | {needs_login,title,url} | {text,hit,title,url}."""
+    try:
+        await page.goto(CANVAS_URL, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        return {"error": f"Couldn't open Canvas ({type(e).__name__})."}
+    title = (await page.title()) or ""
+    if await _looks_like_login(page):
+        return {"needs_login": True, "title": title, "url": page.url}
+    hit = await _wait_for_render(page, _DASH_CONTENT)
+    return {"text": await _canvas_text(page), "hit": hit, "title": title, "url": page.url}
+
+
+async def _read_agenda_region(page, url) -> dict:
+    """Open the Canvas calendar AGENDA view (read-only — the URL hash sets the view, no clicks),
+    wait for its dated list to hydrate, return its text. Best-effort: a failure yields empty text
+    (the dashboard still answers) rather than sinking the whole read."""
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        hit = await _wait_for_render(page, _AGENDA_CONTENT)
+        return {"text": await _canvas_text(page), "hit": hit}
+    except Exception as e:
+        print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)
+        return {"text": "", "hit": None}
+
+
+def _norm_line(s: str) -> str:
+    """Normalize a line for dedupe: drop leading bullet/dash markers, collapse whitespace, lowercase."""
+    return re.sub(r"\s+", " ", re.sub(r"^[\s•‣●\-\*]+", "", s)).strip().lower()
+
+
+def _merge_canvas(dash: str, agenda: str) -> str:
+    """Combine BOTH sources into one clean block for the smart brain, deduped at the line level so an
+    item that appears in both the To Do pane AND the agenda is listed once. The dashboard section is
+    kept in full; the agenda section then contributes only lines not already shown (so the dup lands
+    in the dashboard section, not both). Each section and the whole are length-capped."""
+    seen: set = set()
+
+    def keep(block: str, cap: int) -> str:
+        out = []
+        for ln in block.splitlines():
+            if not ln.strip():
+                out.append("")
+                continue
+            k = _norm_line(ln)
+            if k and k in seen:
+                continue
+            if k:
+                seen.add(k)
+            out.append(ln)
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()[:cap]
+
+    parts = []
+    d = keep(dash, _CANVAS_MAX // 2)
+    if d:
+        parts.append("DASHBOARD — To Do / Coming Up:\n" + d)
+    a = keep(agenda, _CANVAS_MAX // 2)   # seen now holds the dashboard lines -> agenda dups dropped
+    if a:
+        parts.append("CALENDAR AGENDA — upcoming items by date:\n" + a)
+    return ("\n\n".join(parts))[:_CANVAS_MAX]
+
+
 async def read_canvas() -> dict:
     """Canvas-aware reader: open CANVAS_URL and return its clean readable text (assignments, due
     dates, announcements as they appear). If a login wall is detected, return an HONEST needs-login
@@ -262,54 +321,46 @@ async def read_canvas() -> dict:
                                       "See the Canvas setup steps."}
     ctx = await _ensure_context()
     injected = await _inject_auth(ctx)          # re-add saved session cookies BEFORE navigating
-    opened = await open_page(CANVAS_URL)
-    if not opened["ok"]:
-        return opened
-    page = await _current_page(_context)
-    title = (await page.title()) or ""
-    if await _looks_like_login(page):
-        # Capture WHAT it landed on (point-4 diagnostics) and tailor the honest message: no saved
-        # auth -> log in; auth present but still bounced -> the session expired, refresh it.
-        await _emit("read_canvas", page.url, f"needs login (auth_cookies={injected}) landed={title!r}")
+    agenda_url = CANVAS_URL.rstrip("/") + "/calendar#view_name=agenda"
+    # Read BOTH sources EVERY time. The dashboard To Do / Coming Up pane shows only SOME courses'
+    # items; the rest live only in the calendar agenda, so skipping it dropped most of what's due.
+    # Two pages in the SAME (shared-session) context, navigated CONCURRENTLY via gather, so this is
+    # ~one read's wall-time instead of two now that the networkidle dead-wait is gone. Read-only.
+    dash_page = await _current_page(ctx)
+    agenda_page = await ctx.new_page()
+    dash_res, agenda_res = await asyncio.gather(
+        _read_dash_region(dash_page),
+        _read_agenda_region(agenda_page, agenda_url))
+    try:
+        await agenda_page.close()               # don't accumulate tabs across reads; keep the dash tab
+    except Exception:
+        pass
+    if "error" in dash_res:                      # the dashboard navigation itself failed -> honest fail
+        await _emit("read_canvas", CANVAS_URL, f"FAIL {dash_res['error']}")
+        return {"ok": False, "error": dash_res["error"], "url": CANVAS_URL}
+    title = dash_res.get("title", "")
+    if dash_res.get("needs_login"):
+        # Capture WHAT it landed on and tailor the honest message: no saved auth -> log in; auth
+        # present but still bounced -> the session expired, refresh it. Never a fabricated list.
+        landed = dash_res.get("url", CANVAS_URL)
+        await _emit("read_canvas", landed, f"needs login (auth_cookies={injected}) landed={title!r}")
         msg = ("Canvas needs a login first — run scripts/canvas_login.py, log in once, then ask again."
                if injected == 0 else
                "Canvas logged me out (the saved session expired). Re-run scripts/canvas_login.py to "
                "refresh it, then ask again.")
-        return {"ok": False, "needs_login": True, "landed_title": title, "landed_url": page.url, "error": msg}
-    # Logged in. Canvas hydrates async — WAIT for the To Do / Coming Up content to render, then read
-    # that sidebar region (the sparse card-dashboard main is why it only saw "Dashboard" before).
-    dash_hit = await _wait_for_render(page, _DASH_CONTENT)
-    dash = await _canvas_text(page)
-    # The To Do / Coming Up sidebar above usually already lists what's due soonest. Only pay the
-    # SECOND navigation to the calendar AGENDA when the dashboard came back THIN — that extra page
-    # load + its waits were a big chunk of the old latency, and it's wasted when the dashboard
-    # already rendered. (Still read-only: URL hash sets the view, no clicks.)
-    agenda, agenda_hit = "", None
-    agenda_url = CANVAS_URL.rstrip("/") + "/calendar#view_name=agenda"
-    need_agenda = len(dash.strip()) < _DASH_RICH
-    if need_agenda:
-        try:
-            await page.goto(agenda_url, wait_until="domcontentloaded", timeout=30000)
-            agenda_hit = await _wait_for_render(page, _AGENDA_CONTENT)
-            agenda = await _canvas_text(page)
-        except Exception as e:
-            print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)
-    parts = []
-    if dash.strip():
-        parts.append("DASHBOARD — To Do / Coming Up:\n" + dash[:_CANVAS_MAX // 2])
-    if agenda.strip():
-        parts.append("CALENDAR AGENDA — upcoming items by date:\n" + agenda[:_CANVAS_MAX // 2])
-    text = ("\n\n".join(parts))[:_CANVAS_MAX]
-    region = (f"{CANVAS_URL} (dashboard, waited={dash_hit or 'settle'})"
-              + (f" + /calendar#agenda (waited={agenda_hit or 'settle'})" if need_agenda
-                 else " [agenda skipped: dashboard sufficient]"))
+        return {"ok": False, "needs_login": True, "landed_title": title, "landed_url": landed, "error": msg}
+    dash, dash_hit = dash_res.get("text", ""), dash_res.get("hit")
+    agenda, agenda_hit = agenda_res.get("text", ""), agenda_res.get("hit")
+    text = _merge_canvas(dash, agenda)           # both sources, deduped at the line level
+    region = (f"{CANVAS_URL} (dashboard, waited={dash_hit or 'settle'}) "
+              f"+ /calendar#agenda (waited={agenda_hit or 'settle'}) [parallel, both read]")
     # Honest "empty vs failed": we loaded + waited; if there's genuinely almost no content, say so
     # (the smart brain will tell Nate nothing's due) rather than pretend it failed.
     sparse = len(text.strip()) < 60
-    await _emit("read_canvas", region, f"ok dash={len(dash)} agenda={len(agenda)} chars sparse={sparse}")
+    await _emit("read_canvas", region,
+                f"ok dash={len(dash)} agenda={len(agenda)} merged={len(text)} chars sparse={sparse}")
     return {"ok": True, "url": region, "title": title, "text": text,
-            "regions": {"dashboard_chars": len(dash), "agenda_chars": len(agenda)},
-            "agenda_fetched": need_agenda, "sparse": sparse}
+            "regions": {"dashboard_chars": len(dash), "agenda_chars": len(agenda)}, "sparse": sparse}
 
 
 async def close_browser() -> dict:
