@@ -1,0 +1,230 @@
+"""Phase 1 of screen control: READ-ONLY browser perception via Playwright.
+
+Nervice opens a page in its OWN dedicated, visible browser profile and READS the page's real
+structure (DOM text / accessibility) — it does NOT click, type, submit, fill, or change anything.
+Acting is a deliberately-LATER phase: no acting code exists here, so none can misfire. The safety
+bones (read-only by construction, kill switch, audit) are built now because later phases inherit
+them.
+
+- SEMANTIC reading only (page.inner_text of the meaningful content) — never pixel/coordinate guessing.
+- A dedicated PERSISTENT profile at data/nervice_browser_profile/ (gitignored) that owns nothing —
+  separate from Nate's real Brave. Nate logs into Canvas ONCE inside it (scripts/canvas_login.py);
+  the session then persists in the profile dir.
+- VISIBLE (headless=False) so Nate watches everything.
+- Every action is audited to logs/browser_actions.log AND (on a WS turn) emitted as a {type:"hands"}
+  trace frame via the hands_trace contextvar, so the HUD trace console can show a live hands feed.
+"""
+import app.net  # noqa  (truststore: Norton TLS interception — needed for HTTPS navigation)
+
+import asyncio
+import contextvars
+import datetime
+import os
+import pathlib
+import re
+import sys
+
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_PROFILE_DIR = _ROOT / "data" / "nervice_browser_profile"
+_AUDIT_LOG = _ROOT / "logs" / "browser_actions.log"
+_MAX_TEXT = 8000   # cap the read text so a huge page can't blow the LLM context
+
+# Nate fills this in with his school's Canvas dashboard URL, e.g. "https://<school>.instructure.com".
+# Left empty on purpose: read_canvas() returns an honest "not configured" message until it's set.
+CANVAS_URL = ""
+
+# Read-only by construction: there is NO click/type/fill/submit primitive in this module. A caller
+# that asks for a page ACTION gets this honest refusal — acting is a later phase.
+NOT_SUPPORTED = ("I can read pages right now, but I can't click, type, or submit anything yet — "
+                 "acting on a page is a later phase. For now I'll just read it.")
+
+# Set per WS turn (streaming.py) to an async callback that ships a {type:"hands"} frame to the HUD;
+# None on REST turns (audit log only). Mirrors app.agent.current_rung's per-turn contextvar pattern.
+hands_trace: "contextvars.ContextVar" = contextvars.ContextVar("hands_trace", default=None)
+
+_pw = None        # the started async_playwright manager
+_context = None   # the persistent browser context (the singleton)
+_lock = asyncio.Lock()
+
+
+def _audit(action: str, target: str, outcome: str) -> None:
+    ts = datetime.datetime.now().isoformat(timespec="seconds")
+    try:
+        _AUDIT_LOG.parent.mkdir(exist_ok=True)
+        with open(_AUDIT_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{ts} {action} {target} -> {outcome}\n")
+    except Exception:
+        pass
+
+
+async def _emit(action: str, target: str, outcome: str) -> None:
+    """Audit always; emit a live hands trace frame too when a WS turn set the callback."""
+    _audit(action, target, outcome)
+    cb = hands_trace.get()
+    if cb is not None:
+        try:
+            await cb(action, target, outcome)
+        except Exception:
+            pass
+
+
+async def _ensure_context():
+    """Lazy-launch the dedicated, VISIBLE persistent context (singleton, guarded by a lock so two
+    concurrent reads can't double-launch)."""
+    global _pw, _context
+    if _context is not None:
+        return _context
+    async with _lock:
+        if _context is not None:
+            return _context
+        from playwright.async_api import async_playwright   # lazy: importing this module stays cheap
+        _PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        _pw = await async_playwright().start()
+        # VISIBLE by default so Nate watches everything; NERVICE_BROWSER_HEADLESS=1 forces headless
+        # (used by the automated test suite so it needn't pop windows / hold a foreground desktop).
+        headless = os.environ.get("NERVICE_BROWSER_HEADLESS") == "1"
+        _context = await _pw.chromium.launch_persistent_context(
+            str(_PROFILE_DIR), headless=headless,
+            args=["--no-first-run", "--no-default-browser-check"])
+        print(f"[browser] launched visible persistent context at {_PROFILE_DIR}", file=sys.stderr)
+        return _context
+
+
+def is_open() -> bool:
+    return _context is not None
+
+
+async def _current_page(ctx):
+    return ctx.pages[-1] if ctx.pages else await ctx.new_page()
+
+
+def _https_only(url: str) -> str | None:
+    """Accept https only; reject http and every non-web scheme (file:, data:, javascript:, ...)."""
+    u = (url or "").strip()
+    return u if re.match(r"^https://[^\s]+$", u, re.I) else None
+
+
+async def open_page(url: str) -> dict:
+    """Navigate to an https URL, wait for load, return {ok, title, url}. https only."""
+    u = _https_only(url)
+    if u is None:
+        await _emit("open", url or "(empty)", "REJECTED non-https")
+        return {"ok": False, "error": "Only https URLs are allowed.", "url": url}
+    try:
+        ctx = await _ensure_context()
+        page = await _current_page(ctx)
+        await page.goto(u, wait_until="domcontentloaded", timeout=30000)
+        title, final = (await page.title()) or "", page.url
+        await _emit("open", u, f"ok title={title!r} final={final}")
+        return {"ok": True, "title": title, "url": final}
+    except Exception as e:
+        await _emit("open", u, f"FAIL {type(e).__name__}: {repr(e)[:80]}")
+        return {"ok": False, "error": f"Couldn't open the page ({type(e).__name__}).", "url": u}
+
+
+_EXTRACT_JS = """() => {
+  const main = document.querySelector('main,[role="main"],#content,.ic-Dashboard,.ic-app-main-content,#main');
+  const el = main || document.body;
+  // innerText is the RENDERED text: it excludes <script>/<style> and respects visibility, and it
+  // keeps headings, link text, list and table cells as readable lines. No DOM mutation, pure read.
+  return (el && el.innerText) ? el.innerText : (document.body ? document.body.innerText : '');
+}"""
+
+
+async def _readable(page) -> str:
+    try:
+        text = await page.evaluate(_EXTRACT_JS)
+    except Exception:
+        text = ""
+    text = re.sub(r"[ \t]+\n", "\n", text or "")
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text[:_MAX_TEXT]
+
+
+async def read_page() -> dict:
+    """Extract the current page's meaningful text as clean readable text (NOT raw HTML, NOT a
+    screenshot). Length-capped."""
+    if _context is None:
+        return {"ok": False, "error": "No browser/page open."}
+    page = await _current_page(_context)
+    text = await _readable(page)
+    await _emit("read", page.url, f"ok {len(text)} chars")
+    return {"ok": True, "title": (await page.title()) or "", "url": page.url, "text": text}
+
+
+_LOGIN_URL = re.compile(r"(login|sign[_-]?in|/auth|sso|oauth|cas/)", re.I)
+
+
+async def _looks_like_login(page) -> bool:
+    if _LOGIN_URL.search(page.url or ""):
+        return True
+    try:
+        if await page.locator("input[type=password]").count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def read_canvas() -> dict:
+    """Canvas-aware reader: open CANVAS_URL and return its clean readable text (assignments, due
+    dates, announcements as they appear). If a login wall is detected, return an HONEST needs-login
+    message — never a fabricated assignment list. The smart brain interprets the returned text."""
+    if not CANVAS_URL:
+        await _emit("read_canvas", "(unset)", "CANVAS_URL not configured")
+        return {"ok": False, "error": "Canvas isn't set up yet — CANVAS_URL is blank in app/browser.py. "
+                                      "See the Canvas setup steps."}
+    opened = await open_page(CANVAS_URL)
+    if not opened["ok"]:
+        return opened
+    page = await _current_page(_context)
+    if await _looks_like_login(page):
+        await _emit("read_canvas", page.url, "needs login")
+        return {"ok": False, "needs_login": True,
+                "error": "Canvas needs a login first. Log in once inside Nervice's browser "
+                         "(run scripts/canvas_login.py), then ask again — the session will stick."}
+    text = await _readable(page)
+    await _emit("read_canvas", page.url, f"ok {len(text)} chars")
+    return {"ok": True, "url": page.url, "text": text}
+
+
+async def close_browser() -> dict:
+    """KILL SWITCH: tear the context down instantly. Safe to call when nothing is open."""
+    global _pw, _context
+    ctx, pw = _context, _pw
+    _context, _pw = None, None
+    closed = ctx is not None
+    if ctx is not None:
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+    if pw is not None:
+        try:
+            await pw.stop()
+        except Exception:
+            pass
+    await _emit("kill", "browser", "closed" if closed else "nothing open")
+    return {"ok": True, "closed": closed}
+
+
+# --- in-turn recognition helpers (used by chat.respond / streaming.stream_reply) ----------------
+_KILL_EXPLICIT = re.compile(r"\b(kill|close|stop|shut|quit|kill off|shut down)\s+(the\s+|that\s+)?browser\b", re.I)
+_KILL_BARE = re.compile(r"^\s*(stop|stop it|kill it|cancel|abort)\s*[.!]?\s*$", re.I)
+# Page-action verbs (read-only phase refuses these). Word-boundary so "click" etc. as a request verb.
+_PAGE_ACTION = re.compile(r"\b(click|tap|press|type|fill|enter|submit|select|check|uncheck|toggle|"
+                          r"scroll|drag|upload|download|log\s*in|sign\s*in|post|send|buy|add to cart)\b", re.I)
+
+
+def is_kill_request(msg: str) -> bool:
+    """A request to tear down the browser. Explicit '...browser' always counts; a bare 'stop'/'kill
+    it' counts ONLY while a browser is actually open (so normal 'stop' usage isn't hijacked)."""
+    m = msg or ""
+    if _KILL_EXPLICIT.search(m):
+        return True
+    return is_open() and bool(_KILL_BARE.match(m))
+
+
+def is_page_action(msg: str) -> bool:
+    """True if the message asks to ACT on a page (not supported in this read-only phase)."""
+    return bool(_PAGE_ACTION.search(msg or ""))
