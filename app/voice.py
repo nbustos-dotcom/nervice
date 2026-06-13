@@ -50,7 +50,12 @@ SILERO_MIN_SPEECH_MS = 200   # contains_speech(): sustained speech needed to acc
 # Low-confidence STT gate (whisper metrics) — a second net behind Silero on the API clip path.
 NO_SPEECH_DROP = 0.85        # whisper no_speech_prob >= this -> drop as non-speech
 LOGPROB_DROP = -1.0          # whisper avg_logprob   <= this -> drop as too unconfident (tightened)
-INTER_SENTENCE_PAUSE_MS = 90  # trailing silence per synthesized sentence -> natural pacing
+# Structure-aware trailing pause per synthesized chunk (sized by its terminal punctuation): a fuller
+# breath after a full sentence, a lighter beat after a clause, minimal after a fragment. Deterministic,
+# free, NO speed change — long explanations breathe between sentences; short replies don't drag.
+SENTENCE_PAUSE_MS = 200   # after . ? !
+CLAUSE_PAUSE_MS = 90      # after , ; :
+TAIL_PAUSE_MS = 50        # no terminal punctuation (fragment / streamed tail)
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _KOKORO_MODEL = _ROOT / "models" / "kokoro" / "kokoro-v1.0.onnx"
@@ -189,16 +194,37 @@ def _silero_step(chunk_f32, state, context):
     return float(np.asarray(out).reshape(-1)[0]), state, inp[:, -SILERO_CONTEXT:]
 
 
-# A short trailing silence on every synthesized sentence: a natural inter-sentence pause that also
-# guarantees click-free joins when sentences are concatenated (synth_to_pcm) or streamed back-to-back
-# (speak / the WS per-sentence pipeline). Centralized here so every TTS path benefits.
-_PAUSE_SAMPLES = np.zeros(int(TTS_RATE * INTER_SENTENCE_PAUSE_MS / 1000), dtype=np.int16)
+# A trailing silence on every synthesized chunk: a natural pause that also guarantees click-free
+# joins when chunks are concatenated (synth_to_pcm) or streamed back-to-back (speak / the WS
+# pipeline). STRUCTURE-AWARE — the chunk's terminal punctuation picks the length, so a long
+# explanation breathes between sentences while a short reply gets only a light tail. Centralized
+# here so every TTS path benefits; no speed change anywhere.
+def _silence(ms: int):
+    return np.zeros(int(TTS_RATE * ms / 1000), dtype=np.int16)
+
+
+_PAUSE_SENTENCE = _silence(SENTENCE_PAUSE_MS)
+_PAUSE_CLAUSE = _silence(CLAUSE_PAUSE_MS)
+_PAUSE_TAIL = _silence(TAIL_PAUSE_MS)
+
+
+def _pause_for(text: str):
+    """Pick the trailing pause by the chunk's last meaningful character: a full breath after a
+    sentence (. ? !), a lighter beat after a clause (, ; :), minimal otherwise. (Em/en dashes were
+    already normalized to commas upstream, so they read as clause beats.)"""
+    t = text.rstrip()
+    end = t[-1] if t else ""
+    if end in ".!?":
+        return _PAUSE_SENTENCE
+    if end in ",;:":
+        return _PAUSE_CLAUSE
+    return _PAUSE_TAIL
 
 
 def _synth(text: str):
     audio, sr = _synth_raw(text)
-    if audio.size and _PAUSE_SAMPLES.size:
-        audio = np.concatenate([audio, _PAUSE_SAMPLES])
+    if audio.size:
+        audio = np.concatenate([audio, _pause_for(text)])
     return audio, sr
 
 
