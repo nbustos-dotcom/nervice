@@ -30,6 +30,7 @@ ROUTES + their JSON shapes:
 {"route":"build"}  build = an explicit request to create/edit/fix actual FILES or projects. Discussing code is normal.
 {"route":"selfmod"} selfmod = an explicit request to change Nervice's OWN behavior/personality/code ("stop ending sentences with questions"). Opinions about itself are normal.
 {"route":"browse"} browse = find/check/read/report something ON a specific named website ("open hacker news and tell me the top story"). General factual/news questions are normal.
+{"route":"canvas"} canvas = a question about Nate's SCHOOL CANVAS — what's due, upcoming assignments, due dates, announcements, or grades ("what's due this week", "any new assignments", "check canvas", "what are my grades", "anything due on canvas"). This READS his live Canvas page.
 {"route":"normal"} normal = everything else: chat, opinions, simple facts, news/current events, and any DISCUSSION (vs an explicit action request).
 
 RULES:
@@ -39,7 +40,7 @@ RULES:
 - Asking ABOUT capabilities ("can you play music?") is normal, not control.
 - Extract targets/queries minimally and literally; strip polite prefixes ("Jarvis,", "please")."""
 
-_ROUTES = {"hard", "build", "selfmod", "browse", "control", "skill", "music_mgmt", "system", "normal"}
+_ROUTES = {"hard", "build", "selfmod", "browse", "canvas", "control", "skill", "music_mgmt", "system", "normal"}
 _CTRL_ACTIONS = {"open_app", "open_url", "play_youtube", "screenshot", "focus_window", "list_windows"}
 _SKILL_OPS = {"run", "create", "list", "delete"}
 _MUSIC_OPS = {"set", "add", "remove", "list", "clear"}
@@ -72,6 +73,7 @@ def is_machine_question(msg: str) -> bool:
 
 _KW_OPEN = re.compile(rf"^\s*(?:please\s+|hey\s+|can you\s+)?(?:{computer._OPEN_VERBS})\s+\S", re.I)
 _KW_SWITCH = re.compile(rf"\b(?:{computer._SWITCH_VERBS})\b", re.I)
+_CANVAS_KW = re.compile(r"\bcanvas\b", re.I)   # both LLMs down -> route to the honest "need the bigger brain"
 
 
 def _keyword_route(msg: str) -> dict:
@@ -89,6 +91,8 @@ def _keyword_route(msg: str) -> dict:
         return {"route": "control"}
     if computer._PLAY_RE.match(m):
         return {"route": "control"}
+    if _CANVAS_KW.search(m):
+        return {"route": "canvas"}        # executor enforces smart-brain -> honest "need bigger brain"
     return {"route": "normal"}
 
 

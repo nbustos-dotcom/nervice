@@ -35,3 +35,4 @@ scipy
 narwhals
 # note: openwakeword uses the existing onnxruntime-gpu (install it with --no-deps to avoid pulling CPU onnxruntime)
 yt-dlp
+playwright   # read-only browser perception (app/browser.py, Phase 1 screen control). After install: python -m playwright install chromium

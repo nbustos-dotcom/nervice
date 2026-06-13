@@ -28,6 +28,7 @@ from app import computer
 from app import skills
 from app import music
 from app import confusion
+from app import browser
 from app.agent import current_rung
 from app.turnlog import log_turn
 from app.router import classify
@@ -234,6 +235,26 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
     _ms = lambda: (time.monotonic() - t0) * 1000   # noqa: E731 — trace clock for this turn
     current_rung.set("groq")             # reset per turn; ask_claude flips it on a Claude escalation
     await _trace(send, "received", ms=0)
+    # Hands trace: any browser read this turn ships a {type:"hands"} frame to the HUD trace console
+    # (browser.py also always writes logs/browser_actions.log). Per-turn contextvar, like current_rung.
+    async def _hands(action, target, outcome):
+        await send({"type": "hands", "action": action, "target": target, "outcome": outcome})
+    browser.hands_trace.set(_hands)
+    # KILL SWITCH (in-turn): "kill/close browser" or a bare "stop" while it's open tears the browser
+    # down immediately — highest priority, before any routing.
+    if browser.is_kill_request(text):
+        res = await browser.close_browser()
+        msg = "Browser closed." if res.get("closed") else "No browser was open."
+        await send({"type": "text", "text": msg})
+        if voice:
+            b64 = await asyncio.to_thread(_synth_full_b64, msg)
+            if b64:
+                await send({"type": "audio", "wav_base64": b64})
+        await _trace(send, "done", route="browser", rung="browse-read", ms=_ms())
+        await send({"type": "done", "reply": msg})
+        _store(user_id, conversation_id, text, msg)
+        log_turn("browser", "browse-read", time.monotonic() - t0, "ws")
+        return msg
     # A pending local-action confirmation answers the prior RISKY ask — never streamed, never
     # re-classified. Delivered as one complete text+audio reply, same as a tool turn.
     pending = computer.resolve_pending(user_id, text)

@@ -109,6 +109,11 @@ async def lifespan(_app):
     try:
         yield
     finally:
+        try:
+            from app import browser
+            await browser.close_browser()                   # never leave an orphan chromium on exit
+        except Exception:
+            pass
         stop.set()
         try:
             await asyncio.wait_for(keepalive, timeout=10)   # let a mid-flight ping finish
@@ -766,6 +771,15 @@ async def voice(audio: UploadFile = File(...), conversation_id: str | None = For
     print(f"[voice-timing] stt={stt_s:.2f}s llm={llm_s:.2f}s tts={tts_s:.2f}s "
           f"total={time.time()-t_total:.2f}s", file=sys.stderr)
     return {"transcript": transcript, "reply": reply, "conversation_id": cid, "audio_wav_base64": audio_b64}
+
+
+@app.post("/browser/kill", dependencies=[Depends(auth)])
+async def browser_kill():
+    """KILL SWITCH for the read-only browser: tear the context down instantly (no orphan chromium).
+    Authed; safe to call when nothing is open. The HUD will wire a button to this later."""
+    from app import browser
+    res = await browser.close_browser()
+    return res
 
 
 # --------------- WebSocket streaming (Phase 1) ---------------

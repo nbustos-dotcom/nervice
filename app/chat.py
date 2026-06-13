@@ -19,6 +19,7 @@ from app import computer
 from app import skills
 from app import music
 from app import confusion
+from app import browser
 from app.db import AsyncSessionLocal
 from app.models import Message
 
@@ -115,6 +116,8 @@ async def execute_route(user_id, system, route, user_message, window, voice_mode
         print(f"[ROUTE: music_mgmt/{rd.get('op')}]", file=sys.stderr)
         current_rung.set("direct")
         return music.apply(rd.get("op"), rd.get("artists"))
+    if r == "canvas":
+        return await _execute_canvas(user_message)
     force = _FORCE.get(r)
     if force:
         print(f"[ROUTE: {r} -> {force}]", file=sys.stderr)
@@ -132,9 +135,62 @@ async def execute_route(user_id, system, route, user_message, window, voice_mode
     return await coro
 
 
+async def _synthesize_canvas(question: str, page_text: str) -> str:
+    """Interpret the REAL Canvas page text into an answer, on the smart brain (Groq). Grounded:
+    answer only from the page text, never fabricate an assignment/date/grade."""
+    from app.llm import _client, TOOL_MODEL, _effort
+    sys_p = ("You are reading Nate's LIVE school Canvas page. Answer his question using ONLY the page "
+             "text below — the real assignments, due dates, announcements, and grades that actually "
+             "appear in it. If the answer isn't in the text, say so plainly. NEVER invent or guess an "
+             "assignment, a date, or a grade. Keep it tight and conversational, like you're telling him.")
+    msgs = [{"role": "system", "content": sys_p},
+            {"role": "user", "content": f"CANVAS PAGE TEXT:\n{page_text}\n\nQUESTION: {question}"}]
+    resp = await _client.chat.completions.create(model=TOOL_MODEL, messages=msgs,
+                                                 temperature=0.2, **_effort(False))
+    return (resp.choices[0].message.content or "").strip()
+
+
+async def _execute_canvas(user_message: str) -> str:
+    """Canvas/browse-READ. Smart brain ONLY — never the 4B (it must not confabulate assignments).
+    Page-action requests are refused (read-only phase). Reads the live page, then interprets the
+    real text on Groq; if Groq is capped/sticky, an honest decline — no local guess."""
+    from app.llm import groq_capped
+    from groq import RateLimitError
+    if browser.is_page_action(user_message):
+        current_rung.set("browse-read")
+        print("[ROUTE: canvas -> page-action refused (read-only phase)]", file=sys.stderr)
+        return browser.NOT_SUPPORTED
+    if groq_capped():
+        current_rung.set("exhausted")
+        print("[ROUTE: canvas -> groq capped, honest decline (no 4B)]", file=sys.stderr)
+        return ("I need the bigger brain to read Canvas, and it's rate-limited right now — "
+                "give it a bit and ask again.")
+    print("[ROUTE: canvas -> read + smart-brain synthesis]", file=sys.stderr)
+    read = await browser.read_canvas()
+    if not read.get("ok"):
+        current_rung.set("browse-read")
+        return read.get("error", "Couldn't read Canvas right now.")
+    try:
+        answer = await _synthesize_canvas(user_message, read["text"])
+        current_rung.set("groq")
+        return answer
+    except RateLimitError:
+        current_rung.set("exhausted")
+        return ("I pulled up your Canvas, but the bigger brain hit its limit before I could read it "
+                "back to you — try again shortly.")
+
+
 async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
     t0 = time.monotonic()
     current_rung.set("groq")             # reset per turn; ask_claude flips it on a Claude escalation
+    # KILL SWITCH (in-turn): "kill/close browser", or a bare "stop" while the browser is open,
+    # tears the browser down immediately — highest priority, before any routing.
+    if browser.is_kill_request(user_message):
+        res = await browser.close_browser()
+        msg = "Browser closed." if res.get("closed") else "No browser was open."
+        print(msg, file=sys.stderr)
+        log_turn("browser", "browse-read", time.monotonic() - t0, "rest")
+        return msg
     # A pending local-action confirmation takes precedence over routing: a "yes"/"no" here answers
     # the prior RISKY ask, never gets classified as a fresh turn.
     pending = computer.resolve_pending(user_id, user_message)
