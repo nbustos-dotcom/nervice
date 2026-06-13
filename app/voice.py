@@ -286,6 +286,40 @@ _MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _BARE_URL = re.compile(r"https?://\S+")
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
+# --- spoken-symbol normalization -----------------------------------------------------------------
+# Symbols Kokoro would otherwise voice by NAME (it said "dash"/"slash" aloud) become natural words
+# or a short pause. Deterministic regex only — negligible cost, no LLM. Applied to the SPOKEN text
+# inside _clean_for_speech; the on-screen HUD transcript is never touched. Conservative: ambiguous
+# cases (currency, numeric ranges, units) are left for the deeper normalization pass, not guessed.
+_NORM_AMP = re.compile(r"\s*&\s*")                   # &  -> and
+_NORM_PCT = re.compile(r"\s*%")                      # %  -> percent
+_NORM_INWORD_HYPHEN = re.compile(r"(?<=\w)-(?=\w)")  # well-known -> well known ; 2-3 -> 2 3
+_NORM_INWORD_SLASH = re.compile(r"(?<=\w)/(?=\w)")   # and/or -> and or ; TCP/IP -> TCP IP
+_NORM_EMDASH = re.compile(r"\s*[—–]\s*")             # em/en dash -> pause
+_NORM_SEP = re.compile(r"\s*[/|•·▪◦‣⁃]\s*|\s+-\s+")   # slash/pipe/bullet or " - " separator -> pause
+_NORM_HYPHEN_LEFT = re.compile(r"-")                 # any leftover hyphen -> space (never "dash")
+_NORM_WS = re.compile(r"[ \t]{2,}")
+_NORM_SPACE_PUNCT = re.compile(r"\s+([,.;:!?])")     # " ," -> ","
+_NORM_COMMA_RUN = re.compile(r"(?:,\s*){2,}")        # ", , " -> ", "
+_NORM_LEAD = re.compile(r"^[\s,;:.]+")               # no leading pause/punctuation
+
+
+def _normalize_for_speech(text: str) -> str:
+    """Convert symbols a TTS engine would read by name into spoken words or a short pause. SPOKEN
+    stream only (called from _clean_for_speech) — never alters the HUD transcript."""
+    text = _NORM_AMP.sub(" and ", text)            # R&D -> R and D  (before separators)
+    text = _NORM_PCT.sub(" percent", text)         # 50% -> 50 percent
+    text = _NORM_INWORD_HYPHEN.sub(" ", text)      # well-known -> well known
+    text = _NORM_INWORD_SLASH.sub(" ", text)       # and/or -> and or
+    text = _NORM_EMDASH.sub(", ", text)            # a — b -> a, b
+    text = _NORM_SEP.sub(", ", text)               # a / b | c • d  and  "x - y" -> pauses
+    text = _NORM_HYPHEN_LEFT.sub(" ", text)        # leading/trailing/leftover hyphen -> space
+    text = _NORM_WS.sub(" ", text)                 # tidy the spacing the substitutions create
+    text = _NORM_SPACE_PUNCT.sub(r"\1", text)
+    text = _NORM_COMMA_RUN.sub(", ", text)
+    text = _NORM_LEAD.sub("", text)
+    return text.strip()
+
 
 def _clean_for_speech(text: str) -> str:
     # code blocks are not read aloud — replaced with a single spoken note
@@ -294,8 +328,8 @@ def _clean_for_speech(text: str) -> str:
     text = _INLINE_CODE.sub(lambda m: m.group(0).strip("`"), text)
     text = _MD_LINK.sub(r"\1", text)          # keep link text, drop the URL
     text = _BARE_URL.sub(" a link ", text)    # don't read raw URLs aloud
-    text = re.sub(r"[#*_>|`]", "", text)       # strip markdown punctuation
-    return text
+    text = re.sub(r"[#*_>`]", "", text)        # strip markdown formatting (| is a pause, handled below)
+    return _normalize_for_speech(text)         # symbols -> spoken words / pauses (spoken stream only)
 
 
 _SYNTH_SENTINEL = object()
