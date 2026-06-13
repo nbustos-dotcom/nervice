@@ -212,8 +212,6 @@ async def _looks_like_login(page) -> bool:
 _CANVAS_MAX = 12000   # bigger cap than a normal page — two Canvas regions, dated lists
 _DASH_CONTENT = [".PlannerApp", ".planner-item", "[data-testid='todo-list']",
                  ".Sidebar__TodoListContainer", ".coming_up", ".ic-DashboardCard", "#content"]
-_AGENDA_CONTENT = [".fc-listView", ".fc-agendaView", ".agenda-wrapper", "#agenda-view",
-                   ".fc-list-item", ".fc-event", ".fc-view-container", "#content"]
 # Read the main content column + the right sidebar (To Do / Coming Up) + the planner/agenda — NOT
 # the global nav chrome. Falls back to the whole app/body if those regions are sparse.
 _CANVAS_TEXT_JS = """() => {
@@ -257,6 +255,47 @@ async def _wait_for_render(page, selectors, settle_ms: int = 600, budget_ms: int
     return hit
 
 
+# The Canvas agenda fetches its events by XHR AFTER the shell loads; reading at shell-load captured
+# only a "Loading" placeholder (the real bug — the SAT2343 items live ONLY in the agenda). These are
+# the agenda EVENT-ROW selectors (Canvas's own agenda renderer, plus fullcalendar list/grid views as
+# fallbacks). _wait_for_agenda waits until real rows render — or an explicit empty state — and the
+# "Loading" indicator is gone, before reading.
+_AGENDA_EVENT_SEL = (".agenda-event__item, .ig-row, .agenda-day, .fc-list-item, .fc-list-event, "
+                     ".fc-event, .calendar-event, .agenda-wrapper .ig-details")
+_AGENDA_READY_JS = """(sel) => {
+  const rows = document.querySelectorAll(sel).length;
+  if (rows > 0) return true;                       // real event rows rendered -> done
+  const root = document.querySelector('.agenda-wrapper,#agenda-view,#calendar-app,#content,#application') || document.body;
+  const txt = (root.innerText || '');
+  if (/\\bloading\\b/i.test(txt)) return false;    // no rows yet AND still loading -> keep waiting
+  return /(nothing|no events|no assignments|no more items|you have no)/i.test(txt);  // empty state -> done
+}"""
+
+
+async def _wait_for_agenda(page, budget_ms: int = 10000) -> str:
+    """Wait for the Canvas agenda to SETTLE before reading: real event rows rendered, OR an explicit
+    'nothing scheduled' state — and the 'Loading' placeholder gone. The agenda is slower than the
+    dashboard so the budget is larger. Tolerant: a timeout just proceeds to a best-effort read, and
+    the debug dump records whatever was captured so a stuck agenda is visible, not silently empty.
+    Returns a state string for the audit log: events(N) | settled-empty | timeout."""
+    try:
+        await page.wait_for_function(_AGENDA_READY_JS, arg=_AGENDA_EVENT_SEL, timeout=budget_ms)
+        settled = True
+    except Exception:
+        settled = False
+    try:
+        await page.wait_for_timeout(400)                # tiny settle for the final rows
+    except Exception:
+        pass
+    try:
+        n = await page.evaluate("(sel) => document.querySelectorAll(sel).length", _AGENDA_EVENT_SEL)
+    except Exception:
+        n = -1
+    if n and n > 0:
+        return f"events({n})"
+    return "settled-empty" if settled else "timeout"
+
+
 async def _canvas_text(page) -> str:
     try:
         text = await page.evaluate(_CANVAS_TEXT_JS)
@@ -286,8 +325,9 @@ async def _read_agenda_region(page, url) -> dict:
     (the dashboard still answers) rather than sinking the whole read."""
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        hit = await _wait_for_render(page, _AGENDA_CONTENT)
-        return {"text": await _canvas_text(page), "hit": hit,
+        # Wait for the AGENDA EVENTS to hydrate (not just the shell) — don't read while "Loading".
+        state = await _wait_for_agenda(page)
+        return {"text": await _canvas_text(page), "hit": f"agenda:{state}",
                 "url": page.url, "title": (await page.title()) or ""}
     except Exception as e:
         print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)
