@@ -188,6 +188,62 @@ async def _looks_like_login(page) -> bool:
     return False
 
 
+# Canvas hydrates its content with JavaScript AFTER load, so reading at DOMContentLoaded gets the
+# skeleton ("Dashboard", no assignments). These are the regions/selectors where upcoming work
+# actually renders; we wait for one to attach, then read.
+_CANVAS_MAX = 12000   # bigger cap than a normal page — two Canvas regions, dated lists
+_DASH_CONTENT = [".PlannerApp", ".planner-item", "[data-testid='todo-list']",
+                 ".Sidebar__TodoListContainer", ".coming_up", ".ic-DashboardCard", "#content"]
+_AGENDA_CONTENT = [".fc-listView", ".fc-agendaView", ".agenda-wrapper", "#agenda-view",
+                   ".fc-list-item", ".fc-event", ".fc-view-container", "#content"]
+# Read the main content column + the right sidebar (To Do / Coming Up) + the planner/agenda — NOT
+# the global nav chrome. Falls back to the whole app/body if those regions are sparse.
+_CANVAS_TEXT_JS = """() => {
+  const want = ['#content','#right-side','.PlannerApp','#dashboard-planner','#agenda-view',
+                '.agenda-wrapper','.fc-listView','.fc-view-container','.Sidebar__Container'];
+  const seen = new Set(); const out = [];
+  for (const s of want) { const e = document.querySelector(s);
+    if (e && !seen.has(e)) { seen.add(e); const t = (e.innerText||'').trim(); if (t) out.push(t); } }
+  let joined = out.join('\\n\\n');
+  if (joined.replace(/\\s+/g,'').length < 40) {
+    const a = document.querySelector('#application') || document.body; joined = a ? (a.innerText||'') : ''; }
+  return joined;
+}"""
+
+
+async def _wait_for_render(page, selectors, settle_ms: int = 1500) -> str | None:
+    """Wait for async-hydrated content before reading: let the network settle, then wait for any of
+    `selectors` to attach, then a short settle. Every step is tolerant — a timeout just falls through
+    (so a genuinely empty agenda still reads, it isn't mistaken for a load failure). Returns the
+    selector that matched, or None (fell through to the settle)."""
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+    hit = None
+    for sel in selectors:
+        try:
+            await page.wait_for_selector(sel, timeout=3000, state="attached")
+            hit = sel
+            break
+        except Exception:
+            continue
+    try:
+        await page.wait_for_timeout(settle_ms)
+    except Exception:
+        pass
+    return hit
+
+
+async def _canvas_text(page) -> str:
+    try:
+        text = await page.evaluate(_CANVAS_TEXT_JS)
+    except Exception:
+        text = ""
+    text = re.sub(r"[ \t]+\n", "\n", text or "")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 async def read_canvas() -> dict:
     """Canvas-aware reader: open CANVAS_URL and return its clean readable text (assignments, due
     dates, announcements as they appear). If a login wall is detected, return an HONEST needs-login
@@ -212,9 +268,32 @@ async def read_canvas() -> dict:
                "Canvas logged me out (the saved session expired). Re-run scripts/canvas_login.py to "
                "refresh it, then ask again.")
         return {"ok": False, "needs_login": True, "landed_title": title, "landed_url": page.url, "error": msg}
-    text = await _readable(page)
-    await _emit("read_canvas", page.url, f"ok {len(text)} chars")
-    return {"ok": True, "url": page.url, "title": title, "text": text}
+    # Logged in. Canvas hydrates async — WAIT for the To Do / Coming Up content to render, then read
+    # that sidebar region (the sparse card-dashboard main is why it only saw "Dashboard" before).
+    dash_hit = await _wait_for_render(page, _DASH_CONTENT)
+    dash = await _canvas_text(page)
+    # The dated "what's due" list lives in the calendar AGENDA view — navigate there explicitly
+    # (URL hash sets the view; still read-only, no clicks) and read it too.
+    agenda, agenda_hit, agenda_url = "", None, CANVAS_URL.rstrip("/") + "/calendar#view_name=agenda"
+    try:
+        await page.goto(agenda_url, wait_until="domcontentloaded", timeout=30000)
+        agenda_hit = await _wait_for_render(page, _AGENDA_CONTENT)
+        agenda = await _canvas_text(page)
+    except Exception as e:
+        print(f"[browser] agenda read failed: {repr(e)[:80]}", file=sys.stderr)
+    parts = []
+    if dash.strip():
+        parts.append("DASHBOARD — To Do / Coming Up:\n" + dash[:_CANVAS_MAX // 2])
+    if agenda.strip():
+        parts.append("CALENDAR AGENDA — upcoming items by date:\n" + agenda[:_CANVAS_MAX // 2])
+    text = ("\n\n".join(parts))[:_CANVAS_MAX]
+    region = f"{CANVAS_URL} (dashboard, waited={dash_hit or 'settle'}) + /calendar#agenda (waited={agenda_hit or 'settle'})"
+    # Honest "empty vs failed": we loaded + waited; if there's genuinely almost no content, say so
+    # (the smart brain will tell Nate nothing's due) rather than pretend it failed.
+    sparse = len(text.strip()) < 60
+    await _emit("read_canvas", region, f"ok dash={len(dash)} agenda={len(agenda)} chars sparse={sparse}")
+    return {"ok": True, "url": region, "title": title, "text": text,
+            "regions": {"dashboard_chars": len(dash), "agenda_chars": len(agenda)}, "sparse": sparse}
 
 
 async def close_browser() -> dict:
