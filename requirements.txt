@@ -19,7 +19,8 @@ piper-tts
 kokoro-onnx
 onnxruntime-gpu  # replaces the onnxruntime CPU dep so Kokoro runs on the CUDA EP (~3x faster); uninstall onnxruntime if both present
 sounddevice
-webrtcvad-wheels
+webrtcvad-wheels   # VAD fallback only; Silero (below) is the primary ear
+silero-vad   # MIT VAD; install with --no-deps (we use ONLY its bundled ONNX via onnxruntime, no torch). app/voice.py loads models/silero/silero_vad.onnx if present, else this package's copy
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
 nvidia-cuda-runtime-cu12
