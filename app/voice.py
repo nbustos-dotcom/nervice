@@ -58,7 +58,8 @@ _KOKORO_VOICES = _ROOT / "models" / "kokoro" / "voices-v1.0.bin"
 _PIPER_VOICE = _ROOT / "models" / "piper" / "en_US-ryan-high.onnx"
 _SILERO_MODEL = _ROOT / "models" / "silero" / "silero_vad.onnx"
 
-VOICE = "bm_george"   # Kokoro voice — swap here (e.g. am_adam, am_onyx, bm_george, bm_lewis)
+VOICE = "am_echo"   # Kokoro voice — swap here (e.g. am_echo, am_adam, am_onyx, bm_george). am_/af_
+#                     voices phonemize en-us; bm_/bf_ voices phonemize en-gb (derived below).
 
 # Optional voice blend: average two preset style vectors (weights need not sum to 1, but ~1 is
 # natural). Set BLEND to enable; it overrides VOICE. Leave None to use VOICE as-is.

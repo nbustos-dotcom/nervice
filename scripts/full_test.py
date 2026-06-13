@@ -344,11 +344,11 @@ def t11_t12_voice():
         try:
             import app.voice as v
             pcm, sr = v.synth_to_pcm("Right then, all systems nominal.")
-            ok12 = pcm.size > 0 and sr == 24000 and "bm_george" in v.TTS_ENGINE
-            rec("12 VOICE TTS (British)", "PASS" if ok12 else "FAIL", el(),
+            ok12 = pcm.size > 0 and sr == 24000 and "am_echo" in v.TTS_ENGINE
+            rec("12 VOICE TTS (am_echo)", "PASS" if ok12 else "FAIL", el(),
                 f"{pcm.size/sr:.1f}s @ {sr}Hz, engine={v.TTS_ENGINE}", "local GPU")
         except Exception as e:
-            rec("12 VOICE TTS (British)", "FAIL", el(), repr(e)[:90])
+            rec("12 VOICE TTS (am_echo)", "FAIL", el(), repr(e)[:90])
 
 
 # ============================ sync tests (TestClient: streaming + auth) ============================
