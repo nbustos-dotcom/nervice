@@ -53,7 +53,7 @@ LOGPROB_DROP = -1.0          # whisper avg_logprob   <= this -> drop as too unco
 # Structure-aware trailing pause per synthesized chunk (sized by its terminal punctuation): a fuller
 # breath after a full sentence, a lighter beat after a clause, minimal after a fragment. Deterministic,
 # free, NO speed change — long explanations breathe between sentences; short replies don't drag.
-SENTENCE_PAUSE_MS = 200   # after . ? !
+SENTENCE_PAUSE_MS = 150   # after . ? !
 CLAUSE_PAUSE_MS = 90      # after , ; :
 TAIL_PAUSE_MS = 50        # no terminal punctuation (fragment / streamed tail)
 
@@ -369,6 +369,55 @@ def _strip_screen_only(text: str) -> str:
     return text
 
 
+# --- number / unit normalization backstop (spoken-only). Runs LAST in _clean_for_speech, AFTER
+# hashes/paths are stripped (screen-only) and symbols normalized — so a commit hash is already gone
+# and can never be read digit-by-digit. num2words output is de-hyphenated so it needs no second pass.
+try:
+    from num2words import num2words as _n2w_raw
+    _HAS_N2W = True
+except Exception:
+    _HAS_N2W = False
+
+_CURRENCY = re.compile(r"\$(\d+)(?:\.(\d{1,2}))?")
+_TIME = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
+_MPH = re.compile(r"\b(\d+)\s?mph\b", re.IGNORECASE)
+# Isolated number only: NOT glued to a letter, dot, colon, $, %, slash, or hyphen — so commit hashes,
+# IDs, version strings (4.2, 2.1.6, v3, 120b) and paths are left exactly as written (never expanded).
+_BARE_NUM = re.compile(r"(?<![\w.:$%/\\-])(\d+(?:\.\d+)?)(?![\w:%/\\-])(?!\.\d)")
+
+
+def _num_words(n):
+    return _n2w_raw(n).replace("-", " ").replace(",", "")
+
+
+def _normalize_numbers(text: str) -> str:
+    """Spoken-only backstop for numbers the persona phrasing missed: currency, clock times, mph, and
+    isolated bare numbers -> spoken words. Conservative: anything glued to letters/dots/IDs is left
+    as-is, and (hashes/paths already stripped) a commit hash is never reached. No-op without num2words."""
+    if not _HAS_N2W:
+        return text
+
+    def money(m):
+        whole, cents = int(m.group(1)), m.group(2)
+        out = _num_words(whole) + (" dollar" if whole == 1 else " dollars")
+        c = int((cents + "0")[:2]) if cents else 0
+        if c:
+            out += " and " + _num_words(c) + (" cent" if c == 1 else " cents")
+        return out
+
+    def clock(m):
+        h, mm = int(m.group(1)), int(m.group(2))
+        if mm == 0:
+            return f"{_num_words(h)} o'clock"
+        return f"{_num_words(h)} oh {_num_words(mm)}" if mm < 10 else f"{_num_words(h)} {_num_words(mm)}"
+
+    text = _CURRENCY.sub(money, text)
+    text = _TIME.sub(clock, text)
+    text = _MPH.sub(lambda m: f"{_num_words(int(m.group(1)))} miles per hour", text)
+    text = _BARE_NUM.sub(lambda m: _num_words(float(m.group(1)) if "." in m.group(1) else int(m.group(1))), text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
 def _clean_for_speech(text: str) -> str:
     # code blocks are not read aloud — replaced with a single spoken note
     text = _CODE_BLOCK.sub(" I've put the code on screen. ", text)
@@ -378,7 +427,8 @@ def _clean_for_speech(text: str) -> str:
     text = _BARE_URL.sub(" a link ", text)    # don't read raw URLs aloud
     text = _strip_screen_only(text)           # hashes/paths/IDs: shown on screen, never spoken
     text = re.sub(r"[#*_>`]", "", text)        # strip markdown formatting (| is a pause, handled below)
-    return _normalize_for_speech(text)         # symbols -> spoken words / pauses (spoken stream only)
+    text = _normalize_for_speech(text)         # symbols -> spoken words / pauses (spoken stream only)
+    return _normalize_numbers(text)            # numbers / currency / times / units -> spoken words
 
 
 _SYNTH_SENTINEL = object()
