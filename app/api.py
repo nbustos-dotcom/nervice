@@ -55,6 +55,27 @@ try:
 except Exception:
     _GIT_HASH = "unknown"
 
+
+# Stale-server guard: the booted hash above is fixed for this process's life; _live_head() reads the
+# CURRENT repo HEAD (cached ~30s) so /health can report whether the running server predates the latest
+# commit. The HUD turns `stale: true` into a visible "restart to load new code" warning.
+_HEAD_CACHE = {"hash": _GIT_HASH, "at": 0.0}
+
+
+def _live_head() -> str:
+    now = time.monotonic()
+    if now - _HEAD_CACHE["at"] > 30.0:
+        try:
+            h = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                               capture_output=True, text=True, timeout=5,
+                               cwd=str(pathlib.Path(__file__).resolve().parent.parent)).stdout.strip()
+            if h:
+                _HEAD_CACHE["hash"] = h
+        except Exception:
+            pass
+        _HEAD_CACHE["at"] = now
+    return _HEAD_CACHE["hash"]
+
 # Per-conversation sliding window of the last WINDOW_MAX messages, in-process (single user).
 # CAVEAT: lost on restart — but that's only the verbatim recent-turns buffer; durable facts about
 # Nate live in the memory DB (retrieved fresh each turn), so a restart loses chat scrollback, not
@@ -204,12 +225,14 @@ class ChatIn(BaseModel):
 async def health():
     # Voice models are warmed by the startup thread; report where that stands without forcing a load.
     voice = _voice_state["status"]
+    live = _live_head()
+    stale = (_GIT_HASH != "unknown" and live != "unknown" and live != _GIT_HASH)
     if voice == "warm" and "app.voice" in sys.modules:
         v = sys.modules["app.voice"]
         return {"status": "ok", "voice": "warm", "stt": v.WHISPER_PATH, "tts": v.TTS_ENGINE,
-                "git": _GIT_HASH, "boot": _BOOT_TIME}
+                "git": _GIT_HASH, "head": live, "stale": stale, "boot": _BOOT_TIME}
     return {"status": "ok", "voice": voice, "stt": "faster-whisper base.en", "tts": "kokoro",
-            "git": _GIT_HASH, "boot": _BOOT_TIME}
+            "git": _GIT_HASH, "head": live, "stale": stale, "boot": _BOOT_TIME}
 
 
 @app.get("/weather", dependencies=[Depends(auth)])

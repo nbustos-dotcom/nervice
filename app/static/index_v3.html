@@ -993,8 +993,12 @@ async function loadStats(){
 async function loadHealth(){
   const dot=$('#sysDot'), st=$('#sysStat');
   try{ const h=await api('/health'); const warm=h.voice==='warm';
-    dot.className='dot '+(warm?'on':'warn'); st.textContent= warm?'system online':'warming core';
-    if(h.git){ $('#bsVer').textContent=h.git; $('#brainStrip').style.display=''; }  // version banner (stale-server killer)
+    if(h.stale){ dot.className='dot warn'; st.textContent='SERVER STALE — restart to load new code'; }
+    else { dot.className='dot '+(warm?'on':'warn'); st.textContent= warm?'system online':'warming core'; }
+    if(h.git){ const v=$('#bsVer');
+      v.textContent = h.stale ? (h.git+' → '+(h.head||'?')+' STALE') : h.git;
+      v.style.color = h.stale ? '#ff6b6b' : '';
+      $('#brainStrip').style.display=''; }  // version banner + stale-server guard
   }catch(e){ dot.className='dot off'; st.textContent= String(e.message).indexOf('401')>=0?'no token':'offline'; }
 }
 
