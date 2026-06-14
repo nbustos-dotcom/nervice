@@ -33,6 +33,13 @@ except (TypeError, ValueError):
 BUDGET_MSG = ("I've hit today's Claude budget, so I'm staying on the free brains for the rest of "
               "the day — it resets tomorrow.")
 
+# FREE-ONLY mode: a persisted runtime switch (default OFF). When ON, every Claude path
+# short-circuits to the free rungs / an honest message (see claude_blocked_reason). Persisted in
+# data/claude_control.json so it survives a restart; flipped via the authed POST /free-only.
+_CONTROL_FILE = _DIR / "claude_control.json"
+FREE_ONLY_MSG = ("Free-only mode is on, so I'm staying on the free brains — Claude's switched off. "
+                 "Flip it back off when you want the heavy model.")
+
 
 def _today() -> str:
     return datetime.now(_TZ).strftime("%Y-%m-%d")
@@ -103,12 +110,34 @@ def today_claude_usd() -> float:
         return 0.0
 
 
+def free_only() -> bool:
+    """True when FREE-ONLY mode is ON (persisted). Read fresh each call so a POST /free-only flip
+    takes effect immediately, even mid-process. False on any read error — the switch is opt-IN, so
+    a missing/corrupt control file means OFF."""
+    try:
+        return bool(json.loads(_CONTROL_FILE.read_text(encoding="utf-8")).get("free_only", False))
+    except Exception:
+        return False
+
+
+def set_free_only(on: bool) -> None:
+    """Persist the FREE-ONLY switch (data/claude_control.json). Never raises."""
+    try:
+        _DIR.mkdir(parents=True, exist_ok=True)
+        _CONTROL_FILE.write_text(json.dumps({"free_only": bool(on)}), encoding="utf-8")
+    except Exception as e:
+        print(f"[usage] free-only write failed: {repr(e)[:80]}", file=sys.stderr)
+
+
 def claude_blocked_reason() -> str | None:
     """The shared, in-code Claude gate. Returns None when a Claude call is allowed, else the honest
     user-facing message to show instead. Checked at EVERY Claude entry point in app/agent.py, before
     any SDK call — so it cannot be bypassed by any route, and it holds regardless of Anthropic's own
-    billing toggle. Never raises (a telemetry hiccup must not wedge a turn)."""
+    billing toggle. FREE-ONLY mode wins over the cap. Never raises (a telemetry hiccup must not wedge
+    a turn)."""
     try:
+        if free_only():
+            return FREE_ONLY_MSG
         if today_claude_usd() >= CLAUDE_DAILY_CAP_USD:
             return BUDGET_MSG
     except Exception:

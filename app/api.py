@@ -608,7 +608,23 @@ async def ladder():
             "capped_until": capped_until_iso,
             "claude_spend_usd": round(usage.today_claude_usd(), 4),
             "claude_cap_usd": usage.CLAUDE_DAILY_CAP_USD,
+            "free_only": usage.free_only(),
             "today": {"turns": len(rows), "rungs": dist}}
+
+
+class FreeOnlyIn(BaseModel):
+    on: bool
+
+
+@app.post("/free-only", dependencies=[Depends(auth)])
+async def free_only_toggle(inp: FreeOnlyIn):
+    """Flip FREE-ONLY mode. When ON, every Claude path short-circuits to the free rungs (or an
+    honest 'Claude is off') — enforced in code (app/usage.claude_blocked_reason, checked at every
+    Claude entry point in app/agent.py), independent of any Anthropic-account setting. Persisted in
+    data/claude_control.json. (A HUD button can wire here later; the endpoint + GET /ladder state
+    are the contract now.)"""
+    usage.set_free_only(bool(inp.on))
+    return {"free_only": usage.free_only()}
 
 
 @app.get("/pending", dependencies=[Depends(auth)])
