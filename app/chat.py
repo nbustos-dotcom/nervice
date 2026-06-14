@@ -277,13 +277,10 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         classify(user_message))
     apply_local_memory()                 # publish the compact local-rung memory block (Fix 2.2)
 
-    # Fix 2.4: deterministic confusion signals. Level 1 = hint in the system prompt;
-    # level 2 (consecutive) = this turn goes to consult_claude regardless of topic.
-    conf = confusion.check(user_id, user_message)
-    if conf == "hint":
+    # Precaution #4: confusion is a FREE in-prompt nudge only — it never escalates to paid Claude
+    # (the old level-2 consult path auto-spent, worst exactly when Groq was capped).
+    if confusion.check(user_id, user_message) == "hint":
         system += confusion.HINT
-    elif conf == "escalate":
-        route = {"route": "hard"}
 
     async def _ack(text):
         print(text)                      # immediate text feedback before the slow tool
@@ -296,8 +293,7 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
                                 voice_mode=voice_mode, on_ack=_ack)
     print(reply)
     rung = "exhausted" if (reply or "").startswith(LADDER_EXHAUSTED_MSG) else current_rung.get()
-    log_turn(route.get("route", "?"), rung, time.monotonic() - t0, "rest",
-             extra=("reason=confusion" if conf == "escalate" else ""))
+    log_turn(route.get("route", "?"), rung, time.monotonic() - t0, "rest")
     confusion.note_turn_end(user_id, rung, guard_tripped.get())
     return reply
 
