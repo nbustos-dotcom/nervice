@@ -53,11 +53,15 @@ _BUILDER_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"] + [f"Bash({c}:*)" for
 
 # Secrets stripped from the spawned agent's environment. The SDK MERGES our env dict into
 # os.environ, so any of these left in os.environ would leak into the agent's shell. We pop
-# them for the call and restore in a finally. CLAUDE_CODE_OAUTH_TOKEN is included so the agent
-# authenticates ONLY from stored creds in CONFIG_DIR — its shell never holds the Pro token.
+# them for the call and restore in a finally. CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, and
+# ANTHROPIC_AUTH_TOKEN are included so the agent authenticates ONLY from stored creds in
+# CONFIG_DIR (the Pro/Max subscription) — never a token in its shell. The API-key vars matter for
+# billing: a stray ANTHROPIC_API_KEY would route the SDK to a pay-as-you-go API account, billing
+# beyond the subscription and its included Agent-SDK credit (past the Usage-Credits OFF stop).
 # Caveat: this is single-user sequential (one REPL turn at a time); concurrent agent_task calls
 # would race on the global os.environ during the strip/restore window.
-_SCRUB_KEYS = ["GROQ_API_KEY", "DATABASE_URL", "DATABASE_URL_MIGRATIONS", "CLAUDE_CODE_OAUTH_TOKEN"]
+_SCRUB_KEYS = ["GROQ_API_KEY", "DATABASE_URL", "DATABASE_URL_MIGRATIONS", "CLAUDE_CODE_OAUTH_TOKEN",
+               "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
 
 
 async def _ask_one(task: str, system: str | None, name: str, config_dir: pathlib.Path) -> str:
