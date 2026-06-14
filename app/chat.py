@@ -232,6 +232,13 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         print(msg, file=sys.stderr)
         log_turn("browser", "browse-read", time.monotonic() - t0, "rest")
         return msg
+    # NEW-PROJECT guided setup: while a setup is in progress, EVERY turn is an answer to it (one
+    # question at a time) — intercepted before routing so free-text answers aren't re-classified.
+    if orchestrator.setup_active():
+        reply = await orchestrator.setup_continue(user_message, voice_mode=voice_mode)
+        print(reply)
+        log_turn("orchestrator", current_rung.get(), time.monotonic() - t0, "rest")
+        return reply
     # A pending local-action confirmation takes precedence over routing: a "yes"/"no" here answers
     # the prior RISKY ask, never gets classified as a fresh turn.
     pending = computer.resolve_pending(user_id, user_message)

@@ -31,8 +31,8 @@ ROUTES + their JSON shapes:
 {"route":"selfmod"} selfmod = an explicit request to change Nervice's OWN behavior/personality/code ("stop ending sentences with questions"). Opinions about itself are normal.
 {"route":"browse"} browse = find/check/read/report something ON a specific named website ("open hacker news and tell me the top story"). General factual/news questions are normal.
 {"route":"canvas"} canvas = a question about Nate's SCHOOL CANVAS — what's due, upcoming assignments, due dates, announcements, or grades ("what's due this week", "any new assignments", "check canvas", "what are my grades", "anything due on canvas"). This READS his live Canvas page.
-{"route":"orchestrator","op":"critique|plan|next|done|redo|status|gaps|summary"}
-  orchestrator = managing Nate's CODING PROJECT PLAN (the project doc at docs/projects/ACTIVE.md). op critique = "critique my project", "review my project doc", "find gaps in my plan". op plan = "plan my project", "break it into steps", "show the plan", "what's the plan". op next = "next step", "give me the next step", "what do I paste next", "what's the next prompt". op done = "mark step done", "I finished that step", "that step's done", "mark it done". op redo = "redo", "redo that step", "give me a different prompt for this step". op status = "project status", "how many steps left". op gaps = "show gaps", "show me the critique". op summary = "how's my project", "how's the project going", "give me a project update", "where am I on the project". This is about Nate's coding PROJECT plan — NOT Canvas (school) and NOT building files right now.
+{"route":"orchestrator","op":"new|critique|plan|next|done|redo|status|gaps|summary"}
+  orchestrator = managing Nate's CODING PROJECT PLAN (the project doc at docs/projects/ACTIVE.md). op new = "start a new project", "new project", "create a project", "set up a new project", "begin a new project" — BEGINS a guided setup where Nervice asks questions and writes the project doc for him (this is the META setup of the project doc, NOT writing code/files — that's build). op critique = "critique my project", "review my project doc", "find gaps in my plan". op plan = "plan my project", "break it into steps", "show the plan", "what's the plan". op next = "next step", "give me the next step", "what do I paste next", "what's the next prompt". op done = "mark step done", "I finished that step", "that step's done", "mark it done". op redo = "redo", "redo that step", "give me a different prompt for this step". op status = "project status", "how many steps left". op gaps = "show gaps", "show me the critique". op summary = "how's my project", "how's the project going", "give me a project update", "where am I on the project". This is about Nate's coding PROJECT plan — NOT Canvas (school) and NOT building files right now.
 {"route":"actions"} actions = a question about what NERVICE has DONE / its own recent activity ("what have you done", "what actions have you taken", "what did you do", "what have you been up to", "what have you been doing lately", "what have you been working on"). Reads Nervice's real action audit log. NOT "what's the plan" (that's orchestrator) and NOT a request to DO something (that's control).
 {"route":"normal"} normal = everything else: chat, opinions, simple facts, news/current events, and any DISCUSSION (vs an explicit action request).
 
@@ -48,7 +48,7 @@ _CTRL_ACTIONS = {"open_app", "open_url", "play_youtube", "screenshot", "focus_wi
 _SKILL_OPS = {"run", "create", "list", "delete"}
 _MUSIC_OPS = {"set", "add", "remove", "list", "clear"}
 _SYS_QUESTIONS = {"cpu", "ram", "gpu", "disk", "os", "uptime", "specs", "top_proc", "file_count"}
-_ORCH_OPS = {"critique", "plan", "next", "done", "redo", "status", "gaps", "summary"}
+_ORCH_OPS = {"new", "critique", "plan", "next", "done", "redo", "status", "gaps", "summary"}
 
 # Deterministic guard: a complaint/reaction about a prior action must stay conversational and NEVER
 # reach the browse agent or the control interpreter, regardless of what the LLM router decides.
@@ -81,6 +81,7 @@ _CANVAS_KW = re.compile(r"\bcanvas\b", re.I)   # both LLMs down -> route to the 
 # Orchestrator (project planner). Keyword net only (both LLM rungs down); read-only ops still work
 # fully capped (status/gaps/show plan), LLM ops degrade to an honest "need Groq/Ollama".
 _ORCH_KW = re.compile(r"\b(my project|the project|project (?:plan|doc|status)|the plan|plan my project|"
+                      r"new project|start (?:a )?(?:new )?project|create (?:a )?project|set ?up (?:a )?project|begin (?:a )?(?:new )?project|"
                       r"next step|next prompt|critique (?:my|the)|show (?:me )?(?:the )?gaps|"
                       r"mark (?:the |this |that )?step|step(?:'?s| is)? done|redo (?:the |this |that )?step)\b", re.I)
 
@@ -94,6 +95,8 @@ def _orch_keyword_op(m: str) -> str | None:
     ml = (m or "").lower()
     if not _ORCH_KW.search(ml):
         return None
+    if ("new" in ml or "start" in ml or "create" in ml or "set up" in ml or "begin" in ml) and "project" in ml:
+        return "new"
     if "critique" in ml:
         return "critique"
     if "gap" in ml:

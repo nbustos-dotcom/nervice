@@ -169,6 +169,25 @@ def state_snapshot() -> dict:
 
 # --------------------------------------------------------------------------- the FREE-only LLM call
 
+def _loads_lenient(text: str):
+    """Parse JSON tolerantly — the local 4B sometimes appends prose AFTER the JSON object (a strict
+    json.loads then fails with 'Extra data'). Try strict first, then the first balanced {...}/[...].
+    Returns the parsed value or None."""
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    m = re.search(r"[\{\[].*[\}\]]", text, re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return None
+    return None
+
+
 async def _ask_free(system: str, user: str, *, want_json: bool = False, num_predict: int = 500):
     """Run ONE planner/critic completion on the FREE rungs only — Groq first, local Ollama when Groq
     is capped, and an honest empty otherwise. NEVER Claude/the Agent SDK. Sets current_rung for the
@@ -191,15 +210,25 @@ async def _ask_free(system: str, user: str, *, want_json: bool = False, num_pred
             print(f"[orchestrator] groq error -> ollama: {repr(e)[:120]}", file=sys.stderr)
     try:
         if want_json:
-            obj = await ollama.chat_json(system, user)
-            current_rung.set("ollama")
-            return obj, "ollama"
-        m = await ollama.chat([{"role": "system", "content": system},
-                               {"role": "user", "content": user}], options={"num_predict": num_predict})
-        out = (m.get("content") or "").strip()
-        if out:
-            current_rung.set("ollama")
-            return out, "ollama"
+            try:
+                obj = await ollama.chat_json(system, user)          # format=json, strict parse
+            except ollama.OllamaUnavailable:
+                raise
+            except Exception:
+                # the 4B sometimes appends prose after the object -> re-ask and parse leniently
+                m = await ollama.chat([{"role": "system", "content": system + "\nReturn ONLY the JSON object — nothing after it."},
+                                       {"role": "user", "content": user}], options={"num_predict": num_predict})
+                obj = _loads_lenient(m.get("content") or "")
+            if obj is not None:
+                current_rung.set("ollama")
+                return obj, "ollama"
+        else:
+            m = await ollama.chat([{"role": "system", "content": system},
+                                   {"role": "user", "content": user}], options={"num_predict": num_predict})
+            out = (m.get("content") or "").strip()
+            if out:
+                current_rung.set("ollama")
+                return out, "ollama"
     except ollama.OllamaUnavailable as e:
         print(f"[orchestrator] ollama unavailable: {e}", file=sys.stderr)
     except Exception as e:
@@ -452,8 +481,269 @@ async def _op_summary(voice: bool) -> str:
     return ans if rung != "none" else _NEED_FREE_MSG
 
 
+# =============================== NEW-PROJECT guided setup ===============================
+# Nate starts a project by CONVERSATION instead of hand-editing docs/projects/ACTIVE.md. "start a new
+# project" begins a stateful, ONE-question-at-a-time flow (goal -> context -> requirements ->
+# out-of-scope -> confirm) tracked in data/orchestrator_setup.json so it survives across turns. On
+# confirm, Groq drafts the ACTIVE.md (deriving success-criteria from the goal) and it's written; an
+# existing real project is archived to docs/projects/archive/ first, never silently lost. Free rungs
+# only (the draft is Groq -> Ollama -> deterministic fallback); NEVER Claude. Reads/writes only
+# docs/projects/ files + the setup state — nothing else.
+
+SETUP_FILE = _ROOT / "data" / "orchestrator_setup.json"
+ARCHIVE_DIR = _ROOT / "docs" / "projects" / "archive"
+_SETUP_TTL_S = 3600   # a forgotten setup expires after an hour (Nate can always say "cancel")
+_STEP_ORDER = ["goal", "context", "requirements", "out_of_scope"]
+_OPTIONAL = {"context", "out_of_scope"}
+_Q = {
+    "goal": "Let's set up a new project. In a sentence or two — what's the goal? What are you building?",
+    "context": "Got it. Any context I should know — where it lives, what it builds on, or any constraints? Say \"skip\" if there's nothing.",
+    "requirements": "What are the key requirements — the main things it needs to do? List the big ones.",
+    "out_of_scope": "Last thing: anything explicitly OUT of scope, that you're NOT doing yet? Say \"skip\" if none.",
+}
+_CANCEL_RE = re.compile(r"^\s*(cancel(?: it| this| setup| that)?|never ?mind|forget it|abort|quit|stop(?: it)?)\s*[.!]*\s*$", re.I)
+_SKIP_RE = re.compile(r"^\s*(skip(?: it| this)?|none|n/?a|no(?:ne| thanks)?|nope|nah|pass|move on|nothing)\s*[.!]*\s*$", re.I)
+_YES_RE = re.compile(r"^\s*(yes|yeah|yep|yup|sure|ok|okay|looks good|sounds good|do it|save(?: it| that)?|confirm(?: it)?|go ahead|perfect|great|good|that'?s (?:good|right|it)|ship it)\b", re.I)
+_REVISE_RE = re.compile(r"\b(change|edit|redo|fix|update|revise|rewrite|tweak|wrong|different|not right)\b", re.I)
+
+
+def _now_iso() -> str:
+    return datetime.now(TZ).isoformat(timespec="seconds")
+
+
+def _blank_answers() -> dict:
+    return {"goal": "", "context": "", "requirements": "", "out_of_scope": ""}
+
+
+def _load_setup() -> dict:
+    try:
+        return json.loads(SETUP_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_setup(s: dict) -> None:
+    try:
+        SETUP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SETUP_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[orchestrator] could not save setup: {repr(e)[:80]}", file=sys.stderr)
+
+
+def _clear_setup() -> None:
+    try:
+        SETUP_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[orchestrator] could not clear setup: {repr(e)[:80]}", file=sys.stderr)
+
+
+def setup_active() -> bool:
+    """True if a new-project setup is in progress (and not stale). Checked at the top of every turn —
+    must never raise. A setup older than the TTL is cleared and treated as inactive."""
+    s = _load_setup()
+    if not s.get("active"):
+        return False
+    try:
+        started = datetime.fromisoformat(s.get("started", ""))
+        if (datetime.now(TZ) - started).total_seconds() > _SETUP_TTL_S:
+            _clear_setup()
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _next_step(step: str) -> str:
+    i = _STEP_ORDER.index(step)
+    return _STEP_ORDER[i + 1] if i + 1 < len(_STEP_ORDER) else "confirm"
+
+
+def _which_field(text: str) -> str | None:
+    t = (text or "").lower()
+    if "out of scope" in t or "out-of-scope" in t or ("scope" in t and "out" in t):
+        return "out_of_scope"
+    if "requirement" in t:
+        return "requirements"
+    if "context" in t or "background" in t:
+        return "context"
+    if "goal" in t:
+        return "goal"
+    return None
+
+
+def _archive_existing() -> str | None:
+    """Archive the current real ACTIVE.md to docs/projects/archive/<ts>.md so a project is never lost
+    on overwrite. Returns the archive path, or None if there was nothing real to archive."""
+    existing = _doc_text_or_none()
+    if not existing:
+        return None
+    try:
+        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        dest = ARCHIVE_DIR / (datetime.now(TZ).strftime("%Y%m%d-%H%M%S") + ".md")
+        dest.write_text(existing + "\n", encoding="utf-8")
+        print(f"[orchestrator] archived old project -> {dest.name}", file=sys.stderr)
+        return str(dest)
+    except Exception as e:
+        print(f"[orchestrator] archive failed: {repr(e)[:80]}", file=sys.stderr)
+        return None
+
+
+def _assemble_doc(a: dict) -> str:
+    """Deterministic ACTIVE.md from the raw answers — the fallback when both free LLMs are down, so a
+    new project can still be created (just without LLM-polished success criteria)."""
+    def bullets(s):
+        items = [ln.strip("-•* \t") for ln in re.split(r"[\n;]+", s or "") if ln.strip("-•* \t")]
+        return "\n".join(f"- {it}" for it in items) if items else "- (none specified)"
+    goal = (a.get("goal") or "").strip() or "(not specified)"
+    ctx = (a.get("context") or "").strip() or "(none specified)"
+    title = " ".join(goal.split()[:6])
+    return (f"# PROJECT — {title}\n\n## Goal\n{goal}\n\n## Context\n{ctx}\n\n"
+            f"## Requirements\n{bullets(a.get('requirements'))}\n\n"
+            f"## Out of scope\n{bullets(a.get('out_of_scope'))}\n\n"
+            f"## Success criteria\n- The goal above is met and each requirement is built and verified.\n")
+
+
+async def _draft_doc(answers: dict) -> tuple[str, str]:
+    """Groq drafts a clean ACTIVE.md from the answers (deriving success criteria from the goal). Free
+    rung; deterministic assembly if both LLMs are down. Returns (markdown, rung). Never Claude."""
+    system = (
+        "You format Nate's answers into a clean project doc for Nervice's planner. Output ONLY the "
+        "markdown, with EXACTLY these sections in order: a '# PROJECT — <short title>' heading, then "
+        "'## Goal', '## Context', '## Requirements' (as '- ' bullets), '## Out of scope' (as '- ' "
+        "bullets), and '## Success criteria' (1 to 3 concrete, testable '- ' bullets you DERIVE from "
+        "the goal and requirements). Use ONLY his answers — never invent features or scope. If a field "
+        "was skipped, write '- (none specified)'. Keep it tight and faithful.")
+    user = (f"GOAL: {answers.get('goal','')}\n"
+            f"CONTEXT: {answers.get('context','') or '(skipped)'}\n"
+            f"REQUIREMENTS: {answers.get('requirements','')}\n"
+            f"OUT OF SCOPE: {answers.get('out_of_scope','') or '(skipped)'}")
+    doc, rung = await _ask_free(system, user, want_json=False, num_predict=700)
+    if rung == "none" or not (doc or "").strip():
+        current_rung.set("direct")
+        return _assemble_doc(answers), "direct"
+    return doc.strip(), rung
+
+
+def _write_active(doc: str) -> str | None:
+    """Archive any existing real doc, then write the new ACTIVE.md and CLEAR the old plan state so the
+    new project starts fresh. Returns the archive path (or None)."""
+    archived = _archive_existing()
+    try:
+        ACTIVE_DOC.parent.mkdir(parents=True, exist_ok=True)
+        ACTIVE_DOC.write_text(doc.strip() + "\n", encoding="utf-8")
+    except Exception as e:
+        print(f"[orchestrator] could not write ACTIVE.md: {repr(e)[:80]}", file=sys.stderr)
+    try:
+        STATE_FILE.unlink()   # new project -> drop the previous plan / gaps / prompts
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    return archived
+
+
+async def _confirm_reply(s: dict) -> str:
+    """Draft the doc (Groq), stash it on the setup state, and ask Nate to confirm. The draft is shown
+    in a fenced block so on voice it is PUT ON SCREEN, not read aloud, while a short line is spoken."""
+    doc, _rung = await _draft_doc(s["answers"])
+    s["draft"] = doc
+    _save_setup(s)
+    return ("Here's the draft of your project doc:\n\n```\n" + doc.strip() + "\n```\n\n"
+            "Say \"yes\" to save it, or tell me what to change — goal, context, requirements, or out-of-scope.")
+
+
+async def begin_setup(voice_mode: bool = False) -> str:
+    """Start the guided new-project flow. If a real project already exists, confirm the replace first
+    (it will be archived). No LLM here — rung=direct."""
+    current_rung.set("direct")
+    existing = _doc_text_or_none()
+    if existing:
+        goal = _parse_goal(existing) or "your current project"
+        _save_setup({"active": True, "step": "overwrite_confirm", "answers": _blank_answers(),
+                     "revising": False, "started": _now_iso()})
+        return (f"Heads up — you've already got a project: {goal[:140]}. Starting a new one replaces it "
+                "(I'll archive the old one first so it's not lost). Want to go ahead? Say \"yes\" to "
+                "continue, or \"cancel\" to keep what you've got.")
+    _save_setup({"active": True, "step": "goal", "answers": _blank_answers(),
+                 "revising": False, "started": _now_iso()})
+    return _Q["goal"]
+
+
+async def setup_continue(user_message: str, voice_mode: bool = False) -> str:
+    """Process Nate's answer for the current setup step and advance — one question at a time. Called
+    by the in-turn setup gate (chat.respond / streaming.stream_reply) while setup is active. Free
+    rungs only (the Groq draft at confirm); NEVER Claude. Sets current_rung for the turn telemetry."""
+    current_rung.set("direct")
+    s = _load_setup()
+    if not s.get("active"):
+        return "There's no project setup in progress — say \"start a new project\" to begin one."
+    text = (user_message or "").strip()
+    step = s.get("step", "goal")
+
+    if step == "overwrite_confirm":
+        if _YES_RE.match(text):
+            s["step"] = "goal"
+            _save_setup(s)
+            return _Q["goal"]
+        _clear_setup()
+        return "Okay, keeping your current project — nothing changed."
+
+    if step in _STEP_ORDER:
+        if _CANCEL_RE.match(text):
+            _clear_setup()
+            return "Cancelled — no project created."
+        if _SKIP_RE.match(text):
+            if step not in _OPTIONAL:
+                return "I need at least this one. " + _Q[step]
+            s["answers"][step] = ""
+        elif not text:
+            return _Q[step]
+        else:
+            s["answers"][step] = text
+        if s.get("revising"):
+            s["revising"] = False
+            s["step"] = "confirm"
+            _save_setup(s)
+            return await _confirm_reply(s)
+        nxt = _next_step(step)
+        s["step"] = nxt
+        _save_setup(s)
+        return await _confirm_reply(s) if nxt == "confirm" else _Q[nxt]
+
+    if step == "confirm":
+        field = _which_field(text)
+        if field or _REVISE_RE.search(text):
+            if field:
+                s["revising"] = True
+                s["step"] = field
+                _save_setup(s)
+                return "Sure — " + _Q[field]
+            return "Which part should I change — the goal, context, requirements, or out-of-scope?"
+        if _CANCEL_RE.match(text):
+            _clear_setup()
+            return "Cancelled — nothing saved."
+        if _YES_RE.match(text):
+            doc = s.get("draft") or _assemble_doc(s["answers"])
+            archived = _write_active(doc)
+            _clear_setup()
+            extra = " Your old project is archived in docs/projects/archive." if archived else ""
+            return ("Saved it to docs/projects/ACTIVE.md." + extra +
+                    " Say \"critique my project\" and I'll look for gaps, then \"plan my project\" to break it into steps.")
+        return "Say \"yes\" to save it, or tell me what to change — goal, context, requirements, or out-of-scope."
+
+    _clear_setup()
+    return "Something got tangled in the setup — say \"start a new project\" to try again."
+
+
+async def _op_new(voice: bool) -> str:
+    return await begin_setup(voice)
+
+
 _OPS = {"critique": _op_critique, "plan": _op_plan, "next": _op_next, "done": _op_done,
-        "redo": _op_redo, "status": _op_status, "gaps": _op_gaps, "summary": _op_summary}
+        "redo": _op_redo, "status": _op_status, "gaps": _op_gaps, "summary": _op_summary,
+        "new": _op_new}
 
 
 async def handle(op: str, voice_mode: bool = False) -> str:
