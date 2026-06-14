@@ -12,3 +12,6 @@ screenshots/
 
 # user location store (private)
 data/
+
+# Nate's personal project doc for the orchestrator (private; the code writes a template if absent)
+docs/projects/

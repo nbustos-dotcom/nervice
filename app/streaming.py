@@ -384,7 +384,11 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         else:
             sents = [s.strip() for s in _SENT_BOUNDARY.split(reply)
                      if s.strip() and re.search(r"[A-Za-z0-9]", s)]
-            if len(sents) <= 1:
+            # A fenced code block (e.g. an orchestrator Claude Code prompt) must be SHOWN, not read
+            # aloud: deliver it as one full text frame (HUD shows the whole prompt to copy) and one
+            # whole-reply synth — _clean_for_speech collapses the fence to "I've put the code on
+            # screen", so the prompt body is never spoken or mangled by per-sentence splitting.
+            if len(sents) <= 1 or "```" in reply:
                 await send({"type": "text", "text": reply})
                 b64 = await asyncio.to_thread(_synth_full_b64, reply)
                 if b64:
