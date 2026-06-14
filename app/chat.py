@@ -64,7 +64,17 @@ VOICE_ADDENDUM = ("VOICE MODE: your reply will be spoken aloud. Flowing conversa
 
 async def build_system_prompt(user_id, user_message, voice_mode: bool = False):
     global _pending_local_mem
-    r = await retrieve(user_id, user_message)
+    # Reliability floor: retrieve() is already fail-soft, but this belt guarantees the asyncio.gather
+    # in respond()/stream_reply() can NEVER raise from recall — a routed turn answers even if memory
+    # is totally unreachable (empty recall), instead of 500ing.
+    try:
+        r = await retrieve(user_id, user_message)
+    except Exception as e:
+        print(f"[recall] retrieve failed -> proceeding with NO memories this turn: {repr(e)[:120]}",
+              file=sys.stderr)
+        r = {"core": [], "topic": [], "degraded": True}
+    if r.get("degraded"):
+        print("[recall] degraded — answering this turn without (full) stored memory", file=sys.stderr)
     now = datetime.now(TZ).strftime("%A, %B %d, %Y at %I:%M %p")
     compact = _format_memories({"core": r["core"], "topic": r["topic"][:3]}, cap_chars=600)
     _pending_local_mem = ("" if compact == "(nothing stored yet)" else
