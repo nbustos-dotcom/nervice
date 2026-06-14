@@ -29,6 +29,7 @@ from app import skills
 from app import music
 from app import confusion
 from app import browser
+from app import orchestrator
 from app.agent import current_rung
 from app.turnlog import log_turn
 from app.router import classify
@@ -255,6 +256,21 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         _store(user_id, conversation_id, text, msg)
         log_turn("browser", "browse-read", time.monotonic() - t0, "ws")
         return msg
+    # NEW-PROJECT guided setup: while a setup is in progress, every turn is an answer to it (one
+    # question at a time). Delivered as one complete text+audio reply (the draft fence is shown, not
+    # read aloud, via the whole-reply synth), never streamed or re-classified.
+    if orchestrator.setup_active():
+        reply = await orchestrator.setup_continue(text, voice_mode=voice)
+        await send({"type": "text", "text": reply})
+        if voice:
+            b64 = await asyncio.to_thread(_synth_full_b64, reply)
+            if b64:
+                await send({"type": "audio", "wav_base64": b64})
+        await _trace(send, "done", route="orchestrator", rung=current_rung.get(), ms=_ms())
+        await send({"type": "done", "reply": reply})
+        _store(user_id, conversation_id, text, reply)
+        log_turn("orchestrator", current_rung.get(), time.monotonic() - t0, "ws")
+        return reply
     # A pending local-action confirmation answers the prior RISKY ask — never streamed, never
     # re-classified. Delivered as one complete text+audio reply, same as a tool turn.
     pending = computer.resolve_pending(user_id, text)
