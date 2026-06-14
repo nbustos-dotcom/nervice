@@ -11,6 +11,8 @@ load_dotenv()
 
 from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage, ClaudeSDKClient
 
+from app import usage   # in-code Claude spend guard + USD ledger (usage.py imports no app modules)
+
 # =====================================================================================
 # CLAUDE ACCOUNT LADDER  (cheapest/primary first; ask_claude advances on ANY failure)
 # Each account is an isolated CONFIG_DIR holding its OWN `claude /login` credentials. To change
@@ -42,6 +44,13 @@ class AllClaudeExhausted(Exception):
     """Every account in CLAUDE_ACCOUNTS failed (usage limit, auth problem, or an errored/empty
     result). Callers turn this into the friendly 'hit my usage limits' message instead of crashing."""
 
+
+class ClaudeBlocked(AllClaudeExhausted):
+    """Nervice's OWN in-code spend guard refused a Claude call BEFORE any SDK request (daily cap
+    reached, or free-only mode ON) — so ZERO Agent-SDK usage is incurred. Subclasses
+    AllClaudeExhausted so every existing ladder handler degrades gracefully; str(exc) is the honest
+    user-facing message (today's-budget / free-only)."""
+
 last_run: dict = {}  # metadata from the most recent agent_task: cost_usd, num_turns, is_error, permission_denials
 
 # Bash command prefixes the builder may run. Anything not listed fails closed (denied).
@@ -64,6 +73,57 @@ _SCRUB_KEYS = ["GROQ_API_KEY", "DATABASE_URL", "DATABASE_URL_MIGRATIONS", "CLAUD
                "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
 
 
+# --- in-code Claude spend guard + USD ledger (precautions #2 / #3) -----------------------------
+# EVERY Claude entry point below — ask_claude (consult + the 429/grounded fallbacks + the auto-tool
+# path) and agent_task / browse_agent / propose_agent (build / browse / selfmod) — calls
+# _spend_guard() FIRST, so a daily-cap-reached or free-only state stops the call BEFORE any SDK
+# request. This is Nervice's own ceiling, below both the chat.py and streaming.py paths, so neither
+# can bypass it. ClaudeBlocked subclasses AllClaudeExhausted, so the existing ladder handlers turn
+# it straight into the honest message with no extra wiring.
+def _spend_guard() -> None:
+    reason = usage.claude_blocked_reason()
+    if reason:
+        raise ClaudeBlocked(reason)
+
+
+# Conservative (HIGH) per-Mtoken rates, used ONLY to estimate cost when the SDK reports no dollar
+# figure (the subscription path can report total_cost_usd == 0). Opus-class so the cap errs toward
+# stopping EARLY — it must never silently under-count and overspend.
+_EST_IN_PER_MTOK = 15.0
+_EST_OUT_PER_MTOK = 75.0
+
+
+def _estimate_cost(usage_obj) -> float:
+    if usage_obj is None:
+        return 0.0
+    try:
+        def _g(*keys):
+            for k in keys:
+                v = usage_obj.get(k) if isinstance(usage_obj, dict) else getattr(usage_obj, k, None)
+                if v:
+                    return v
+            return 0
+        intok = int(_g("input_tokens", "prompt_tokens") or 0)
+        outtok = int(_g("output_tokens", "completion_tokens") or 0)
+        return intok / 1e6 * _EST_IN_PER_MTOK + outtok / 1e6 * _EST_OUT_PER_MTOK
+    except Exception:
+        return 0.0
+
+
+def _record_cost(message) -> None:
+    """Record a finished Claude SDK call's USD cost to the daily ledger (usage.add_claude). Prefers
+    the SDK's total_cost_usd; falls back to a conservative token estimate when the subscription path
+    reports no dollar cost. Never raises."""
+    try:
+        cost = getattr(message, "total_cost_usd", None)
+        if not cost or cost <= 0:
+            cost = _estimate_cost(getattr(message, "usage", None))
+        if cost and cost > 0:
+            usage.add_claude(float(cost))
+    except Exception:
+        pass
+
+
 async def _ask_one(task: str, system: str | None, name: str, config_dir: pathlib.Path) -> str:
     """ONE Claude consult against a SPECIFIC account's CONFIG_DIR. Token-free: the Pro OAuth token
     and other secrets are scrubbed from the env so the spawned CLI authenticates ONLY from THIS
@@ -84,6 +144,8 @@ async def _ask_one(task: str, system: str | None, name: str, config_dir: pathlib
         async for message in query(prompt=task, options=opts):
             if isinstance(message, ResultMessage):
                 is_error = bool(getattr(message, "is_error", False))
+                last_run.update(cost_usd=getattr(message, "total_cost_usd", None), is_error=is_error)
+                _record_cost(message)        # ledger the consult's USD cost (precaution #2)
                 continue
             content = getattr(message, "content", None)
             if isinstance(content, list):
@@ -138,6 +200,7 @@ async def ask_claude(task: str, system: str | None = None, messages: list | None
     'try Pro; on ANY failure try Max' ladder — it does not reliably distinguish a usage cap from
     an auth glitch or a transient SDK error. That's fine here: the next account is tried regardless,
     and if all fail the caller shows the friendly limit message."""
+    _spend_guard()                       # in-code Claude ceiling / free-only — BEFORE any SDK call
     prompt = compose_claude_prompt(messages) if messages else task
     last = None
     for name, config_dir in CLAUDE_ACCOUNTS:
@@ -156,6 +219,7 @@ async def ask_claude(task: str, system: str | None = None, messages: list | None
 async def agent_task(task: str) -> str:
     """Bash+git-capable builder agent, jailed to WORKSPACE. Token-free auth (stored creds),
     secret-scrubbed shell, fail-closed Bash allowlist, per-command Bash timeout."""
+    _spend_guard()                       # in-code Claude ceiling / free-only — BEFORE any SDK call
     WORKSPACE.mkdir(exist_ok=True)
     CONFIG_DIR.mkdir(exist_ok=True)
     opts = ClaudeAgentOptions(
@@ -191,6 +255,7 @@ async def agent_task(task: str) -> str:
                 final = message.result
                 last_run.update(cost_usd=message.total_cost_usd, num_turns=message.num_turns,
                                 is_error=message.is_error, permission_denials=message.permission_denials)
+                _record_cost(message)        # ledger this agent run's USD cost (precaution #2)
                 continue
             content = getattr(message, "content", None)
             if isinstance(content, list):
@@ -208,6 +273,7 @@ async def browse_agent(task: str) -> str:
     profile (zero credentials, never Nate's Chrome), file:// blocked, and NO built-in tools —
     only the browser. Web pages are untrusted input; the system prompt forbids page-instructed
     actions and the tool surface gives no way to touch the filesystem or shell."""
+    _spend_guard()                       # in-code Claude ceiling / free-only — BEFORE any SDK call
     CONFIG_DIR.mkdir(exist_ok=True)
     opts = ClaudeAgentOptions(
         system_prompt=(
@@ -280,6 +346,7 @@ async def browse_agent(task: str) -> str:
 async def propose_agent(instruction: str, staging_dir: str) -> str:
     """READ-ONLY self-modification proposer. cwd is a staging copy of editable files only —
     no Write, no Edit, no Bash. Emits a unified diff for OUR gate to validate and apply."""
+    _spend_guard()                       # in-code Claude ceiling / free-only — BEFORE any SDK call
     CONFIG_DIR.mkdir(exist_ok=True)
     opts = ClaudeAgentOptions(
         system_prompt=(
@@ -316,6 +383,7 @@ async def propose_agent(instruction: str, staging_dir: str) -> str:
                 final = message.result
                 last_run.update(cost_usd=message.total_cost_usd, num_turns=message.num_turns,
                                 is_error=message.is_error, permission_denials=message.permission_denials)
+                _record_cost(message)        # ledger this agent run's USD cost (precaution #2)
                 continue
             content = getattr(message, "content", None)
             if isinstance(content, list):

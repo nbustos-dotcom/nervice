@@ -39,6 +39,7 @@ from groq import RateLimitError
 from app.chat import respond, save_exchange
 from app.llm import rate_limit_message
 from app.streaming import stream_reply
+from app import usage   # Claude/Groq spend ledger + the in-code spend-guard state (precautions #2/#3)
 
 USER = "nate"
 _TOKEN = os.environ.get("NERVICE_API_TOKEN")
@@ -605,6 +606,8 @@ async def ladder():
         d["avg_s"] = round(d.pop("_sum") / d["count"], 2)
     return {"groq": groq, "ollama": bool(ollama_up), "claude": accounts,
             "capped_until": capped_until_iso,
+            "claude_spend_usd": round(usage.today_claude_usd(), 4),
+            "claude_cap_usd": usage.CLAUDE_DAILY_CAP_USD,
             "today": {"turns": len(rows), "rungs": dist}}
 
 
