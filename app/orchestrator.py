@@ -14,6 +14,7 @@ only `app.agent` import is the `current_rung` telemetry contextvar (state, not a
 import re
 import sys
 import json
+import time
 import hashlib
 import pathlib
 from datetime import datetime
@@ -163,6 +164,8 @@ def state_snapshot() -> dict:
         "current_prompt": prompts.get(str(current), ""),
         "done_count": sum(1 for s in steps if s.get("status") == "done"),
         "total": len(steps),
+        # the plan is stale when steps exist but the doc has changed since they were generated
+        "stale": bool(doc is not None and steps and state.get("plan_hash") != _doc_hash(doc)),
         "updated": state.get("updated", ""),
     }
 
@@ -741,14 +744,278 @@ async def _op_new(voice: bool) -> str:
     return await begin_setup(voice)
 
 
+# =============================== TALK-TO-EDIT the project ===============================
+# Nate edits the active project by conversation — "change the goal to X", "add a step for X",
+# "remove step 2", "reorder: step 3 before step 1", "rewrite requirement 1 as X". Groq (Ollama
+# fallback, lenient JSON) parses the utterance into a STRUCTURED operation on either the DOC
+# (ACTIVE.md sections) or the PLAN (steps in orchestrator_state.json); Nervice shows before->after and
+# WRITES only on Nate's confirm. Editing a DOC field stales the auto-plan -> PROPOSE a re-plan (never
+# silent). Editing a STEP is a direct plan edit. Writes touch only docs/projects/ + the state file;
+# anything implying Nervice's own code is scope-flagged, not applied. NEVER Claude.
+
+_PENDING: dict = {}       # in-process pending edit/replan confirm (single user); TTL-bounded
+_EDIT_TTL_S = 600
+_NO_RE = re.compile(r"^\s*(no|nope|nah|don'?t|do not|cancel|never ?mind|forget it|scrap(?: it| that)?|discard)\s*[.!]*\s*$", re.I)
+_DOC_TARGETS = {"goal", "context", "requirements", "out_of_scope"}
+_SECTION_NAME = {"goal": "Goal", "context": "Context", "requirements": "Requirements", "out_of_scope": "Out of scope"}
+
+_EDIT_PARSE_SYSTEM = (
+    "You convert Nate's spoken project EDIT into a STRUCTURED operation. Output ONLY JSON, no prose. "
+    "You are given the current doc + numbered step list; resolve references (\"requirement 2\", "
+    "\"step 3\", \"the X step\") to real 1-based indices. JSON shape: "
+    '{"surface":"doc|plan","target":"goal|context|requirements|out_of_scope|step",'
+    '"op":"set|add|remove|reorder|edit","index":<1-based int|null>,"index2":<1-based int|null>,'
+    '"position":"before|after|end|null","value":"<new text; for a step use \'Title :: one-line detail\'>"}. '
+    "Examples: \"change the goal to X\" -> doc/goal/set value X. \"rewrite requirement 2 as X\" -> "
+    "doc/requirements/edit index 2 value X. \"add a requirement X\" -> doc/requirements/add value X. "
+    "\"add a step for X\" -> plan/step/add value 'X :: <detail>' position end. \"remove step 2\" -> "
+    "plan/step/remove index 2. \"reorder: step 3 before step 1\" -> plan/step/reorder index 3 index2 1 "
+    "position before. \"change step 2 to X\" -> plan/step/edit index 2 value 'X :: <detail>'. Use ONLY "
+    "Nate's instruction; never invent unrelated changes. If it isn't a clear edit, set op to \"unclear\".")
+
+
+def _get_section(doc: str, name: str) -> str:
+    m = re.search(rf"^##\s*{re.escape(name)}\s*$(.*?)(?=^##\s|\Z)", doc or "", re.M | re.S)
+    return (m.group(1).strip() if m else "")
+
+
+def _set_section(doc: str, name: str, body: str) -> str:
+    pat = re.compile(rf"(^##\s*{re.escape(name)}\s*$)(.*?)(?=^##\s|\Z)", re.M | re.S)
+    if pat.search(doc or ""):
+        return pat.sub(lambda m: m.group(1) + "\n" + body.strip() + "\n\n", doc, count=1)
+    return (doc or "").rstrip() + f"\n\n## {name}\n{body.strip()}\n"
+
+
+def _bullets(body: str) -> list[str]:
+    return [re.sub(r"^[-*•]\s*", "", ln).strip() for ln in (body or "").splitlines()
+            if ln.strip().startswith(("-", "*", "•"))]
+
+
+def _bullets_body(items: list[str]) -> str:
+    return "\n".join(f"- {b}" for b in items) if items else "- (none specified)"
+
+
+def _split_step(value: str) -> tuple[str, str]:
+    if "::" in value:
+        t, d = value.split("::", 1)
+        return t.strip(), d.strip()
+    return value.strip(), ""
+
+
+def _edit_context(doc: str | None, steps: list) -> str:
+    parts = ["CURRENT DOC:\n" + (doc[:1500] if doc else "(no doc)")]
+    parts.append("\nCURRENT STEPS:")
+    parts.append("\n".join(f"{i + 1}. {s.get('title','')}" for i, s in enumerate(steps)) if steps else "(no plan yet)")
+    return "\n".join(parts)
+
+
+def _coerce_edit(obj) -> dict | None:
+    if not isinstance(obj, dict):
+        return None
+    surface, op = str(obj.get("surface", "")).lower(), str(obj.get("op", "")).lower()
+    if surface not in ("doc", "plan") or op in ("", "unclear"):
+        return None
+    d = {"surface": surface, "op": op, "target": str(obj.get("target", "")).lower(),
+         "value": str(obj.get("value", "") or "").strip(),
+         "position": (str(obj.get("position", "") or "").lower() or None)}
+    for k in ("index", "index2"):
+        v = obj.get(k)
+        try:
+            d[k] = int(v) if v not in (None, "", "null") else None
+        except Exception:
+            d[k] = None
+    return d
+
+
+def _build_proposal(op: dict, doc: str | None, state: dict, steps: list) -> dict:
+    """Compute before->after + the exact write payload for an edit. Returns {summary, summary_done,
+    apply} or {error}. Pure/deterministic — no LLM, no writes."""
+    surface, kind, target, value = op["surface"], op["op"], op.get("target", ""), op.get("value", "")
+    idx, idx2 = op.get("index"), op.get("index2")
+
+    if surface == "doc":
+        if doc is None:
+            return {"error": "There's no project doc to edit yet — say \"start a new project\" first."}
+        if target not in _DOC_TARGETS:
+            return {"error": "I can edit the goal, context, requirements, or out-of-scope — which one?"}
+        name = _SECTION_NAME[target]
+        if target in ("goal", "context"):
+            before = _get_section(doc, name)
+            new_doc = _set_section(doc, name, value)
+            return {"summary": f"{name} — before: \"{before[:90]}\" → after: \"{value[:90]}\"",
+                    "summary_done": f"{name} updated.", "apply": {"type": "doc", "doc_text": new_doc}}
+        items = _bullets(_get_section(doc, name))   # requirements / out_of_scope (a bullet list)
+        if kind == "add":
+            items = items + [value]
+            new_doc = _set_section(doc, name, _bullets_body(items))
+            return {"summary": f"Add to {name}: \"{value[:100]}\"", "summary_done": f"Added to {name}.",
+                    "apply": {"type": "doc", "doc_text": new_doc}}
+        if idx is None or not (1 <= idx <= len(items)):
+            return {"error": f"There's no {name.lower()} item {idx} — there {'are' if len(items)!=1 else 'is'} {len(items)}."}
+        if kind == "remove":
+            removed = items.pop(idx - 1)
+            new_doc = _set_section(doc, name, _bullets_body(items))
+            return {"summary": f"Remove {name} {idx}: \"{removed[:100]}\"", "summary_done": f"Removed {name.lower()} {idx}.",
+                    "apply": {"type": "doc", "doc_text": new_doc}}
+        before = items[idx - 1]                      # edit / rewrite a bullet
+        items[idx - 1] = value
+        new_doc = _set_section(doc, name, _bullets_body(items))
+        return {"summary": f"{name} {idx} — before: \"{before[:80]}\" → after: \"{value[:80]}\"",
+                "summary_done": f"{name} {idx} rewritten.", "apply": {"type": "doc", "doc_text": new_doc}}
+
+    # surface == "plan" (steps)
+    if not steps and kind != "add":
+        return {"error": "There's no plan yet — say \"plan my project\" first."}
+    current = int(state.get("current", 0))
+    cur_obj = steps[current] if 0 <= current < len(steps) else None
+    if kind == "add":
+        title, detail = _split_step(value)
+        if not title:
+            return {"error": "What should the new step be? Try \"add a step for writing unit tests\"."}
+        new_steps = list(steps)
+        new_steps.append({"title": title, "detail": detail, "status": "pending"})
+        return {"summary": f"Add step: \"{title}\"" + (f" — {detail}" if detail else ""),
+                "summary_done": f"Added a step: \"{title}\".",
+                "apply": {"type": "plan", "steps": new_steps, "current": current}}
+    if idx is None or not (1 <= idx <= len(steps)):
+        return {"error": f"There's no step {idx} — there {'are' if len(steps)!=1 else 'is'} {len(steps)}."}
+    if kind == "remove":
+        removed = steps[idx - 1]
+        new_steps = [s for k, s in enumerate(steps) if k != idx - 1]
+        if cur_obj is not None and any(s is cur_obj for s in new_steps):
+            new_current = next(k for k, s in enumerate(new_steps) if s is cur_obj)
+        else:
+            new_current = min(idx - 1, len(new_steps))      # removed the current step -> point at the next
+        new_current = max(0, min(new_current, len(new_steps)))
+        return {"summary": f"Remove step {idx}: \"{removed.get('title','')}\"?",
+                "summary_done": f"Removed step {idx}.",
+                "apply": {"type": "plan", "steps": new_steps, "current": new_current}}
+    if kind == "reorder":
+        if idx2 is None or not (1 <= idx2 <= len(steps)):
+            return {"error": "Reorder needs two steps — e.g. \"reorder: step 3 before step 1\"."}
+        ref_obj = steps[idx2 - 1]
+        new_steps = list(steps)
+        moved = new_steps.pop(idx - 1)
+        ref_pos = next((k for k, s in enumerate(new_steps) if s is ref_obj), len(new_steps))
+        j = ref_pos if op.get("position") != "after" else ref_pos + 1
+        new_steps.insert(j, moved)
+        new_current = next((k for k, s in enumerate(new_steps) if s is cur_obj), current) if cur_obj is not None else current
+        pos = op.get("position") or "before"
+        return {"summary": f"Move step {idx} (\"{moved.get('title','')}\") {pos} step {idx2}.",
+                "summary_done": "Reordered the steps.",
+                "apply": {"type": "plan", "steps": new_steps, "current": new_current}}
+    # edit / rewrite a step
+    title, detail = _split_step(value)
+    before = steps[idx - 1].get("title", "")
+    new_steps = list(steps)
+    new_steps[idx - 1] = {"title": title or before, "detail": detail or steps[idx - 1].get("detail", ""),
+                          "status": steps[idx - 1].get("status", "pending")}
+    return {"summary": f"Step {idx} — before: \"{before[:80]}\" → after: \"{(title or before)[:80]}\"",
+            "summary_done": f"Step {idx} updated.",
+            "apply": {"type": "plan", "steps": new_steps, "current": current}}
+
+
+async def propose_edit(user_message: str, voice_mode: bool = False) -> str:
+    """Parse a spoken edit (Groq), compute before->after, and ask Nate to confirm before writing.
+    Free rungs only; scope-flags anything touching Nervice's own code. rung set for telemetry."""
+    global _PENDING
+    current_rung.set("direct")
+    doc = _doc_text_or_none()
+    state = _load_state()
+    steps = state.get("steps") or []
+    if doc is None and not steps:
+        return "There's no active project to edit — say \"start a new project\" to set one up."
+    if _SCOPE_FLAG_RE.search(user_message or ""):
+        return ("⚠️ That looks like it'd touch Nervice's own code or safety — out of scope for a project "
+                "edit. I only edit the project doc and its plan.")
+    obj, rung = await _ask_free(_EDIT_PARSE_SYSTEM, _edit_context(doc, steps) + "\n\nEDIT: " + (user_message or ""),
+                               want_json=True, num_predict=400)
+    if rung == "none":
+        return _NEED_FREE_MSG
+    op = _coerce_edit(obj)
+    if not op:
+        return ("I couldn't turn that into a clear edit. Try \"change the goal to ...\", \"add a step "
+                "for ...\", \"remove step 2\", \"reorder step 3 before step 1\", or \"rewrite requirement 1 as ...\".")
+    if _SCOPE_FLAG_RE.search(op.get("value", "")):
+        return "⚠️ That edit's content looks like it'd touch Nervice's own code/safety — flagging it instead of applying."
+    prop = _build_proposal(op, doc, state, steps)
+    if prop.get("error"):
+        return prop["error"]
+    _PENDING = {"kind": "edit", "summary_done": prop["summary_done"], "apply": prop["apply"], "ts": time.time()}
+    return prop["summary"] + "\n\nSave this? (yes / no)"
+
+
+async def _apply_edit(pending: dict) -> str:
+    """Write a confirmed edit. DOC writes then PROPOSE a re-plan if the auto-plan is now stale (never
+    silent). PLAN writes are direct. Only docs/projects/ + the state file are touched."""
+    global _PENDING
+    current_rung.set("direct")
+    apply = pending["apply"]
+    done = pending.get("summary_done", "Done.")
+    if apply["type"] == "doc":
+        try:
+            ACTIVE_DOC.parent.mkdir(parents=True, exist_ok=True)
+            ACTIVE_DOC.write_text(apply["doc_text"].strip() + "\n", encoding="utf-8")
+        except Exception as e:
+            print(f"[orchestrator] edit write failed: {repr(e)[:80]}", file=sys.stderr)
+            _PENDING = {}
+            return "I couldn't write that change to the doc — try again."
+        state = _load_state()
+        steps = state.get("steps") or []
+        new_hash = _doc_hash(apply["doc_text"])
+        # plan-staleness: a DOC change makes the auto-generated plan stale -> PROPOSE a re-plan.
+        if steps and state.get("plan_hash") != new_hash:
+            _PENDING = {"kind": "replan", "ts": time.time()}
+            return (done + f" Heads up — your {len(steps)}-step plan was built from the old doc, so it's "
+                    "now out of date. Want me to re-plan? (yes / no)")
+        _PENDING = {}
+        return done
+    # plan edit (direct)
+    state = _load_state()
+    state["steps"] = apply["steps"]
+    state["current"] = int(apply.get("current", 0))
+    _save_state(state)
+    _PENDING = {}
+    return done
+
+
+async def resolve_edit(user_message: str) -> str | None:
+    """In-turn gate: a pending edit/replan confirm consumes the next yes/no. Returns the reply, or
+    None when there's no pending (let routing proceed). A non-yes/no message drops the stale pending
+    and returns None so the turn routes fresh. Checked in chat.respond / streaming.stream_reply."""
+    global _PENDING
+    if not _PENDING:
+        return None
+    if time.time() - _PENDING.get("ts", 0) > _EDIT_TTL_S:
+        _PENDING = {}
+        return None
+    text = (user_message or "").strip()
+    kind = _PENDING.get("kind")
+    if _NO_RE.match(text):
+        _PENDING = {}
+        current_rung.set("direct")
+        return ("Okay — scrapped that, nothing changed." if kind == "edit"
+                else "Okay, keeping the current plan (it's out of date with the doc until you re-plan).")
+    if _YES_RE.match(text):
+        if kind == "edit":
+            return await _apply_edit(_PENDING)        # may set a replan-confirm pending
+        if kind == "replan":
+            _PENDING = {}
+            return await _op_plan(False)              # regenerate from the new doc (sets rung groq/ollama)
+    _PENDING = {}                                     # unrelated message -> drop the stale pending, route fresh
+    return None
+
+
 _OPS = {"critique": _op_critique, "plan": _op_plan, "next": _op_next, "done": _op_done,
         "redo": _op_redo, "status": _op_status, "gaps": _op_gaps, "summary": _op_summary,
         "new": _op_new}
 
 
-async def handle(op: str, voice_mode: bool = False) -> str:
-    """Dispatch an orchestrator op. Unknown op -> status. Every path is read-only + free-rung-only;
-    nothing here executes the plan or calls Claude/the Agent SDK."""
-    fn = _OPS.get((op or "").strip().lower(), _op_status)
+async def handle(op: str, user_message: str = "", voice_mode: bool = False) -> str:
+    """Dispatch an orchestrator op. The 'edit' op needs the full utterance; the rest take just
+    voice_mode. Unknown op -> status. Free-rung-only; never Claude/the Agent SDK."""
+    op = (op or "").strip().lower()
     print(f"[ROUTE: orchestrator/{op}]", file=sys.stderr)
-    return await fn(voice_mode)
+    if op == "edit":
+        return await propose_edit(user_message, voice_mode)
+    return await _OPS.get(op, _op_status)(voice_mode)

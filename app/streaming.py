@@ -271,6 +271,19 @@ async def stream_reply(user_id: str, text: str, window: list, send, voice: bool,
         _store(user_id, conversation_id, text, reply)
         log_turn("orchestrator", current_rung.get(), time.monotonic() - t0, "ws")
         return reply
+    # A pending project EDIT confirm is consumed before routing (None -> nothing pending).
+    edit_reply = await orchestrator.resolve_edit(text)
+    if edit_reply is not None:
+        await send({"type": "text", "text": edit_reply})
+        if voice:
+            b64 = await asyncio.to_thread(_synth_full_b64, edit_reply)
+            if b64:
+                await send({"type": "audio", "wav_base64": b64})
+        await _trace(send, "done", route="orchestrator", rung=current_rung.get(), ms=_ms())
+        await send({"type": "done", "reply": edit_reply})
+        _store(user_id, conversation_id, text, edit_reply)
+        log_turn("orchestrator", current_rung.get(), time.monotonic() - t0, "ws")
+        return edit_reply
     # A pending local-action confirmation answers the prior RISKY ask — never streamed, never
     # re-classified. Delivered as one complete text+audio reply, same as a tool turn.
     pending = computer.resolve_pending(user_id, text)
