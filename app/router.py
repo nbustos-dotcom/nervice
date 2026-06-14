@@ -31,8 +31,9 @@ ROUTES + their JSON shapes:
 {"route":"selfmod"} selfmod = an explicit request to change Nervice's OWN behavior/personality/code ("stop ending sentences with questions"). Opinions about itself are normal.
 {"route":"browse"} browse = find/check/read/report something ON a specific named website ("open hacker news and tell me the top story"). General factual/news questions are normal.
 {"route":"canvas"} canvas = a question about Nate's SCHOOL CANVAS — what's due, upcoming assignments, due dates, announcements, or grades ("what's due this week", "any new assignments", "check canvas", "what are my grades", "anything due on canvas"). This READS his live Canvas page.
-{"route":"orchestrator","op":"critique|plan|next|done|redo|status|gaps"}
-  orchestrator = managing Nate's CODING PROJECT PLAN (the project doc at docs/projects/ACTIVE.md). op critique = "critique my project", "review my project doc", "find gaps in my plan". op plan = "plan my project", "break it into steps", "show the plan", "what's the plan". op next = "next step", "give me the next step", "what do I paste next", "what's the next prompt". op done = "mark step done", "I finished that step", "that step's done", "mark it done". op redo = "redo", "redo that step", "give me a different prompt for this step". op status = "project status", "where am I on the project", "how many steps left". op gaps = "show gaps", "show me the critique". This is about Nate's coding PROJECT plan — NOT Canvas (school) and NOT building files right now.
+{"route":"orchestrator","op":"critique|plan|next|done|redo|status|gaps|summary"}
+  orchestrator = managing Nate's CODING PROJECT PLAN (the project doc at docs/projects/ACTIVE.md). op critique = "critique my project", "review my project doc", "find gaps in my plan". op plan = "plan my project", "break it into steps", "show the plan", "what's the plan". op next = "next step", "give me the next step", "what do I paste next", "what's the next prompt". op done = "mark step done", "I finished that step", "that step's done", "mark it done". op redo = "redo", "redo that step", "give me a different prompt for this step". op status = "project status", "how many steps left". op gaps = "show gaps", "show me the critique". op summary = "how's my project", "how's the project going", "give me a project update", "where am I on the project". This is about Nate's coding PROJECT plan — NOT Canvas (school) and NOT building files right now.
+{"route":"actions"} actions = a question about what NERVICE has DONE / its own recent activity ("what have you done", "what actions have you taken", "what did you do", "what have you been up to", "what have you been doing lately", "what have you been working on"). Reads Nervice's real action audit log. NOT "what's the plan" (that's orchestrator) and NOT a request to DO something (that's control).
 {"route":"normal"} normal = everything else: chat, opinions, simple facts, news/current events, and any DISCUSSION (vs an explicit action request).
 
 RULES:
@@ -42,12 +43,12 @@ RULES:
 - Asking ABOUT capabilities ("can you play music?") is normal, not control.
 - Extract targets/queries minimally and literally; strip polite prefixes ("Jarvis,", "please")."""
 
-_ROUTES = {"hard", "build", "selfmod", "browse", "canvas", "orchestrator", "control", "skill", "music_mgmt", "system", "normal"}
+_ROUTES = {"hard", "build", "selfmod", "browse", "canvas", "orchestrator", "actions", "control", "skill", "music_mgmt", "system", "normal"}
 _CTRL_ACTIONS = {"open_app", "open_url", "play_youtube", "screenshot", "focus_window", "list_windows"}
 _SKILL_OPS = {"run", "create", "list", "delete"}
 _MUSIC_OPS = {"set", "add", "remove", "list", "clear"}
 _SYS_QUESTIONS = {"cpu", "ram", "gpu", "disk", "os", "uptime", "specs", "top_proc", "file_count"}
-_ORCH_OPS = {"critique", "plan", "next", "done", "redo", "status", "gaps"}
+_ORCH_OPS = {"critique", "plan", "next", "done", "redo", "status", "gaps", "summary"}
 
 # Deterministic guard: a complaint/reaction about a prior action must stay conversational and NEVER
 # reach the browse agent or the control interpreter, regardless of what the LLM router decides.
@@ -84,6 +85,11 @@ _ORCH_KW = re.compile(r"\b(my project|the project|project (?:plan|doc|status)|th
                       r"mark (?:the |this |that )?step|step(?:'?s| is)? done|redo (?:the |this |that )?step)\b", re.I)
 
 
+# "what has Nervice DONE" — its own activity/audit recall (keyword net only).
+_ACTIONS_KW = re.compile(r"\b(what (?:have you|did you|you'?ve) (?:done|do|taken|been (?:doing|up to|working on))|"
+                         r"actions you'?ve taken|what you'?ve been (?:doing|up to)|your recent activity)\b", re.I)
+
+
 def _orch_keyword_op(m: str) -> str | None:
     ml = (m or "").lower()
     if not _ORCH_KW.search(ml):
@@ -98,6 +104,8 @@ def _orch_keyword_op(m: str) -> str | None:
         return "done"
     if "next" in ml:
         return "next"
+    if "how" in ml or "going" in ml or "update" in ml:
+        return "summary"
     if "plan" in ml:
         return "plan"
     return "status"
@@ -120,6 +128,8 @@ def _keyword_route(msg: str) -> dict:
         return {"route": "control"}
     if _CANVAS_KW.search(m):
         return {"route": "canvas"}        # executor enforces smart-brain -> honest "need bigger brain"
+    if _ACTIONS_KW.search(m):
+        return {"route": "actions"}
     mo = _orch_keyword_op(m)
     if mo:
         return {"route": "orchestrator", "op": mo}

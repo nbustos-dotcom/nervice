@@ -312,6 +312,11 @@ FINAL:
 
 _client = AsyncGroq(api_key=os.environ["GROQ_API_KEY"])
 
+# Real token telemetry: meter every NON-streamed Groq completion (tool loop, grounded synthesis,
+# router/memory JSON, orchestrator) with one wrapper. Streamed turns are metered in chat_stream.
+from app import usage
+usage.install_groq_meter(_client)
+
 # Appended to the synthesis/verify prompts on voice turns only — the main VOICE_ADDENDUM lives in
 # the chat system prompt, which grounded synthesis never sees (it builds isolated messages).
 VOICE_SYNTH_ADDENDUM = ("\n\nVOICE MODE: this answer will be spoken aloud. Two to four flowing "
@@ -380,11 +385,16 @@ async def chat_stream(system: str, messages: list[dict]):
             messages=[{"role": "system", "content": system}] + messages,
             temperature=0.6,
             stream=True,
+            stream_options={"include_usage": True},   # final chunk carries token usage (metered below)
         )
         async for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
+            if getattr(chunk, "usage", None):          # the usage chunk has empty choices
+                usage.add_groq(chunk.usage)
+                continue
+            if chunk.choices:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield delta
     except RateLimitError as e:
         # e.g. the startup greeting when the cap is already hit — speak the limit, don't crash
         _stick_cap(e)

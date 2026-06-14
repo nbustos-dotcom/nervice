@@ -21,6 +21,7 @@ from app import music
 from app import confusion
 from app import browser
 from app import orchestrator
+from app import actionlog
 from app.db import AsyncSessionLocal
 from app.models import Message
 
@@ -121,6 +122,8 @@ async def execute_route(user_id, system, route, user_message, window, voice_mode
         return await _execute_canvas(user_message, voice_mode=voice_mode)
     if r == "orchestrator":
         return await orchestrator.handle(rd.get("op"), voice_mode=voice_mode)
+    if r == "actions":
+        return await actionlog.summarize(user_message, voice_mode=voice_mode)
     force = _FORCE.get(r)
     if force:
         print(f"[ROUTE: {r} -> {force}]", file=sys.stderr)

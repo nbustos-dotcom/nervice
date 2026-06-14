@@ -66,7 +66,7 @@
 
   /* ---------- header ---------- */
   header{display:flex; align-items:center; gap:14px; padding-bottom:10px; margin-bottom:var(--gap);
-         border-bottom:1px solid var(--line);}
+         border-bottom:1px solid var(--line); position:relative; z-index:70;}   /* above the Nerve Pages scrim so tabs stay clickable */
   .brand{font-family:var(--mono); font-weight:600; font-size:17px; letter-spacing:.34em; color:var(--text);}
   .brand b{color:var(--accent); text-shadow:0 0 12px var(--accent-soft);}
   .brand .v{font-size:9px; letter-spacing:.2em; color:var(--faint); margin-left:.5em; vertical-align:2px;}
@@ -306,6 +306,61 @@
   .stat-cell .v.sm{font-size:13px;}
   .stat-cell .l{font-family:var(--mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint); margin-top:3px;}
 
+  /* ---------- Nerve Pages: top-bar tabs + overlay panels (JARVIS grammar, type-on-void) ---------- */
+  .np-tabs{display:flex; gap:2px;}
+  .np-tab{font-family:var(--mono); font-size:10px; letter-spacing:.2em; text-transform:uppercase; color:var(--dim);
+          background:transparent; border:0; border-bottom:1px solid var(--line); padding:9px 12px; cursor:pointer; transition:.18s;}
+  .np-tab:hover{color:var(--accent);}
+  .np-tab.active{color:var(--accent2); border-bottom-color:var(--accent2); text-shadow:0 0 8px var(--accent2-soft);}
+  @media (max-width:560px){ .np-tab{padding:9px 9px; letter-spacing:.12em;} }
+  /* narrow screens: let the header wrap instead of overflowing (the added tabs widen it) */
+  @media (max-width:680px){ header{flex-wrap:wrap; gap:7px 10px;} header .spacer{display:none;} }
+
+  .np-scrim{position:fixed; inset:0; z-index:60; background:rgba(2,4,7,.66); -webkit-backdrop-filter:blur(3px); backdrop-filter:blur(3px);
+            opacity:0; pointer-events:none; transition:opacity .26s var(--ease,cubic-bezier(.2,.7,.3,1));}
+  .np-scrim.show{opacity:1; pointer-events:auto;}
+  /* the panel is type floating on the dimmed void — a faint gradient anchors the read side, brackets frame it, NO hard box */
+  /* when a panel is open the top command bar stays lit + clickable above the dim (active tab shows which page) */
+  body.np-open header{background:var(--bg);}
+  .np-panel{position:absolute; top:0; right:0; height:100%; width:min(560px,94vw);
+            padding:calc(env(safe-area-inset-top) + 64px) clamp(16px,2.4vw,30px) calc(env(safe-area-inset-bottom) + 22px);
+            overflow-y:auto; overflow-x:hidden; -webkit-overflow-scrolling:touch;
+            background:linear-gradient(270deg, rgba(8,11,18,.93), rgba(8,11,18,.66) 72%, rgba(8,11,18,0));
+            transform:translateX(26px); opacity:0; transition:transform .28s var(--ease,cubic-bezier(.2,.7,.3,1)), opacity .28s;}
+  .np-scrim.show .np-panel{transform:none; opacity:1;}
+  .np-panel::before{content:""; position:absolute; top:14px; left:6px; width:11px; height:11px; border-top:1px solid var(--accent); border-left:1px solid var(--accent);}
+  .np-panel::after{content:""; position:absolute; bottom:14px; right:12px; width:11px; height:11px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent);}
+  .np-head{display:flex; align-items:center; gap:10px; margin-bottom:18px;}
+  .np-title{font-family:var(--mono); font-size:13px; letter-spacing:.26em; text-transform:uppercase; color:var(--accent); text-shadow:0 0 12px var(--accent-soft);}
+  .np-head .np-sub{margin-left:2px;}
+  .np-x{margin-left:auto; width:32px; height:32px; border:1px solid var(--line); background:transparent; color:var(--dim); cursor:pointer; display:grid; place-items:center; font-size:14px; line-height:1; flex:none;}
+  .np-x:hover{color:var(--accent); border-color:var(--accent-soft);}
+  .np-sub{font-family:var(--mono); font-size:9px; letter-spacing:.18em; color:var(--faint); text-transform:uppercase; margin:16px 0 6px;}
+  .np-goal{color:var(--text); font-size:14px; line-height:1.5; margin:0 0 6px; padding-left:12px; border-left:1px solid var(--line);}
+  .np-gaps{margin:0;}
+  .np-gap{display:flex; gap:9px; padding:7px 0; border-top:1px solid var(--line-soft); font-size:12.5px; color:var(--dim); line-height:1.45;}
+  .np-gap .fl{color:var(--warn); flex:none;}
+  .np-gap b{color:var(--text); font-weight:600;}
+  .np-steps{margin:0;}
+  .np-step{display:flex; gap:11px; padding:8px 0; align-items:baseline;}
+  .np-step .mk{font-family:var(--mono); font-size:12px; flex:none; width:16px; text-align:center;}
+  .np-step .tt{font-size:13px;} .np-step .dt{display:block; font-size:11px; color:var(--faint); margin-top:2px; line-height:1.4;}
+  .np-step.done{color:var(--faint);} .np-step.done .mk{color:var(--accent2);} .np-step.done .tt{text-decoration:line-through; text-decoration-color:var(--line);}
+  .np-step.current .mk{color:var(--accent2);} .np-step.current .tt{color:var(--accent2); font-weight:600; text-shadow:0 0 8px var(--accent2-soft);}
+  .np-step.pending{color:var(--faint);} .np-step.pending .mk{color:var(--line);}
+  .np-promptbox{font-family:var(--mono); font-size:12px; line-height:1.55; color:var(--text); white-space:pre-wrap; word-break:break-word;
+                border:1px solid var(--line); border-left:2px solid var(--accent2); padding:12px 13px; background:rgba(25,227,227,.045);}
+  .np-copy{margin-top:9px; font-family:var(--mono); font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:var(--accent2);
+           background:transparent; border:1px solid var(--line); padding:8px 14px; cursor:pointer; transition:.18s;}
+  .np-copy:hover{border-color:var(--accent2-soft);} .np-copy:active{transform:translateY(1px);}
+  .np-row{display:grid; grid-template-columns:auto 1fr auto; gap:10px; padding:8px 0; border-top:1px solid var(--line-soft); align-items:baseline; font-size:12.5px;}
+  .np-row .src{font-family:var(--mono); font-size:8.5px; letter-spacing:.1em; color:var(--accent); text-transform:uppercase; padding-top:2px;}
+  .np-row .act{color:var(--dim); min-width:0; word-break:break-word; line-height:1.4;} .np-row .act b{color:var(--text); font-weight:600;}
+  .np-row .out{display:block; color:var(--faint); font-size:11px; margin-top:2px;}
+  .np-row .ag{font-family:var(--mono); font-size:10px; color:var(--faint); white-space:nowrap;}
+  .np-empty{color:var(--faint); font-family:var(--mono); font-size:11px; letter-spacing:.04em; padding:22px 0; line-height:1.6;}
+  @media (prefers-reduced-motion:reduce){ .np-scrim,.np-panel{transition:none !important;} }
+
   /* ---------- activity + news feeds ---------- */
   .feed{display:flex; flex-direction:column; max-height:min(30vh,260px); overflow-y:auto; margin:-2px -4px; padding:2px 4px;}
   .feed::-webkit-scrollbar{width:0;}
@@ -354,6 +409,11 @@
       <span class="hsep"></span>
       <span class="stat">UPTIME&nbsp;<b id="upStat">--</b></span>
       <span class="spacer"></span>
+      <nav class="np-tabs" id="npTabs" aria-label="Nerve Pages">
+        <button class="np-tab" data-np="project" aria-pressed="false">PROJECT</button>
+        <button class="np-tab" data-np="actions" aria-pressed="false">ACTIONS</button>
+      </nav>
+      <span class="hsep"></span>
       <button class="ibtn" id="newBtn" aria-label="New chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
       <button class="ibtn" id="gearBtn" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg></button>
     </header>
@@ -922,8 +982,11 @@ async function loadWeather(){
 async function loadStats(){
   try{ const s=await api('/nervice-stats');
     $('#engineTag').textContent=(s.engine||'').split('/')[0].toUpperCase()||'--';
-    const cells=[ ['MEMORIES', s.memories, ''],['MESSAGES', s.messages, ''],['TODAY', s.today, ''],
-      ['ENGINE', (s.engine||'kokoro').split('/')[0], 'sm'] ];
+    // real metrics (turns.log + usage.json): today's turn count + today's Groq token usage
+    const fmtTok=n=> n==null?'—' : (n>=1000 ? (n/1000).toFixed(n>=10000?0:1)+'k' : String(n));
+    const cells=[ ['MEMORIES', s.memories, ''],['MESSAGES', s.messages, ''],
+      ['TURNS TODAY', s.turns_today==null?'—':s.turns_today, ''],['GROQ TOK', fmtTok(s.tokens_today), 'sm'],
+      ['MSGS TODAY', s.today, 'sm'],['ENGINE', (s.engine||'kokoro').split('/')[0], 'sm'] ];
     $('#coreStats').innerHTML=cells.map(c=>`<div class="stat-cell"><div class="v ${c[2]}">${c[1]}</div><div class="l">${c[0]}</div></div>`).join('');
   }catch(e){}
 }
@@ -1128,6 +1191,92 @@ if('serviceWorker' in navigator){
 }
 getCID();
 if(!getToken()) openToken(); else refreshAll();
+
+/* ================= Nerve Pages: PROJECT + ACTIONS overlay panels =================
+   JARVIS overlay: a tab fades a panel in OVER the dimmed dashboard (reactor keeps running behind
+   the scrim). One panel at a time; tab-again / X / Esc / click-outside dismiss. Pure DOM state,
+   no localStorage. Auto-refreshes the REAL endpoints while open. No external resources. */
+(function nervePages(){
+  const E=s=>esc(String(s==null?'':s));
+  const scrim=document.createElement('div'); scrim.className='np-scrim'; scrim.id='npScrim';
+  scrim.innerHTML='<div class="np-panel" id="npPanel" role="dialog" aria-modal="true" aria-label="Nerve Page">'
+    +'<div class="np-head"><span class="np-title" id="npTitle">—</span><span class="np-sub" id="npSub"></span>'
+    +'<button class="np-x" id="npX" aria-label="Close panel">✕</button></div><div id="npBody"></div></div>';
+  (document.querySelector('.shell')||document.body).appendChild(scrim);   // inside .shell so the header (z-index) stays above the scrim
+  const body=$('#npBody'); let cur=null, timer=null;
+
+  function renderProject(d){
+    if(!d || (!d.has_doc && !(d.steps&&d.steps.length)))
+      return '<div class="np-empty">No project doc yet.<br>Drop one at docs/projects/ACTIVE.md, then say “critique my project.”</div>';
+    let h='';
+    if(d.goal) h+='<div class="np-sub">GOAL</div><div class="np-goal">'+E(d.goal)+'</div>';
+    if(d.gaps&&d.gaps.length){
+      h+='<div class="np-sub">CRITIQUE · '+d.gaps.length+' GAP'+(d.gaps.length!==1?'S':'')+'</div><div class="np-gaps">'
+       + d.gaps.map(g=>'<div class="np-gap"><span class="fl">⚠</span><span><b>'+E(g.title)+'</b> — '+E(g.detail)+'</span></div>').join('')
+       + '</div>';
+    }
+    if(d.steps&&d.steps.length){
+      h+='<div class="np-sub">PLAN · '+(d.done_count||0)+'/'+(d.total||d.steps.length)+' DONE</div><div class="np-steps">'
+       + d.steps.map(s=>{ const mk=s.status==='done'?'✓':(s.status==='current'?'▸':'·');
+           return '<div class="np-step '+E(s.status)+'"><span class="mk">'+mk+'</span><span><span class="tt">'+s.n+'. '+E(s.title)+'</span><span class="dt">'+E(s.detail)+'</span></span></div>'; }).join('')
+       + '</div>';
+    }
+    if(d.current_prompt){
+      h+='<div class="np-sub">CLAUDE CODE PROMPT · STEP '+((d.current||0)+1)+'</div>'
+       + '<div class="np-promptbox" id="npPrompt">'+E(d.current_prompt)+'</div>'
+       + '<button class="np-copy" data-copy="npPrompt">⧉ Copy prompt</button>';
+    } else if(d.steps&&d.steps.length){
+      h+='<div class="np-empty">Say “next step” to generate the Claude Code prompt for the current step.</div>';
+    }
+    return h;
+  }
+  function renderActions(d){
+    const items=(d&&d.items)||[];
+    if(!items.length) return '<div class="np-empty">No actions logged yet.</div>';
+    return items.map(it=>'<div class="np-row"><span class="src">'+E(it.source)+'</span>'
+      +'<span class="act"><b>'+E(it.action)+'</b> '+E(it.target)
+      + (it.outcome?'<span class="out">'+E(it.outcome)+'</span>':'')+'</span>'
+      +'<span class="ag">'+E(it.ago)+'</span></div>').join('');
+  }
+  function wireCopy(){
+    body.querySelectorAll('.np-copy').forEach(b=> b.onclick=()=>{
+      const el=document.getElementById(b.dataset.copy); if(!el) return; const txt=el.textContent;
+      const ok=()=>toast('Prompt copied');
+      if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(ok).catch(()=>fallback(el)); }
+      else fallback(el);
+      function fallback(el){ const r=document.createRange(); r.selectNodeContents(el); const sel=getSelection();
+        sel.removeAllRanges(); sel.addRange(r); try{ document.execCommand('copy'); ok(); }catch(_){ toast('Select and copy'); } }
+    });
+  }
+  async function load(tab){
+    try{
+      const d = tab==='project' ? await api('/orchestrator/state') : await api('/actions/feed');
+      if(cur!==tab) return;                                  // closed/switched mid-request
+      body.innerHTML = tab==='project' ? renderProject(d) : renderActions(d);
+      wireCopy();
+    }catch(e){ /* 401 -> api() opens the token modal; leave the acquiring state */ }
+  }
+  function setTabs(active){ document.querySelectorAll('.np-tab').forEach(t=>{
+    const on=t.dataset.np===active; t.classList.toggle('active',on); t.setAttribute('aria-pressed', on?'true':'false'); }); }
+  function open(tab){
+    if(cur===tab){ close(); return; }                       // tab again -> dismiss
+    cur=tab; setTabs(tab);
+    $('#npTitle').textContent = tab==='project'?'PROJECT':'ACTIONS';
+    $('#npSub').textContent   = tab==='project'?'· ORCHESTRATOR':'· AUDIT';
+    body.innerHTML='<div class="np-empty">acquiring…</div>';
+    scrim.classList.add('show'); document.body.classList.add('np-open');
+    load(tab);
+    clearInterval(timer); timer=setInterval(()=>load(tab), 5000);   // auto-refresh while open
+  }
+  function close(){
+    if(!cur) return; cur=null; setTabs(null);
+    clearInterval(timer); timer=null; scrim.classList.remove('show'); document.body.classList.remove('np-open');
+  }
+  document.querySelectorAll('.np-tab').forEach(t=> t.addEventListener('click', ()=>open(t.dataset.np)));
+  $('#npX').addEventListener('click', close);
+  scrim.addEventListener('click', e=>{ if(e.target===scrim) close(); });   // click-outside (scrim, not panel)
+  document.addEventListener('keydown', e=>{ if(e.key==='Escape' && cur) close(); });
+})();
 </script>
 </body>
 </html>
