@@ -121,7 +121,7 @@ async def execute_route(user_id, system, route, user_message, window, voice_mode
     if r == "canvas":
         return await _execute_canvas(user_message, voice_mode=voice_mode)
     if r == "orchestrator":
-        return await orchestrator.handle(rd.get("op"), voice_mode=voice_mode)
+        return await orchestrator.handle(rd.get("op"), user_message, voice_mode=voice_mode)
     if r == "actions":
         return await actionlog.summarize(user_message, voice_mode=voice_mode)
     force = _FORCE.get(r)
@@ -239,6 +239,13 @@ async def respond(user_id, user_message, window, voice_mode: bool = False, speak
         print(reply)
         log_turn("orchestrator", current_rung.get(), time.monotonic() - t0, "rest")
         return reply
+    # A pending project EDIT confirm ("yes"/"no" after "change the goal to X") is consumed here,
+    # before routing. Returns None when there's nothing pending (routing proceeds).
+    edit_reply = await orchestrator.resolve_edit(user_message)
+    if edit_reply is not None:
+        print(edit_reply)
+        log_turn("orchestrator", current_rung.get(), time.monotonic() - t0, "rest")
+        return edit_reply
     # A pending local-action confirmation takes precedence over routing: a "yes"/"no" here answers
     # the prior RISKY ask, never gets classified as a fresh turn.
     pending = computer.resolve_pending(user_id, user_message)

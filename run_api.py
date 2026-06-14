@@ -1,5 +1,16 @@
 import os
+import sys
 from dotenv import load_dotenv
+
+# The server prints replies to the console for debugging, and a reply can contain Unicode the
+# replies use (em-dashes, arrows, a warning glyph). Windows' default cp1252 stdout raises
+# UnicodeEncodeError on an unencodable char, which 500s the whole turn. utf-8 + replace can never
+# crash — worst case a stray glyph becomes "?". Boot lines stay ASCII either way (see below).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 load_dotenv()
 import uvicorn
