@@ -31,6 +31,8 @@ ROUTES + their JSON shapes:
 {"route":"selfmod"} selfmod = an explicit request to change Nervice's OWN behavior/personality/code ("stop ending sentences with questions"). Opinions about itself are normal.
 {"route":"browse"} browse = find/check/read/report something ON a specific named website ("open hacker news and tell me the top story"). General factual/news questions are normal.
 {"route":"canvas"} canvas = a question about Nate's SCHOOL CANVAS — what's due, upcoming assignments, due dates, announcements, or grades ("what's due this week", "any new assignments", "check canvas", "what are my grades", "anything due on canvas"). This READS his live Canvas page.
+{"route":"orchestrator","op":"critique|plan|next|done|redo|status|gaps"}
+  orchestrator = managing Nate's CODING PROJECT PLAN (the project doc at docs/projects/ACTIVE.md). op critique = "critique my project", "review my project doc", "find gaps in my plan". op plan = "plan my project", "break it into steps", "show the plan", "what's the plan". op next = "next step", "give me the next step", "what do I paste next", "what's the next prompt". op done = "mark step done", "I finished that step", "that step's done", "mark it done". op redo = "redo", "redo that step", "give me a different prompt for this step". op status = "project status", "where am I on the project", "how many steps left". op gaps = "show gaps", "show me the critique". This is about Nate's coding PROJECT plan — NOT Canvas (school) and NOT building files right now.
 {"route":"normal"} normal = everything else: chat, opinions, simple facts, news/current events, and any DISCUSSION (vs an explicit action request).
 
 RULES:
@@ -40,11 +42,12 @@ RULES:
 - Asking ABOUT capabilities ("can you play music?") is normal, not control.
 - Extract targets/queries minimally and literally; strip polite prefixes ("Jarvis,", "please")."""
 
-_ROUTES = {"hard", "build", "selfmod", "browse", "canvas", "control", "skill", "music_mgmt", "system", "normal"}
+_ROUTES = {"hard", "build", "selfmod", "browse", "canvas", "orchestrator", "control", "skill", "music_mgmt", "system", "normal"}
 _CTRL_ACTIONS = {"open_app", "open_url", "play_youtube", "screenshot", "focus_window", "list_windows"}
 _SKILL_OPS = {"run", "create", "list", "delete"}
 _MUSIC_OPS = {"set", "add", "remove", "list", "clear"}
 _SYS_QUESTIONS = {"cpu", "ram", "gpu", "disk", "os", "uptime", "specs", "top_proc", "file_count"}
+_ORCH_OPS = {"critique", "plan", "next", "done", "redo", "status", "gaps"}
 
 # Deterministic guard: a complaint/reaction about a prior action must stay conversational and NEVER
 # reach the browse agent or the control interpreter, regardless of what the LLM router decides.
@@ -74,6 +77,30 @@ def is_machine_question(msg: str) -> bool:
 _KW_OPEN = re.compile(rf"^\s*(?:please\s+|hey\s+|can you\s+)?(?:{computer._OPEN_VERBS})\s+\S", re.I)
 _KW_SWITCH = re.compile(rf"\b(?:{computer._SWITCH_VERBS})\b", re.I)
 _CANVAS_KW = re.compile(r"\bcanvas\b", re.I)   # both LLMs down -> route to the honest "need the bigger brain"
+# Orchestrator (project planner). Keyword net only (both LLM rungs down); read-only ops still work
+# fully capped (status/gaps/show plan), LLM ops degrade to an honest "need Groq/Ollama".
+_ORCH_KW = re.compile(r"\b(my project|the project|project (?:plan|doc|status)|the plan|plan my project|"
+                      r"next step|next prompt|critique (?:my|the)|show (?:me )?(?:the )?gaps|"
+                      r"mark (?:the |this |that )?step|step(?:'?s| is)? done|redo (?:the |this |that )?step)\b", re.I)
+
+
+def _orch_keyword_op(m: str) -> str | None:
+    ml = (m or "").lower()
+    if not _ORCH_KW.search(ml):
+        return None
+    if "critique" in ml:
+        return "critique"
+    if "gap" in ml:
+        return "gaps"
+    if "redo" in ml:
+        return "redo"
+    if "done" in ml or "finished" in ml:
+        return "done"
+    if "next" in ml:
+        return "next"
+    if "plan" in ml:
+        return "plan"
+    return "status"
 
 
 def _keyword_route(msg: str) -> dict:
@@ -93,6 +120,9 @@ def _keyword_route(msg: str) -> dict:
         return {"route": "control"}
     if _CANVAS_KW.search(m):
         return {"route": "canvas"}        # executor enforces smart-brain -> honest "need bigger brain"
+    mo = _orch_keyword_op(m)
+    if mo:
+        return {"route": "orchestrator", "op": mo}
     return {"route": "normal"}
 
 
@@ -125,6 +155,9 @@ def _coerce(out) -> dict | None:
         q = str(out.get("question") or "").strip().lower()
         d["question"] = q if q in _SYS_QUESTIONS else None
         d["path"] = str(out.get("path") or "").strip()
+    elif route == "orchestrator":
+        op = str(out.get("op") or "").strip().lower()
+        d["op"] = op if op in _ORCH_OPS else "status"
     return d
 
 
