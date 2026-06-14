@@ -4,7 +4,7 @@ import os, re, json, sys, time, asyncio, inspect
 from groq import AsyncGroq, BadRequestError, RateLimitError
 from dotenv import load_dotenv
 
-from app.agent import ask_claude, AllClaudeExhausted, current_rung   # the Claude account ladder (Pro -> Max)
+from app.agent import ask_claude, AllClaudeExhausted, ClaudeBlocked, current_rung   # the Claude account ladder (Pro -> Max)
 from app import ollama_client as ollama                 # the local qwen3.5:4b rung (free, unlimited)
 
 load_dotenv()
@@ -277,6 +277,9 @@ async def _claude_fallback(prompt: str | None = None, system: str | None = None,
     Returns Claude's answer, or None if Claude is ALSO unavailable (caller shows the limit message)."""
     try:
         return await ask_claude(prompt or "", system=system, messages=messages)
+    except ClaudeBlocked as e:   # OUR in-code cap / free-only — surface the honest message, no Claude spend
+        print(f"[claude blocked by spend guard] {e}", file=sys.stderr)
+        return str(e)
     except Exception as e:   # AllClaudeExhausted, or any SDK/auth error
         print(f"[groq->claude fallback unavailable] {repr(e)[:120]}", file=sys.stderr)
         return None
@@ -440,10 +443,11 @@ async def chat_with_tools(system, messages, tools, tool_funcs, max_rounds=4,
         print("[groq capped, ollama unavailable -> Claude fallback]", file=sys.stderr)
         ans = await _claude_fallback(system=system, messages=messages)
         return ans if ans else await _exhausted_msg()
-    except AllClaudeExhausted:
-        # the hard route forced Claude and every account is out — friendly, never a crash
-        print("[claude ladder exhausted in chat_with_tools]", file=sys.stderr)
-        return LADDER_EXHAUSTED_MSG
+    except AllClaudeExhausted as e:
+        # the hard route forced Claude and every account is out — friendly, never a crash.
+        # ClaudeBlocked (our in-code cap / free-only) carries its own honest message; surface it.
+        print(f"[claude unavailable in chat_with_tools] {repr(e)[:120]}", file=sys.stderr)
+        return str(e) if isinstance(e, ClaudeBlocked) else LADDER_EXHAUSTED_MSG
     finally:
         claude_turn_ctx.reset(token)
 
