@@ -994,16 +994,167 @@ async def resolve_edit(user_message: str) -> str | None:
     if _NO_RE.match(text):
         _PENDING = {}
         current_rung.set("direct")
-        return ("Okay — scrapped that, nothing changed." if kind == "edit"
-                else "Okay, keeping the current plan (it's out of date with the doc until you re-plan).")
+        if kind == "result":
+            return "Okay — left the plan as it is. Paste another result, or say \"next step\" when you're ready."
+        if kind == "edit":
+            return "Okay — scrapped that, nothing changed."
+        return "Okay, keeping the current plan (it's out of date with the doc until you re-plan)."
     if _YES_RE.match(text):
         if kind == "edit":
             return await _apply_edit(_PENDING)        # may set a replan-confirm pending
         if kind == "replan":
             _PENDING = {}
             return await _op_plan(False)              # regenerate from the new doc (sets rung groq/ollama)
+        if kind == "result":
+            return await _apply_result(_PENDING)      # mark-done+next / fix step / follow-up
     _PENDING = {}                                     # unrelated message -> drop the stale pending, route fresh
     return None
+
+
+# =============================== RESULT-LOOP v1 (paste-back -> propose -> approve) ===============
+# Nate runs a step's CC prompt in his interactive (FREE) Claude Code, then pastes CC's report back.
+# Nervice parses it on the FREE rung into a structured outcome and PROPOSES the next move (mark done +
+# next step / add a fix step / add a follow-up) through the SAME _PENDING confirm gate talk-to-edit
+# uses — Nate approves before any plan mutation. Never silent, never Claude. Writes only
+# orchestrator_state.json (the plan); the doc is untouched.
+#
+# Git cross-check (loop-design Part 1d) is DEFERRED for v1: the orchestrator only knows
+# docs/projects/, not where the project's CODE actually lives, so there's no workspace path to
+# `git -C <ws> diff` a self-reported "done" against. When a workspace convention is settled, add the
+# cross-check here (flag a "done" with an empty diff). Not invented for v1.
+
+_RESULT_PARSE_SYSTEM = (
+    "You read the report a coding agent (Claude Code) produced after attempting ONE build step, and "
+    "extract a STRUCTURED outcome. Output ONLY JSON, no prose. Use ONLY what the report actually says "
+    "— never invent a result. Shape: {\"status\":\"ok|partial|fail\",\"files_changed\":[\"...\"],"
+    "\"tests\":\"passed|failed|none\",\"problems\":[\"<short>\"],\"summary\":\"<one sentence>\"}. "
+    "status ok = the step's goal was achieved (and any tests pass); fail = it errored, didn't work, or "
+    "tests failed; partial = mostly worked but something is incomplete or flagged. If the text is empty "
+    "or clearly not a build report, return {\"status\":\"unclear\"}.")
+
+# Leading cue Nate may prefix before pasting ("here's what CC said:", "result:") — stripped so the
+# parser sees the report itself.
+_RESULT_CUE_RE = re.compile(
+    r"^\s*(here'?s (?:what )?(?:claude ?code|cc)\b[^:\n]*:?|here'?s the (?:result|output|report)\b[^:\n]*:?|"
+    r"(?:claude ?code|cc) (?:said|reported|finished)\b[^:\n]*:?|paste (?:the )?result\b:?|result\s*:)", re.I)
+
+
+def _strip_result_cue(text: str) -> str:
+    stripped = _RESULT_CUE_RE.sub("", text or "", count=1).lstrip(" :—-\n").strip()
+    return stripped or (text or "").strip()
+
+
+def _problem_list(obj) -> list:
+    pr = obj.get("problems") if isinstance(obj, dict) else None
+    if isinstance(pr, list):
+        return [str(p).strip() for p in pr if str(p).strip()][:3]
+    return [str(pr).strip()] if pr else []
+
+
+async def propose_result(report_text: str, voice_mode: bool = False) -> str:
+    """Parse Nate's pasted Claude Code report on the FREE rung and PROPOSE the next plan move
+    (mark-done + next / fix step / follow-up). Sets a _PENDING confirm; mutates NOTHING until 'yes'.
+    Free rungs only; scope-flags a fix/follow-up that implies Nervice's own code. NEVER Claude."""
+    global _PENDING
+    current_rung.set("direct")
+    state = _load_state()
+    steps = state.get("steps") or []
+    if not steps:
+        return _NO_PLAN_MSG
+    idx = int(state.get("current", 0))
+    if idx >= len(steps):
+        return ("Every step is already marked done — there's no current step to report against. Update "
+                "the doc and say \"plan my project\" for a fresh pass.")
+    report = _strip_result_cue(report_text)
+    if len(report) < 8:
+        return ("Paste Claude Code's report — what it changed, whether tests passed, any errors — and "
+                "I'll read it and propose the next move.")
+    obj, rung = await _ask_free(
+        _RESULT_PARSE_SYSTEM,
+        f"STEP {idx + 1}: {steps[idx].get('title', '')}\n\nCLAUDE CODE REPORT:\n{report}",
+        want_json=True, num_predict=400)
+    if rung == "none":
+        return _NEED_FREE_MSG
+    status = str((obj or {}).get("status", "")).lower() if isinstance(obj, dict) else ""
+    if status not in ("ok", "partial", "fail"):
+        return ("I couldn't read that as a build report — paste Claude Code's final summary (what "
+                "changed, whether tests passed, any errors) and I'll propose the next move.")
+    problems = _problem_list(obj)
+    summary = str((obj or {}).get("summary", "")).strip() if isinstance(obj, dict) else ""
+    cur_title = steps[idx].get("title", f"step {idx + 1}")
+    n = len(steps)
+
+    if status == "ok":
+        new_steps = [dict(s) for s in steps]
+        new_steps[idx]["status"] = "done"
+        nxt = idx + 1
+        last = nxt >= n
+        _PENDING = {"kind": "result", "apply": {"steps": new_steps, "current": nxt},
+                    "show_next": (None if last else nxt),
+                    "summary_done": (f"Marked step {idx + 1} done — all {n} steps complete. Nice work."
+                                     if last else f"Marked step {idx + 1} (\"{cur_title}\") done — {idx + 1} of {n}."),
+                    "ts": time.time()}
+        if last:
+            return (f"Step {idx + 1} (\"{cur_title}\") looks done — and that's all {n} steps. "
+                    "Mark it complete? (yes / no)")
+        return (f"Step {idx + 1} (\"{cur_title}\") looks done. Mark it complete and move to step "
+                f"{nxt + 1} (\"{new_steps[nxt].get('title', '')}\")? (yes / no)")
+
+    if status == "fail":
+        prob = problems[0] if problems else (summary or "it didn't work")
+        if _SCOPE_FLAG_RE.search(prob) or _SCOPE_FLAG_RE.search(report):
+            return ("⚠️ That failure looks like it'd touch Nervice's own safety/self-mod/core code — out "
+                    "of scope for a project plan. Handle it through the self-update flow, not here.")
+        fix = {"title": f"Fix: {prob}"[:80], "detail": f"Resolve the failure from step {idx + 1}: {prob}",
+               "status": "pending"}
+        new_steps = [dict(s) for s in steps]
+        new_steps.insert(idx + 1, fix)                # right after the failed step; current stays put
+        _PENDING = {"kind": "result", "apply": {"steps": new_steps, "current": idx},
+                    "show_next": None,
+                    "summary_done": f"Added a fix step right after step {idx + 1}: \"{fix['title']}\".",
+                    "ts": time.time()}
+        return (f"Step {idx + 1} (\"{cur_title}\") failed: {prob}. Add a fix step right after it? "
+                "(yes adds it; no leaves the plan as-is so you can just retry the step.)")
+
+    # partial
+    issue = problems[0] if problems else (summary or "something's incomplete")
+    if _SCOPE_FLAG_RE.search(issue) or _SCOPE_FLAG_RE.search(report):
+        return ("⚠️ That follow-up looks like it'd touch Nervice's own code/safety — out of scope here; "
+                "handle it through the self-update flow.")
+    fu = {"title": f"Follow-up: {issue}"[:80], "detail": f"Address what step {idx + 1} left open: {issue}",
+          "status": "pending"}
+    new_steps = [dict(s) for s in steps]
+    new_steps[idx]["status"] = "done"
+    new_steps.insert(idx + 1, fu)                     # follow-up becomes the new current step
+    _PENDING = {"kind": "result", "apply": {"steps": new_steps, "current": idx + 1},
+                "show_next": idx + 1,
+                "summary_done": f"Marked step {idx + 1} done and added a follow-up: \"{fu['title']}\".",
+                "ts": time.time()}
+    return (f"Step {idx + 1} (\"{cur_title}\") mostly worked, but {issue}. Mark it done and add a "
+            "follow-up step for that? (yes / no)")
+
+
+async def _apply_result(pending: dict) -> str:
+    """Write a confirmed result-loop mutation to the plan (orchestrator_state.json ONLY), then — when a
+    next step exists — generate and return its Claude Code prompt on the FREE rung. Never Claude."""
+    global _PENDING
+    current_rung.set("direct")
+    apply = pending["apply"]
+    state = _load_state()
+    state["steps"] = apply["steps"]
+    state["current"] = int(apply.get("current", 0))
+    _save_state(state)
+    done_line = pending.get("summary_done", "Done.")
+    show = pending.get("show_next")
+    _PENDING = {}
+    if show is not None:
+        doc = _read_doc()
+        steps = apply["steps"]
+        if doc is not None and 0 <= show < len(steps):
+            lead = (f"{done_line} On to step {show + 1}, {steps[show].get('title', '')}. "
+                    "Paste this into Claude Code:")
+            return await _gen_step_prompt(doc, steps, show, lead=lead)
+    return done_line
 
 
 _OPS = {"critique": _op_critique, "plan": _op_plan, "next": _op_next, "done": _op_done,
@@ -1018,4 +1169,6 @@ async def handle(op: str, user_message: str = "", voice_mode: bool = False) -> s
     print(f"[ROUTE: orchestrator/{op}]", file=sys.stderr)
     if op == "edit":
         return await propose_edit(user_message, voice_mode)
+    if op == "result":
+        return await propose_result(user_message, voice_mode)
     return await _OPS.get(op, _op_status)(voice_mode)
