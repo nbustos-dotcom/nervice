@@ -117,6 +117,56 @@ def _save_state(state: dict) -> None:
         print(f"[orchestrator] could not save state: {repr(e)[:80]}", file=sys.stderr)
 
 
+def _parse_goal(doc: str) -> str:
+    """Pull the '## Goal' section text from ACTIVE.md (the real lines under it, placeholders dropped)."""
+    m = re.search(r"^##\s*Goal\s*$(.*?)(?=^##\s|\Z)", doc or "", re.M | re.S)
+    body = (m.group(1) if m else "").strip()
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("<")]
+    return " ".join(lines)[:400]
+
+
+def _doc_text_or_none() -> str | None:
+    """Read ACTIVE.md WITHOUT creating a template (read-only; for the snapshot endpoint). None if
+    absent or still an unfilled template."""
+    try:
+        if not ACTIVE_DOC.exists():
+            return None
+        t = ACTIVE_DOC.read_text(encoding="utf-8", errors="replace").strip()
+        if not t or (t.count("<") >= 4 and "PROJECT — <title>" in t):
+            return None
+        return t
+    except Exception:
+        return None
+
+
+def state_snapshot() -> dict:
+    """Read-only snapshot for the PROJECT panel + GET /orchestrator/state. No LLM call. Returns the
+    goal, critique gaps, the ordered steps with done/current/pending status, the current index, and
+    the CACHED current-step CC prompt (generated when Nate asks for the step — never regenerated on a
+    panel refresh). Honest: has_doc is False when the doc is missing or an unfilled template."""
+    doc = _doc_text_or_none()
+    state = _load_state()
+    steps = state.get("steps") or []
+    current = int(state.get("current", 0))
+    prompts = state.get("prompts") or {}
+    out_steps = []
+    for i, s in enumerate(steps):
+        status = "done" if s.get("status") == "done" else ("current" if i == current else "pending")
+        out_steps.append({"n": i + 1, "title": s.get("title", ""), "detail": s.get("detail", ""), "status": status})
+    return {
+        "has_doc": doc is not None,
+        "goal": _parse_goal(doc) if doc else "",
+        "gaps": state.get("gaps") or [],
+        "steps": out_steps,
+        "current": current,
+        "current_title": steps[current]["title"] if 0 <= current < len(steps) else "",
+        "current_prompt": prompts.get(str(current), ""),
+        "done_count": sum(1 for s in steps if s.get("status") == "done"),
+        "total": len(steps),
+        "updated": state.get("updated", ""),
+    }
+
+
 # --------------------------------------------------------------------------- the FREE-only LLM call
 
 async def _ask_free(system: str, user: str, *, want_json: bool = False, num_predict: int = 500):
@@ -286,6 +336,11 @@ async def _gen_step_prompt(doc: str, steps: list, idx: int, lead: str = "") -> s
                 "behind the self-mod approval gate. I'm flagging it instead of handing you a prompt — "
                 "re-scope this step to the project itself, or handle that change through the normal "
                 "self-update flow.")
+    # Cache the raw prompt so the PROJECT panel / GET /orchestrator/state can show it without a fresh
+    # Groq call on every auto-refresh (regenerated only when Nate asks for the step again).
+    cache = _load_state()
+    cache.setdefault("prompts", {})[str(idx)] = prompt.strip()
+    _save_state(cache)
     return _prompt_reply(idx, len(steps), step["title"], prompt, lead=lead)
 
 
@@ -377,8 +432,28 @@ async def _op_gaps(voice: bool) -> str:
     return _fmt_gaps(gaps, voice)
 
 
+async def _op_summary(voice: bool) -> str:
+    """A SHORT, Groq-grounded status update from the real project state (the same data the PROJECT
+    panel shows). Free rung only; honest empty; never fabricated progress."""
+    snap = state_snapshot()
+    if not snap["has_doc"] and not snap["steps"]:
+        current_rung.set("direct")
+        return _NO_DOC_MSG
+    gaps = snap["gaps"]
+    ctx = (f"GOAL: {snap['goal'] or '(not stated in the doc)'}\n"
+           f"PROGRESS: {snap['done_count']} of {snap['total']} steps done"
+           + (f"; current step: {snap['current_title']}" if snap["current_title"] else "; no plan yet")
+           + ("\nOPEN GAPS (" + str(len(gaps)) + "): " + "; ".join(g.get("title", "") for g in gaps[:4])
+              if gaps else "\nNo open critique gaps."))
+    system = ("You are Nervice giving Nate a SHORT, honest status update on his coding project, using "
+              "ONLY the real data below. One or two conversational sentences — no lists, no markdown. "
+              "Lead with where things stand. NEVER invent progress, steps, or gaps not shown here.")
+    ans, rung = await _ask_free(system, ctx, want_json=False, num_predict=180)
+    return ans if rung != "none" else _NEED_FREE_MSG
+
+
 _OPS = {"critique": _op_critique, "plan": _op_plan, "next": _op_next, "done": _op_done,
-        "redo": _op_redo, "status": _op_status, "gaps": _op_gaps}
+        "redo": _op_redo, "status": _op_status, "gaps": _op_gaps, "summary": _op_summary}
 
 
 async def handle(op: str, voice_mode: bool = False) -> str:

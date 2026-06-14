@@ -335,8 +335,21 @@ async def nervice_stats():
         engine, stt = v.TTS_ENGINE, v.WHISPER_PATH
     else:
         engine, stt = "kokoro", "faster-whisper base.en"
+    # Lean real metrics: today's turn count (turns.log) + today's Groq token usage (usage.json).
+    from app import usage
+    today_str = datetime.datetime.now(_TZ).strftime("%Y-%m-%d")
+
+    def _turns_today() -> int:
+        try:
+            lines = _TURNS_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+            return sum(1 for ln in lines if ln[:10] == today_str and "route=" in ln)
+        except Exception:
+            return 0
+
+    turns_today = await asyncio.to_thread(_turns_today)
     return {"memories": int(memories or 0), "messages": int(messages or 0), "today": int(today or 0),
-            "voice": voice, "engine": engine, "stt": stt}
+            "voice": voice, "engine": engine, "stt": stt,
+            "turns_today": turns_today, "tokens_today": usage.today_groq_tokens()}
 
 
 # ----------------------------- /news : optional, BBC RSS, real headlines only -----------------------------
@@ -486,6 +499,24 @@ async def activity():
     """REAL recent activity — local-control audit log + agent calls + recent questions, newest
     first. No fabrication: if a source is empty there are simply fewer items."""
     return {"items": await _activity_items()}
+
+
+@app.get("/orchestrator/state", dependencies=[Depends(auth)])
+async def orchestrator_state():
+    """REAL orchestrator cockpit for the Nerve Pages PROJECT panel: the project goal, critique gaps,
+    the ordered steps with done/current/pending status, and the CACHED current-step Claude Code
+    prompt. Read-only, no LLM. has_doc is False when the project doc is missing or unfilled."""
+    from app import orchestrator
+    return await asyncio.to_thread(orchestrator.state_snapshot)
+
+
+@app.get("/actions/feed", dependencies=[Depends(auth)])
+async def actions_feed(limit: int = 40):
+    """REAL action audit for the ACTIONS panel: computer_actions.log + browser_actions.log merged,
+    newest first (timestamp, action, target, outcome). No fabrication."""
+    from app import actionlog
+    limit = max(1, min(int(limit), 100))
+    return {"items": await asyncio.to_thread(actionlog.read_feed, limit)}
 
 
 # ================== HUD INFORMATION LAYER: Nervice's real internal state ==================
