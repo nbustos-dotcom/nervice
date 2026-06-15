@@ -1,15 +1,20 @@
-"""Preflight clean-exit / NO-LOOP test.
+"""LOOP-PROOF test for run_api.py's port preflight.
 
-Auto-start on login was DROPPED (it looped: a second starter fought over 8765 instead of exiting
-clean). This guards the KEPT run_api.py hardening — the part that matters now: when 8765 is already
-held, a second `python run_api.py` must EXIT ONCE, CLEANLY (rc reported), within a couple seconds —
-never spin/retry/loop. Run: .venv/Scripts/python.exe scripts/test_autostart.py
+Auto-start on login was DROPPED (a scheduled task kept respawning a server that couldn't bind 8765 —
+a relaunch loop). The fix has two halves: (a) nothing respawns the server anymore (no scheduled task
+/ no Startup entry / start_nervice.vbs removed — confirmed separately), and (b) any extra `run_api.py`
+EXITS ONCE, CLEANLY, fast when 8765 is already held — it cannot spin. This proves (b):
 
-Checks: start one server; then start a SECOND 3x in a row (each must exit clean, fast, primary keeps
-serving, no loop); and a foreign holder of 8765 -> clean exit. Launches via pythonw (also exercises
-the no-console path). Self-cleaning (kills 8765 at the end).
+  [1] start a server; /health == HEAD.
+  [2] double-start 5x rapidly: each 2nd start exits cleanly (rc reported) in ~1-2s, primary survives,
+      NEVER loops or spawns repeatedly.
+  [3] start 3 near-simultaneously from a clean slate: exactly ONE survives, the other two exit clean.
+  [4] a foreign program holding 8765: the launcher exits clean, no loop.
+
+Launches via pythonw (also exercises the kept no-console path), cwd=System32 (proves cwd-independence).
+Self-cleaning. Run: .venv/Scripts/python.exe scripts/test_autostart.py
 """
-import os, sys, time, json, socket, subprocess, urllib.request, pathlib
+import os, sys, time, json, socket, subprocess, threading, urllib.request, pathlib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -53,37 +58,45 @@ def wait_up(timeout=45):
 print(f"HEAD={HEAD}")
 kill_8765()
 
-print("\n[1] start the primary server (python run_api.py via pythonw)")
+print("\n[1] start the primary server")
 p1 = launch()
 h = wait_up()
 (ok if h and h.get("git") == HEAD else bad)(f"primary up; /health git={h.get('git') if h else None}==HEAD")
 
-print("\n[2] start a SECOND 3x -> each must EXIT cleanly within a couple seconds, NO loop; primary survives")
-for i in range(1, 4):
+print("\n[2] double-start 5x rapidly -> each 2nd start EXITS cleanly, fast, NO loop; primary survives")
+for i in range(1, 6):
     t0 = time.time()
     p = launch()
     try:
         rc = p.wait(timeout=12)
         dt = time.time() - t0
-        if rc is not None and dt <= 10:
-            ok(f"run {i}: 2nd start exited cleanly rc={rc} in {dt:.1f}s — exited once, no loop")
-        else:
-            bad(f"run {i}: rc={rc} dt={dt:.1f}s — too slow / spinning")
+        (ok if rc is not None and dt <= 10 else bad)(f"run {i}: 2nd start exited rc={rc} in {dt:.1f}s — one shot, no loop")
     except subprocess.TimeoutExpired:
-        p.kill()
-        bad(f"run {i}: 2nd start HUNG/LOOPED (>12s, never exited)")
-    (ok if health() else bad)(f"run {i}: primary still serving after the 2nd exited")
+        p.kill(); bad(f"run {i}: 2nd start HUNG/LOOPED (>12s)")
+    if not health():
+        bad(f"run {i}: primary stopped serving!"); break
+ok("primary survived all 5 double-starts") if health() else None
 
-print("\n[3] foreign holder of 8765 (a non-Nervice program) -> launcher exits cleanly, no loop")
-import threading
+print("\n[3] start 3 NEAR-SIMULTANEOUSLY from a clean slate -> exactly ONE survives, others exit clean")
+kill_8765()
+procs = [launch(), launch(), launch()]
+h = wait_up()
+(ok if h else bad)("exactly one server came up from the 3-way race")
+time.sleep(10)   # let the two losers resolve (preflight OR graceful bind-race catch)
+alive = [p for p in procs if p.poll() is None]
+exited = [p for p in procs if p.poll() is not None]
+if h and len(alive) == 1 and len(exited) == 2:
+    ok(f"exactly 1 survivor, 2 exited cleanly (rcs={[p.returncode for p in exited]}) — no flashing, no loop")
+else:
+    bad(f"3-way race resolved wrong: server={'up' if h else 'down'} alive={len(alive)} exited={len(exited)}")
+
+print("\n[4] foreign program holds 8765 -> launcher exits clean, no loop")
 kill_8765()
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("127.0.0.1", 8765)); sock.listen(5)
 stop = threading.Event()
 def _foreign():
-    # Accept connections and reply with NON-HTTP bytes, like a real foreign service would (a raw
-    # listen() that never accepts would just stall the occupant probe's SYN — an artifact, not a bug).
     sock.settimeout(0.5)
     while not stop.is_set():
         try:
@@ -107,5 +120,5 @@ except subprocess.TimeoutExpired:
 stop.set(); sock.close()
 
 kill_8765()
-print(f"\n=== NO-LOOP {len(P)} passed, {len(F)} failed ===")
+print(f"\n=== LOOP-PROOF {len(P)} passed, {len(F)} failed ===")
 sys.exit(1 if F else 0)
