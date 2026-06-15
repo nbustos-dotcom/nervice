@@ -30,10 +30,11 @@ for m in ["what's my CPU", "how much RAM do I have", "what's my screen resolutio
           "my screen is frozen"]:
     chk(m, router.is_capability_question(m), False)
 
-print("[classify pre-guard] capability question -> route normal WITHOUT calling Groq (short-circuit)")
+print("[classify pre-guard] capability + display-spec questions -> route normal WITHOUT calling Groq")
 async def main():
     for m in ["can you see my screen", "what can you do", "can you control my computer",
-              "are you able to see what I'm doing right now", "can you read my emails"]:
+              "are you able to see what I'm doing right now", "can you read my emails",
+              "what's my screen resolution", "what's my refresh rate"]:
         d = await router.classify(m)
         chk(f"classify({m!r})", d, {"route": "normal"})
 asyncio.run(main())
