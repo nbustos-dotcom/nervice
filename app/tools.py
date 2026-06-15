@@ -235,10 +235,13 @@ async def count_files(path: str | None = None, **_) -> str:
     return await asyncio.to_thread(sysinfo.count_files, path)
 
 
-async def get_news(**_) -> str:
-    """Real current headlines in Nate's standing topics, fetched by a live web search (the grounded-
-    synthesis step then summarizes ONLY from these results — no fabricated headlines)."""
-    return await web_search("latest news headlines today politics technology cybersecurity", max_results=8)
+async def get_news(topic: str = "", **_) -> str:
+    """Real current headlines via a LIVE web search at ask time. `topic` searches that subject
+    ("the election", "cybersecurity"); empty pulls Nate's standing topics. The grounded-synthesis
+    step then summarizes ONLY from these results — no fabricated headlines, never from training."""
+    t = (topic or "").strip()
+    q = f"{t} news latest" if t else "latest news headlines today politics technology cybersecurity"
+    return await web_search(q, max_results=8)
 
 
 SYSTEM_INFO_TOOL = {
@@ -283,11 +286,13 @@ GET_NEWS_TOOL = {
     "type": "function",
     "function": {
         "name": "get_news",
-        "description": "Current news / headlines / what's happening. ALWAYS use this for ANY news "
-                       "request ('the news', 'what's happening', 'catch me up') — it returns REAL web "
-                       "results in Nate's topics (politics, computer science, cybersecurity). NEVER "
-                       "answer a news question from your own knowledge.",
-        "parameters": {"type": "object", "properties": {}},
+        "description": "Current news / headlines / what's happening, fetched LIVE. ALWAYS use this for "
+                       "ANY news request ('the news', 'what's happening', 'catch me up') — it returns "
+                       "REAL web results. Pass `topic` for a specific subject ('the election', "
+                       "'cybersecurity'); omit for Nate's general topics. NEVER answer a news question "
+                       "from your own knowledge.",
+        "parameters": {"type": "object", "properties": {
+            "topic": {"type": "string", "description": "a specific subject to search; omit for general headlines"}}},
     },
 }
 
