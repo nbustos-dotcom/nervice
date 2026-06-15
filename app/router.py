@@ -29,21 +29,23 @@ ROUTES + their JSON shapes:
 {"route":"hard"}   hard = formal logic puzzles/proofs/multi-step quantitative problems; nontrivial architecture/schema design or review; long rigorous analysis where wrong answers are costly; or the user explicitly asks for Claude.
 {"route":"build"}  build = an explicit request to create/edit/fix actual FILES or projects. Discussing code is normal.
 {"route":"selfmod"} selfmod = an explicit request to change Nervice's OWN behavior/personality/code ("stop ending sentences with questions"). Opinions about itself are normal.
-{"route":"browse"} browse = find/check/read/report something ON a specific named website ("open hacker news and tell me the top story"). General factual/news questions are normal.
+{"route":"browse"} browse = find/check/read/report something ON a specific named website ("open hacker news and tell me the top story"). General factual questions are normal; current news/headlines is the news route.
 {"route":"canvas"} canvas = a question about Nate's SCHOOL CANVAS — what's due, upcoming assignments, due dates, announcements, or grades ("what's due this week", "any new assignments", "check canvas", "what are my grades", "anything due on canvas"). This READS his live Canvas page.
 {"route":"orchestrator","op":"new|edit|critique|plan|next|done|redo|status|gaps|summary|result"}
   orchestrator = managing Nate's CODING PROJECT PLAN (the project doc at docs/projects/ACTIVE.md). op new = "start a new project", "new project", "create a project", "set up a new project", "begin a new project" — BEGINS a guided setup where Nervice asks questions and writes the project doc for him (this is the META setup of the project doc, NOT writing code/files — that's build). op edit = an EDIT to the EXISTING project — "change the goal to X", "add a step for X", "add a requirement X", "remove step 2", "remove the X step", "reorder step 3 before step 1", "rewrite requirement 1 as X", "change step 2 to X" (editing the CURRENT project doc/plan — NOT starting a new one). op critique = "critique my project", "review my project doc", "find gaps in my plan". op plan = "plan my project", "break it into steps", "show the plan", "what's the plan". op next = "next step", "give me the next step", "what do I paste next", "what's the next prompt". op done = "mark step done", "I finished that step", "that step's done", "mark it done". op redo = "redo", "redo that step", "give me a different prompt for this step". op status = "project status", "how many steps left". op gaps = "show gaps", "show me the critique". op summary = "how's my project", "how's the project going", "give me a project update", "where am I on the project". op result = Nate is PASTING Claude Code's report/output back after running a step's prompt — cues like "here's what Claude Code said", "here's the result", "CC said:", "result:", "it finished, here's the output", usually followed by the pasted report text. Nervice reads the report and proposes the next move (mark done + next step, or add a fix/follow-up step). NOT a request to build (that's build) and NOT a status question (that's summary). This is about Nate's coding PROJECT plan — NOT Canvas (school) and NOT building files right now.
 {"route":"actions"} actions = a question about what NERVICE has DONE / its own recent activity ("what have you done", "what actions have you taken", "what did you do", "what have you been up to", "what have you been doing lately", "what have you been working on"). Reads Nervice's real action audit log. NOT "what's the plan" (that's orchestrator) and NOT a request to DO something (that's control).
-{"route":"normal"} normal = everything else: chat, opinions, simple facts, news/current events, and any DISCUSSION (vs an explicit action request).
+{"route":"news","topic":"<specific subject, or empty for general>"} news = a request for CURRENT EVENTS / world headlines, fetched LIVE and summarized from real results: "what's the news", "what's happening", "what's happening today", "any news", "anything going on", "what's going on", "catch me up", "news about X" (topic "X"), "any tech/cyber/political news" (topic the subject). topic = the named subject if there is one, else empty for general headlines. WORLD/current-events ONLY — NOT "what's the news with my project / how's Nervice going" (that's orchestrator), and NOT a reaction to something that just happened (that's normal).
+{"route":"normal"} normal = everything else: chat, opinions, simple facts, and any DISCUSSION (vs an explicit action request).
 
 RULES:
+- A current-events / headlines question is route news (fetched live) — NEVER answer the news from memory or training.
 - A REACTION/FOLLOW-UP about something that just happened ("it didn't open", "that didn't work", "I don't see it") is ALWAYS normal.
 - An explicit action request beats discussion; discussion routes normal.
 - If the message exactly matches a SAVED TRIGGER below, route skill/run with that trigger.
 - Asking ABOUT capabilities ("can you play music?") is normal, not control.
 - Extract targets/queries minimally and literally; strip polite prefixes ("Jarvis,", "please")."""
 
-_ROUTES = {"hard", "build", "selfmod", "browse", "canvas", "orchestrator", "actions", "control", "skill", "music_mgmt", "system", "normal"}
+_ROUTES = {"hard", "build", "selfmod", "browse", "canvas", "orchestrator", "actions", "news", "control", "skill", "music_mgmt", "system", "normal"}
 _CTRL_ACTIONS = {"open_app", "open_url", "play_youtube", "screenshot", "focus_window", "list_windows"}
 _SKILL_OPS = {"run", "create", "list", "delete"}
 _MUSIC_OPS = {"set", "add", "remove", "list", "clear"}
@@ -97,6 +99,10 @@ _RESULT_KW = re.compile(r"(here'?s (?:what )?(?:claude ?code|cc)\b|here'?s the (
 # "what has Nervice DONE" — its own activity/audit recall (keyword net only).
 _ACTIONS_KW = re.compile(r"\b(what (?:have you|did you|you'?ve) (?:done|do|taken|been (?:doing|up to|working on))|"
                          r"actions you'?ve taken|what you'?ve been (?:doing|up to)|your recent activity)\b", re.I)
+# current events / world headlines (keyword net only; checked AFTER orchestrator so "news with my
+# project" stays orchestrator). General only here — the Groq router extracts a topic when up.
+_NEWS_KW = re.compile(r"\b(news|headlines?|what'?s\s+(?:happening|going\s+on)|anything\s+(?:happening|going\s+on)|"
+                      r"catch\s+me\s+up|current\s+events|what'?s\s+going\s+on)\b", re.I)
 
 
 def _orch_keyword_op(m: str) -> str | None:
@@ -148,6 +154,8 @@ def _keyword_route(msg: str) -> dict:
     mo = _orch_keyword_op(m)
     if mo:
         return {"route": "orchestrator", "op": mo}
+    if _NEWS_KW.search(m):                              # after orchestrator: "news with my project" stays orchestrator
+        return {"route": "news", "topic": ""}          # keyword net = general only (no LLM to extract a topic)
     return {"route": "normal"}
 
 
@@ -183,6 +191,8 @@ def _coerce(out) -> dict | None:
     elif route == "orchestrator":
         op = str(out.get("op") or "").strip().lower()
         d["op"] = op if op in _ORCH_OPS else "status"
+    elif route == "news":
+        d["topic"] = str(out.get("topic") or "").strip()
     return d
 
 

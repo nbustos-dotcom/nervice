@@ -130,6 +130,8 @@ async def execute_route(user_id, system, route, user_message, window, voice_mode
         return music.apply(rd.get("op"), rd.get("artists"))
     if r == "canvas":
         return await _execute_canvas(user_message, voice_mode=voice_mode)
+    if r == "news":
+        return await _execute_news(rd.get("topic"), voice_mode=voice_mode)
     if r == "orchestrator":
         return await orchestrator.handle(rd.get("op"), user_message, voice_mode=voice_mode)
     if r == "actions":
@@ -229,6 +231,54 @@ async def _execute_canvas(user_message: str, voice_mode: bool = False) -> str:
         current_rung.set("exhausted")
         return ("I pulled up your Canvas, but the bigger brain hit its limit before I could read it "
                 "back to you — try again shortly.")
+
+
+async def _execute_news(topic, voice_mode: bool = False) -> str:
+    """Current-events route: FETCH LIVE at ask time and answer ONLY from the fetched headlines —
+    never from model training, never Claude. Groq up: a live web search (topic-aware via get_news) +
+    a single grounded-synthesis pass on Groq (SYNTH_SYSTEM = answer only from the sources). Capped:
+    the zero-LLM extractive BBC headlines (general), or an honest 'can't do topic-specific while
+    rate-limited'. Recency stays honest — nothing is presented as 'now' beyond what the sources say,
+    and nothing is filled from training."""
+    from app.llm import (groq_capped, extractive_news, _client, TOOL_MODEL, SYNTH_SYSTEM,
+                         VOICE_SYNTH_ADDENDUM, _effort, _stick_cap)
+    from app.tools import get_news
+    from groq import RateLimitError
+    topic = (topic or "").strip()
+    if groq_capped():
+        if not topic:
+            news = await extractive_news()           # zero-LLM real BBC headlines, honest preamble
+            if news:
+                current_rung.set("extractive")
+                return news
+        current_rung.set("exhausted")
+        return (f"I'm rate-limited on the smart brain right now, so I can only pull general headlines, "
+                f"not {topic}-specific news — try me again in a bit." if topic else
+                "I couldn't pull the headlines right now — try again shortly.")
+    print(f"[ROUTE: news -> live fetch + grounded synthesis topic={topic!r}]", file=sys.stderr)
+    src = await get_news(topic)                       # LIVE web search at ASK TIME (topic-aware)
+    q = (f"What is the latest news about {topic}? Summarize the real headlines from the sources."
+         if topic else
+         "What is the current news today? Summarize the top real headlines from the sources.")
+    sys_p = SYNTH_SYSTEM + (VOICE_SYNTH_ADDENDUM if voice_mode else "")
+    try:
+        resp = await _client.chat.completions.create(
+            model=TOOL_MODEL,
+            messages=[{"role": "system", "content": sys_p},
+                      {"role": "user", "content": f"SOURCE MATERIAL:\n{src}\n\nQUESTION: {q}"}],
+            temperature=0.2, **_effort(voice_mode))
+        out = (resp.choices[0].message.content or "").strip()
+        if out:
+            current_rung.set("groq")
+            return out
+    except RateLimitError as e:
+        _stick_cap(e)                                 # capped mid-synthesis -> extractive, never training/Claude
+    news = await extractive_news()                    # synthesis empty/capped -> honest real headlines
+    if news:
+        current_rung.set("extractive")
+        return news
+    current_rung.set("exhausted")
+    return "I couldn't find current headlines right now — try again shortly."
 
 
 async def respond(user_id, user_message, window, voice_mode: bool = False, speak=None):
