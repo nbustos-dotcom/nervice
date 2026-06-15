@@ -38,7 +38,8 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 load_dotenv(_ROOT / ".env")
-import uvicorn
+# NOTE: uvicorn is imported LAZILY (just before serving, in __main__) — NOT here — so the port
+# preflight can exit FAST when a server is already running, without paying uvicorn's import cost.
 
 # Bound to localhost for now. Phase B will bind to the Tailscale tailnet interface — NEVER expose
 # this publicly (no port-forwarding); reach it from the phone over Tailscale's private network.
@@ -133,6 +134,7 @@ if __name__ == "__main__":
     print(f"version {_hash} · booted {datetime.datetime.now().isoformat(timespec='seconds')}")
     print("Every endpoint requires header:  Authorization: Bearer $NERVICE_API_TOKEN")
     print("(localhost only for now; Tailscale tailnet binding comes in Phase B — never public.)")
+    import uvicorn   # lazy: only now, after the preflight passed and we're actually going to serve
     try:
         uvicorn.run("app.api:app", host=HOST, port=PORT)
     except OSError as e:
