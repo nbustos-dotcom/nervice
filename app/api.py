@@ -40,6 +40,8 @@ from app.chat import respond, save_exchange
 from app.llm import rate_limit_message
 from app.streaming import stream_reply
 from app import usage   # Claude/Groq spend ledger + the in-code spend-guard state (precautions #2/#3)
+from app import errorlog            # central error log + secret scrub (observability #1)
+from app.turnlog import log_voice_timing   # persist voice stage timing to file (observability #3)
 
 USER = "nate"
 _TOKEN = os.environ.get("NERVICE_API_TOKEN")
@@ -635,6 +637,86 @@ async def ladder():
             "today": {"turns": len(rows), "rungs": dist}}
 
 
+# --------------- observability: queryable turn history + recent errors ---------------
+def _parse_turn_ts(s: str):
+    """turns.log asctime -> NAIVE local datetime (matches datetime.now() for window math, since the
+    logging module timestamps in local time). Returns None for an unparseable stamp (malformed line)."""
+    for fmt in ("%Y-%m-%d %H:%M:%S,%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _tail_text_lines(path: pathlib.Path, max_bytes: int = 2_000_000) -> list:
+    """Last max_bytes of a (possibly large/rotating) log as decoded lines — a bounded read that can't
+    hang or blow memory on a huge file. The window we aggregate is recent, so the tail is sufficient."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - max_bytes))
+            return f.read().decode("utf-8", "replace").splitlines()
+    except Exception:
+        return []
+
+
+def _history(hours: float) -> dict:
+    """Honest aggregates over the last `hours` of turns.log: turn count, rung + route distributions,
+    avg / p95 / max latency, and the error count from errors.log. Tail-bounded reads; malformed and
+    non-turn (log_event) lines are skipped. Empty/missing log -> honest zeros, never a crash."""
+    import math
+    cutoff = datetime.datetime.now() - datetime.timedelta(hours=hours)
+    secs, rungs, routes, count = [], {}, {}, 0
+    for line in _tail_text_lines(_TURNS_LOG):
+        m = _TURN_LINE.match(line.strip())
+        if not m:
+            continue                                   # malformed / non-turn line skipped gracefully
+        ts = _parse_turn_ts(m.group(1))
+        if ts is None or ts < cutoff:
+            continue
+        count += 1
+        routes[m.group(2)] = routes.get(m.group(2), 0) + 1
+        rungs[m.group(3)] = rungs.get(m.group(3), 0) + 1
+        secs.append(float(m.group(4)))
+    secs.sort()
+
+    def pctl(p: float) -> float:
+        if not secs:
+            return 0.0
+        k = max(1, math.ceil(p / 100.0 * len(secs)))   # nearest-rank percentile
+        return round(secs[k - 1], 2)
+
+    avg = round(sum(secs) / len(secs), 2) if secs else 0.0
+    return {
+        "window_hours": round(hours, 2),
+        "turns": count,
+        "rungs": rungs,
+        "routes": routes,
+        "latency": {"avg_s": avg, "p95_s": pctl(95), "max_s": round(secs[-1], 2) if secs else 0.0},
+        "errors": errorlog.count_since(cutoff.isoformat(timespec="seconds")),
+    }
+
+
+@app.get("/stats/history", dependencies=[Depends(auth)])
+async def stats_history(hours: float = 24.0, days: float | None = None):
+    """Honest aggregates over a recent window of logs/turns.log (the per-turn telemetry already
+    logged — NO new writes): turn count, rung distribution, route distribution, avg + p95 latency,
+    and error count (logs/errors.log). days=N overrides hours. Tail-bounded — safe on a large log."""
+    if days is not None:
+        hours = max(0.0, float(days)) * 24.0
+    hours = max(0.0, min(float(hours), 24.0 * 90))      # clamp to 90 days
+    return await asyncio.to_thread(_history, hours)
+
+
+@app.get("/errors/recent", dependencies=[Depends(auth)])
+async def errors_recent(n: int = 20):
+    """The last N entries from logs/errors.log (NEWEST first) — notable/handled failures captured
+    across the turn paths, context already scrubbed of secrets. Read-only; no fabrication."""
+    n = max(1, min(int(n), 100))
+    return {"items": await asyncio.to_thread(errorlog.read_recent, n)}
+
+
 class FreeOnlyIn(BaseModel):
     on: bool
 
@@ -781,6 +863,9 @@ async def chat(inp: ChatIn):
         reply = await respond(USER, inp.message, window, voice_mode=False)
     except RateLimitError as e:   # backstop — respond() already handles 429, this guards any new path
         return {"reply": rate_limit_message(e), "conversation_id": cid}
+    except Exception as e:        # observability #1: record any turn failure (route errors tagged
+        errorlog.log_error("respond", e, inp.message)   # deeper aren't double-logged), then re-raise
+        raise
     _advance_window(cid, inp.message, reply)
     _store(cid, inp.message, reply)
     return {"reply": reply, "conversation_id": cid}
@@ -825,6 +910,9 @@ async def voice(audio: UploadFile = File(...), conversation_id: str | None = For
         reply = await respond(USER, transcript, window, voice_mode=True)
     except RateLimitError as e:   # backstop — reply still gets synthesized below so the phone speaks it
         reply = rate_limit_message(e)
+    except Exception as e:        # observability #1: record, then re-raise (unchanged failure behavior)
+        errorlog.log_error("respond:voice", e, transcript)
+        raise
     llm_s = time.time() - t0
     _advance_window(cid, transcript, reply)
     _store(cid, transcript, reply)
@@ -841,8 +929,10 @@ async def voice(audio: UploadFile = File(...), conversation_id: str | None = For
         w.writeframes(pcm.tobytes())
     audio_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     tts_s = time.time() - t0
+    total_s = time.time() - t_total
     print(f"[voice-timing] stt={stt_s:.2f}s llm={llm_s:.2f}s tts={tts_s:.2f}s "
-          f"total={time.time()-t_total:.2f}s", file=sys.stderr)
+          f"total={total_s:.2f}s", file=sys.stderr)
+    log_voice_timing(stt_s, llm_s, tts_s, total_s)   # observability #3: persist the stage breakdown
     return {"transcript": transcript, "reply": reply, "conversation_id": cid, "audio_wav_base64": audio_b64}
 
 
@@ -903,8 +993,12 @@ async def ws_chat(ws: WebSocket):
             if not text:
                 continue
             window = _windows.setdefault(cid, [])
-            reply = await stream_reply(USER, text, window, send, voice=want_audio,
-                                       conversation_id=cid)
+            try:
+                reply = await stream_reply(USER, text, window, send, voice=want_audio,
+                                           conversation_id=cid)
+            except Exception as e:   # observability #1: capture a streamed-turn failure, then re-raise
+                errorlog.log_error("stream_reply", e, text)
+                raise
             _advance_window(cid, text, reply)
     except WebSocketDisconnect:
         pass
@@ -948,8 +1042,12 @@ async def ws_voice(ws: WebSocket):
                 continue
             await send({"type": "transcript", "text": transcript})
             window = _windows.setdefault(cid, [])
-            reply = await stream_reply(USER, transcript, window, send, voice=True,
-                                       conversation_id=cid)
+            try:
+                reply = await stream_reply(USER, transcript, window, send, voice=True,
+                                           conversation_id=cid)
+            except Exception as e:   # observability #1: capture a streamed-turn failure, then re-raise
+                errorlog.log_error("stream_reply", e, transcript)
+                raise
             _advance_window(cid, transcript, reply)
     except WebSocketDisconnect:
         pass

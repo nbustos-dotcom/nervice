@@ -22,6 +22,7 @@ from app import confusion
 from app import browser
 from app import orchestrator
 from app import actionlog
+from app import errorlog
 from app.db import AsyncSessionLocal
 from app.models import Message
 
@@ -72,6 +73,7 @@ async def build_system_prompt(user_id, user_message, voice_mode: bool = False):
     except Exception as e:
         print(f"[recall] retrieve failed -> proceeding with NO memories this turn: {repr(e)[:120]}",
               file=sys.stderr)
+        errorlog.log_error("recall", e, user_message)   # belt: retrieve() is fail-soft, so this is a bug if hit
         r = {"core": [], "topic": [], "degraded": True}
     if r.get("degraded"):
         print("[recall] degraded — answering this turn without (full) stored memory", file=sys.stderr)
@@ -97,6 +99,21 @@ _TIMEOUT_MSG = TIMEOUT_MSG
 
 
 async def execute_route(user_id, system, route, user_message, window, voice_mode: bool = False, on_ack=None):
+    """Front for the post-classify executors (shared by respond + stream_reply). Centrally CAPTURES
+    any route-executor failure to logs/errors.log WITH the route name, then RE-RAISES — recorded,
+    never swallowed, and the caller's existing handling is unchanged. Handled cases (e.g. a Groq
+    rate-limit turned into a graceful decline inside _execute_canvas/_execute_news) don't propagate
+    here, so they never spam the error log."""
+    name = route.get("route", "?") if isinstance(route, dict) else str(route)
+    try:
+        return await _execute_route(user_id, system, route, user_message, window,
+                                    voice_mode=voice_mode, on_ack=on_ack)
+    except Exception as e:
+        errorlog.log_error(f"route:{name}", e, user_message)
+        raise
+
+
+async def _execute_route(user_id, system, route, user_message, window, voice_mode: bool = False, on_ack=None):
     """The post-classify half of a turn. `route` is the router's dict ({"route": name, ...args})
     or a bare string for legacy callers. The LLM router decided INTENT; everything here only
     EXECUTES — risk gating, whitelists, and the pending-confirm gate are unchanged in their

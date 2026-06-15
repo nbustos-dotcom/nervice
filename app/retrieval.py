@@ -4,6 +4,7 @@ import sys
 from app.embeddings import embed
 from app.db import AsyncSessionLocal
 from app.models import Memory
+from app import errorlog
 from sqlalchemy import select
 
 # Fix 2.2: a real relevance bar for topical recall. pgvector cosine_distance: 0 = identical,
@@ -41,6 +42,7 @@ async def retrieve(user_id: str, query_text: str, essentials_limit: int = 3,
         degraded = True
         print(f"[retrieval] embedding unavailable (Ollama?) — topic recall skipped this turn: "
               f"{repr(e)[:100]}", file=sys.stderr)
+        errorlog.log_error("recall:embed", e, query_text)   # central capture; turn still fail-soft below
 
     # (b) the rows — Supabase. CORE is embedding-free; TOPIC runs only when we have a query vector.
     async def _query():
@@ -71,6 +73,7 @@ async def retrieve(user_id: str, query_text: str, essentials_limit: int = 3,
         degraded = True
         print(f"[retrieval] memory DB unavailable (Supabase?) — recall degraded this turn: "
               f"{repr(e)[:100]}", file=sys.stderr)
+        errorlog.log_error("recall:db", e, query_text)      # central capture; CORE still served below
 
     core_ids = {m.id for m in core}
     topic = [m for m in topic if m.id not in core_ids][:topic_limit]
