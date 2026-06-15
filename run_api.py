@@ -1,18 +1,43 @@
 import os
 import sys
+import pathlib
+
+_ROOT = pathlib.Path(__file__).resolve().parent
+
+# AUTOSTART SAFETY (no Windows Script Host). The autostart task launches this hidden via pythonw.exe
+# (see docs/AUTOSTART.md) — a plain GUI-subsystem Python, NOT wscript, which is why it's reliable at
+# login where WSH was not. With pythonw there is NO console, so sys.stdout/sys.stderr are None and the
+# first print() would crash the server before it boots. Reopen them to logs/server.out.log first.
+if sys.stdout is None or sys.stderr is None:
+    try:
+        (_ROOT / "logs").mkdir(exist_ok=True)
+        _logf = open(_ROOT / "logs" / "server.out.log", "a", encoding="utf-8", errors="replace")
+        if sys.stdout is None:
+            sys.stdout = _logf
+        if sys.stderr is None:
+            sys.stderr = _logf
+    except Exception:
+        pass
+
+# Be cwd-independent: Task Scheduler launches with cwd=System32, but .env, git, and logs/ resolve
+# relative to the repo. chdir here and load .env by absolute path so the launch cwd never matters.
+try:
+    os.chdir(_ROOT)
+except Exception:
+    pass
+
 from dotenv import load_dotenv
 
-# The server prints replies to the console for debugging, and a reply can contain Unicode the
-# replies use (em-dashes, arrows, a warning glyph). Windows' default cp1252 stdout raises
-# UnicodeEncodeError on an unencodable char, which 500s the whole turn. utf-8 + replace can never
-# crash — worst case a stray glyph becomes "?". Boot lines stay ASCII either way (see below).
+# A reply can contain Unicode (em-dashes, arrows, a warning glyph); Windows' default cp1252 stdout
+# raises UnicodeEncodeError on an unencodable char, which would 500 the turn. utf-8 + replace can
+# never crash — worst case a stray glyph becomes "?". Applies to a real console OR the log file above.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
-load_dotenv()
+load_dotenv(_ROOT / ".env")
 import uvicorn
 
 # Bound to localhost for now. Phase B will bind to the Tailscale tailnet interface — NEVER expose
@@ -108,4 +133,12 @@ if __name__ == "__main__":
     print(f"version {_hash} · booted {datetime.datetime.now().isoformat(timespec='seconds')}")
     print("Every endpoint requires header:  Authorization: Bearer $NERVICE_API_TOKEN")
     print("(localhost only for now; Tailscale tailnet binding comes in Phase B — never public.)")
-    uvicorn.run("app.api:app", host=HOST, port=PORT)
+    try:
+        uvicorn.run("app.api:app", host=HOST, port=PORT)
+    except OSError as e:
+        # The preflight above has a tiny TOCTOU window: a simultaneous second launch (double-fire)
+        # can pass the port check, then lose the bind race. Exit clean rather than spam a WinError
+        # 10048 traceback — the instance that won the race is already serving.
+        print(f"Couldn't bind {HOST}:{PORT} ({type(e).__name__}: {e}) — another instance won the "
+              "start race; exiting cleanly.")
+        raise SystemExit(0)
