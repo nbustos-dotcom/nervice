@@ -25,7 +25,7 @@ ROUTES + their JSON shapes:
 {"route":"music_mgmt","op":"set|add|remove|list|clear","artists":["..."]}
   music_mgmt = managing Nate's favorite-artists list: "my favorite artists are X, Y, Z" (set), "add X to my artists" (add), "remove X" (remove), "who are my favorite artists" (list), "clear my artists" (clear). PLAYING music is control/play_youtube, not music_mgmt.
 {"route":"system","question":"cpu|ram|gpu|disk|os|uptime|specs|top_proc|file_count","path":"<folder for file_count, or empty>"}
-  system = READ-ONLY questions about THIS machine: "what CPU do I have" (cpu), "how much RAM" (ram), "how much disk space" (disk), "what's using the most memory" (top_proc), "how many files in my Downloads" (file_count, path "Downloads"), "how many files can you read in my computer" (file_count, path "" — "my computer"/"the computer" is NOT a folder path, leave path empty), "what OS" (os), "how long has it been up" (uptime), "what are my specs" (specs).
+  system = READ-ONLY questions about THIS machine: "what CPU do I have" (cpu), "how much RAM" (ram), "how much disk space" (disk), "what's using the most memory" (top_proc), "how many files in my Downloads" (file_count, path "Downloads"), "how many files can you read in my computer" (file_count, path "" — "my computer"/"the computer" is NOT a folder path, leave path empty), "what OS" (os), "how long has it been up" (uptime), "what are my specs" (specs). TELEMETRY VALUES ONLY — a question about Nervice's ABILITIES ("can you see my screen", "what can you do", "are you able to X", "can you read/access/control X") is NOT system; route it normal so the brain answers honestly. A specific DISPLAY value you don't track — screen resolution, refresh rate, brightness, screen size — is also NOT system; route it normal.
 {"route":"hard"}   hard = formal logic puzzles/proofs/multi-step quantitative problems; nontrivial architecture/schema design or review; long rigorous analysis where wrong answers are costly; or the user explicitly asks for Claude.
 {"route":"build"}  build = an explicit request to create/edit/fix actual FILES or projects. Discussing code is normal.
 {"route":"selfmod"} selfmod = an explicit request to change Nervice's OWN behavior/personality/code ("stop ending sentences with questions"). Opinions about itself are normal.
@@ -42,7 +42,7 @@ RULES:
 - A REACTION/FOLLOW-UP about something that just happened ("it didn't open", "that didn't work", "I don't see it") is ALWAYS normal.
 - An explicit action request beats discussion; discussion routes normal.
 - If the message exactly matches a SAVED TRIGGER below, route skill/run with that trigger.
-- Asking ABOUT capabilities ("can you play music?") is normal, not control.
+- Asking ABOUT Nervice's capabilities ("can you play music?", "can you see my screen?", "what can you do?", "are you able to X?") is route normal — the brain answers honestly — NEVER control and NEVER system (telemetry).
 - Extract targets/queries minimally and literally; strip polite prefixes ("Jarvis,", "please")."""
 
 _ROUTES = {"hard", "build", "selfmod", "browse", "canvas", "orchestrator", "actions", "news", "control", "skill", "music_mgmt", "system", "normal"}
@@ -60,6 +60,34 @@ _FOLLOWUP = re.compile(
     r"don'?t\s+see|can'?t\s+see\s+(it|anything|that)|i\s+(want to|wanna)\s+see\s+it|"
     r"where('?s| is| did)\s+it|nothing\s+(happened|appeared|opened|showed)|"
     r"it'?s\s+not\s+(here|showing|there|working|open|up))\b", re.I)
+
+# Deterministic guard: a question about Nervice's OWN abilities ("can you see/read/access/control X",
+# "what can you do", "are you able to") asks about CAPABILITIES, not hardware telemetry — it must
+# reach the BRAIN (route normal, answered honestly from persona SYSTEM FACTS), NEVER the sysinfo fast
+# path. This is the play-some-music / "my computer"-as-path class: a keyword ("screen") used to
+# misroute "can you see my screen" into a CPU/RAM/GPU stats dump. Action verbs (open/play/launch) are
+# deliberately NOT here, so "can you open notepad" / "can you play music" still route to control.
+_CAPABILITY = re.compile(
+    r"\bare\s+you\s+able\s+to\b"
+    r"|\bwhat\s+can\s+you\s+(?:do|see|access|read|control)\b"
+    r"|\bwhat\s+are\s+(?:you\s+able\s+to|your\s+(?:abilities|capabilities|capacities))\b"
+    r"|\bdo\s+you\s+have\s+(?:the\s+)?(?:ability|capability|access|power)\b"
+    r"|\b(?:can|could|are|do)\s+you\b[^?.!\n]{0,24}\b(?:see|view|watch|look|read|access|control|"
+    r"monitor|hear|detect|observe|track|record|capture|tell\s+what|aware\s+of)\b", re.I)
+
+
+def is_capability_question(msg: str) -> bool:
+    """True for a question about Nervice's OWN abilities (vs a request for telemetry values).
+    Such questions go to the brain, never the sysinfo telemetry path."""
+    return bool(_CAPABILITY.search(msg or ""))
+
+
+# Display-spec questions sysinfo has NO telemetry for (resolution, refresh rate, brightness, screen
+# size). Without this, the LLM maps them to the `specs` enum -> a full CPU/RAM/GPU dump. Route them to
+# the brain, which answers honestly ("I read CPU/RAM/GPU/disk/OS, not your display resolution").
+_DISPLAY_Q = re.compile(
+    r"\bresolution\b|\brefresh\s*rate\b|\bscreen\s+size\b|\bbrightness\b|\baspect\s+ratio\b"
+    r"|\bhow\s+(?:big|large|wide)\s+is\s+(?:my|the)\s+(?:screen|display|monitor)\b", re.I)
 
 # Vocabulary for the no-LLM keyword net ONLY (both model rungs down).
 _SYSINFO_NOUN = re.compile(r"\b(cpu|gpu|graphics card|processor|cores?|ram|memory|disk|storage|drive|"
@@ -209,6 +237,11 @@ async def classify(user_message: str) -> dict:
     msg = user_message or ""
     # A reaction/complaint about a prior action stays conversational regardless of the LLM.
     if _FOLLOWUP.search(msg):
+        return {"route": "normal"}
+    # An ability/self question ("can you see my screen", "what can you do"), or a display-spec value
+    # sysinfo can't read (screen resolution, refresh rate), goes to the BRAIN to be answered honestly —
+    # never the sysinfo telemetry fast path (the stats-dump misroute).
+    if _CAPABILITY.search(msg) or _DISPLAY_Q.search(msg):
         return {"route": "normal"}
     system = _prompt_with_triggers()
     try:

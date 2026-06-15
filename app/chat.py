@@ -10,7 +10,7 @@ from app.retrieval import retrieve
 from app.agent import current_rung
 from app.turnlog import log_turn
 from app.llm import chat_stream, chat_with_tools, TOOL_TIMEOUTS, TIMEOUT_MSG, LADDER_EXHAUSTED_MSG
-from app.router import classify
+from app.router import classify, is_capability_question
 from app.tools import TOOLS, TOOL_FUNCS
 from app import sysinfo
 from app.memory import remember
@@ -110,6 +110,9 @@ async def execute_route(user_id, system, route, user_message, window, voice_mode
         print(f"[ROUTE: control -> {rd.get('action') or 'interpret'}]", file=sys.stderr)
         return computer.handle_control(user_id, user_message,
                                        action=rd.get("action"), target=rd.get("target"))
+    if r == "system" and is_capability_question(user_message):
+        r = "normal"                      # belt: an ability question ("can you see my screen") that the
+                                          # router still tagged system goes to the brain, never a stats dump
     if r == "system":
         ans = await asyncio.to_thread(sysinfo.answer_by_question,
                                       rd.get("question"), rd.get("path"), user_message)
