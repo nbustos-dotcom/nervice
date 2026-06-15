@@ -9,6 +9,11 @@ from logging.handlers import RotatingFileHandler
 _logger = logging.getLogger("nervice.turns")
 _logger.setLevel(logging.INFO)
 _logger.propagate = False
+# Voice-pipeline STAGE timing (stt/llm/tts) used to hit stderr ONLY and was lost after the fact
+# (RECALIBRATION_AUDIT §6); its own lightweight rotating file makes the breakdown reviewable.
+_voice_logger = logging.getLogger("nervice.voice_timing")
+_voice_logger.setLevel(logging.INFO)
+_voice_logger.propagate = False
 try:                                  # import must never fail just because logs/ is unwritable
     _LOG_DIR = pathlib.Path(__file__).resolve().parent.parent / "logs"
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -16,6 +21,10 @@ try:                                  # import must never fail just because logs
         _h = RotatingFileHandler(_LOG_DIR / "turns.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8")
         _h.setFormatter(logging.Formatter("%(asctime)s\t%(message)s"))
         _logger.addHandler(_h)
+    if not _voice_logger.handlers:
+        _vh = RotatingFileHandler(_LOG_DIR / "voice_timing.log", maxBytes=500_000, backupCount=2, encoding="utf-8")
+        _vh.setFormatter(logging.Formatter("%(asctime)s\t%(message)s"))
+        _voice_logger.addHandler(_vh)
 except Exception:
     pass                              # degrade to stderr-only; the [turn] line still flows
 
@@ -41,5 +50,16 @@ def log_event(tag: str) -> None:
     print(f"[turn] {tag}", file=sys.stderr)
     try:
         _logger.info(tag)
+    except Exception:
+        pass
+
+
+def log_voice_timing(stt_s: float, llm_s: float, tts_s: float, total_s: float, path: str = "rest") -> None:
+    """Persist one voice-pipeline stage-timing line to logs/voice_timing.log — mirrors the
+    [voice-timing] stderr line (still printed) so the stt/llm/tts breakdown is reviewable after the
+    fact instead of lost to the console (RECALIBRATION_AUDIT §6). Never raises."""
+    line = f"stt={stt_s:.2f}s\tllm={llm_s:.2f}s\ttts={tts_s:.2f}s\ttotal={total_s:.2f}s\tpath={path}"
+    try:
+        _voice_logger.info(line)
     except Exception:
         pass
