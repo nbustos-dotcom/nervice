@@ -369,33 +369,114 @@ def _strip_screen_only(text: str) -> str:
     return text
 
 
+# --- identifier guard (spoken-only). Tokens that MIX letters and digits across a "." or "-" —
+# model names ("llama-3.3-70b", "gpt-oss-120b"), versions ("v4.8"), mixed IDs — must be read
+# literally, NEVER hyphen-split or digit-expanded into cardinals. Mask them to a private-use
+# codepoint (untouched by every rule below) BEFORE normalization, restore at the very end. A pure
+# magnitude abbreviation ("1.2B", "880M") is deliberately NOT protected — it's expanded by _ABBREV.
+_IDENT = re.compile(r"\b\w+(?:[.\-]\w+)+\b")
+_MAGNITUDE = re.compile(r"\d{1,3}(?:,\d{3})*(?:\.\d+)?[KMBT]")
+
+
+def _protect_identifiers(text: str):
+    saved: list[str] = []
+
+    def mask(m):
+        tok = m.group(0)
+        if not (re.search(r"[A-Za-z]", tok) and re.search(r"\d", tok)):
+            return tok                       # pure-word ("well-known") or pure-number ("3.50", IP) -> normal path
+        if _MAGNITUDE.fullmatch(tok):
+            return tok                       # "1.2B"/"880M" -> let _ABBREV expand it, don't protect
+        saved.append(tok)
+        return chr(0xE000 + len(saved) - 1)  # single private-use char: not \w, not punctuation, untouched
+
+    return _IDENT.sub(mask, text), saved
+
+
+def _restore_identifiers(text: str, saved: list) -> str:
+    for i, tok in enumerate(saved):
+        text = text.replace(chr(0xE000 + i), tok)
+    return text
+
+
 # --- number / unit normalization backstop (spoken-only). Runs LAST in _clean_for_speech, AFTER
-# hashes/paths are stripped (screen-only) and symbols normalized — so a commit hash is already gone
-# and can never be read digit-by-digit. num2words output is de-hyphenated so it needs no second pass.
+# hashes/paths are stripped (screen-only), identifiers masked, and symbols normalized — so a commit
+# hash is already gone, a model name is masked, and neither is ever read digit-by-digit.
 try:
     from num2words import num2words as _n2w_raw
     _HAS_N2W = True
 except Exception:
     _HAS_N2W = False
 
+_SCALE = {"K": "thousand", "M": "million", "B": "billion", "T": "trillion"}
+_DIGIT = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+          "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine"}
+
+# Financial/quantity abbreviation glued to a number — UPPERCASE K/M/B/T only, so lowercase model
+# sizes ("70b", "120b") are NEVER read as "seventy billion". Optional leading "$"; the suffix must
+# end at a non-letter so a unit like "880Mb" is left literal (file-size unit matters).
+_ABBREV = re.compile(r"(?<![A-Za-z0-9.])(\$?)(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d+))?([KMBT])(?![A-Za-z])")
+# A large number — comma-grouped (1,200,000) or a 7+ digit run — read as a natural "N.N million".
+# Optional leading "$". Dots excluded both sides so versions/IPs (4.2, 127.0.0.1) never match.
+_BIGNUM = re.compile(r"(?<![\w.])(\$?)(\d{1,3}(?:,\d{3})+|\d{7,})(?![\w.])")
 _CURRENCY = re.compile(r"\$(\d+)(?:\.(\d{1,2}))?")
 _TIME = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
 _MPH = re.compile(r"\b(\d+)\s?mph\b", re.IGNORECASE)
+# 4-digit YEAR (1900–2099) -> natural reading ("twenty twenty-six"). Same de-glue guards as bare
+# numbers, so "4.8" / "2.1.6" / "v2026" / IDs never reach it.
+_YEAR = re.compile(r"(?<![\w.:$%/\\-])(19\d\d|20\d\d)(?![\w.:%/\\-])")
 # Isolated number only: NOT glued to a letter, dot, colon, $, %, slash, or hyphen — so commit hashes,
 # IDs, version strings (4.2, 2.1.6, v3, 120b) and paths are left exactly as written (never expanded).
 _BARE_NUM = re.compile(r"(?<![\w.:$%/\\-])(\d+(?:\.\d+)?)(?![\w:%/\\-])(?!\.\d)")
 
 
 def _num_words(n):
-    return _n2w_raw(n).replace("-", " ").replace(",", "")
+    """Cardinal -> spoken words, de-hyphenated and with the British 'and' dropped for a natural
+    American reading ('eight hundred and eighty' -> 'eight hundred eighty')."""
+    return _n2w_raw(n).replace("-", " ").replace(",", "").replace(" and ", " ")
+
+
+def _mantissa_words(int_part: str, dec_part) -> str:
+    """A number with an optional decimal -> integer cardinal, then 'point' + each fractional digit
+    ('1.2' -> 'one point two', '880' -> 'eight hundred eighty'). Digit-by-digit after the point so a
+    scale word reads cleanly and predictably."""
+    whole = _num_words(int(int_part.replace(",", "")))
+    if dec_part:
+        return whole + " point " + " ".join(_DIGIT[d] for d in dec_part)
+    return whole
+
+
+def _say_big(value: int) -> str:
+    """Large integer -> most natural spoken form: 'N[.NN] million/billion/trillion' (rounded for
+    speech — a spoken summary doesn't need 7-digit precision), or a plain cardinal below a million."""
+    for scale, div in (("trillion", 10**12), ("billion", 10**9), ("million", 10**6)):
+        if value >= div:
+            s = f"{value / div:.2f}".rstrip("0").rstrip(".")
+            if "." in s:
+                whole, dec = s.split(".")
+                return f"{_num_words(int(whole))} point {' '.join(_DIGIT[d] for d in dec)} {scale}"
+            return f"{_num_words(int(s))} {scale}"
+    return _num_words(value)
 
 
 def _normalize_numbers(text: str) -> str:
-    """Spoken-only backstop for numbers the persona phrasing missed: currency, clock times, mph, and
-    isolated bare numbers -> spoken words. Conservative: anything glued to letters/dots/IDs is left
-    as-is, and (hashes/paths already stripped) a commit hash is never reached. No-op without num2words."""
+    """Spoken-only backstop for numbers the persona phrasing missed: abbreviations ($880M, 5K), large
+    numbers (1,200,000), currency, clock times, mph, years, and isolated bare numbers -> spoken words.
+    Conservative: anything glued to letters/dots/IDs is left as-is (versions, IPs; hashes/model-names
+    already stripped or masked), so the spoken stream never reads an identifier digit-by-digit or as a
+    giant cardinal. No-op without num2words."""
     if not _HAS_N2W:
         return text
+
+    def abbrev(m):
+        cur, intp, decp, suf = m.group(1), m.group(2), m.group(3), m.group(4)
+        out = _mantissa_words(intp, decp) + " " + _SCALE[suf]
+        return out + " dollars" if cur else out
+
+    def bignum(m):
+        cur = m.group(1)
+        out = _say_big(int(m.group(2).replace(",", "")))
+        return out + " dollars" if cur else out
 
     def money(m):
         whole, cents = int(m.group(1)), m.group(2)
@@ -411,9 +492,15 @@ def _normalize_numbers(text: str) -> str:
             return f"{_num_words(h)} o'clock"
         return f"{_num_words(h)} oh {_num_words(mm)}" if mm < 10 else f"{_num_words(h)} {_num_words(mm)}"
 
-    text = _CURRENCY.sub(money, text)
-    text = _TIME.sub(clock, text)
+    def year(m):
+        return _n2w_raw(int(m.group(1)), to="year").replace("-", " ").replace(",", "").replace(" and ", " ")
+
+    text = _ABBREV.sub(abbrev, text)     # $880M / 5K / $1.2B  (BEFORE currency, which would eat "$880")
+    text = _BIGNUM.sub(bignum, text)     # 1,200,000 / $1,200,000 -> "one point two million [dollars]"
+    text = _CURRENCY.sub(money, text)    # $3.50 -> "three dollars and fifty cents"
+    text = _TIME.sub(clock, text)        # 9:36 -> "nine thirty six"
     text = _MPH.sub(lambda m: f"{_num_words(int(m.group(1)))} miles per hour", text)
+    text = _YEAR.sub(year, text)         # 2026 -> "twenty twenty six"   (BEFORE bare numbers)
     text = _BARE_NUM.sub(lambda m: _num_words(float(m.group(1)) if "." in m.group(1) else int(m.group(1))), text)
     return re.sub(r"\s{2,}", " ", text).strip()
 
@@ -427,8 +514,10 @@ def _clean_for_speech(text: str) -> str:
     text = _BARE_URL.sub(" a link ", text)    # don't read raw URLs aloud
     text = _strip_screen_only(text)           # hashes/paths/IDs: shown on screen, never spoken
     text = re.sub(r"[#*_>`]", "", text)        # strip markdown formatting (| is a pause, handled below)
+    text, _ident = _protect_identifiers(text)  # model names / versions (llama-3.3-70b, v4.8): read literally
     text = _normalize_for_speech(text)         # symbols -> spoken words / pauses (spoken stream only)
-    return _normalize_numbers(text)            # numbers / currency / times / units -> spoken words
+    text = _normalize_numbers(text)            # numbers / currency / times / units -> spoken words
+    return _restore_identifiers(text, _ident)  # put the literal model names / versions back
 
 
 _SYNTH_SENTINEL = object()
