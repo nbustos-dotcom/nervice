@@ -361,6 +361,40 @@
   .np-empty{color:var(--faint); font-family:var(--mono); font-size:11px; letter-spacing:.04em; padding:22px 0; line-height:1.6;}
   @media (prefers-reduced-motion:reduce){ .np-scrim,.np-panel{transition:none !important;} }
 
+  /* ---------- LOOP page: the file-loop as a conversation thread (type-on-void, NO boxes-on-boxes) ---------- */
+  .lp-ws{font-family:var(--mono); font-size:10.5px; letter-spacing:.04em; color:var(--faint); word-break:break-all; margin:2px 0 4px;}
+  .lp-ws b{color:var(--accent2); font-weight:600;}
+  .lp-turn{margin:16px 0 0; padding-left:12px; border-left:1px solid var(--line);}     /* type-on-void: a thin accent rail, no card */
+  .lp-turn.nervice{border-left-color:var(--accent-soft);}   /* purple = Nervice identity */
+  .lp-turn.cc{border-left-color:var(--accent2-soft);}       /* cyan = Claude Code / live data */
+  .lp-role{font-family:var(--mono); font-size:8.5px; letter-spacing:.18em; text-transform:uppercase; margin-bottom:7px;}
+  .lp-turn.nervice .lp-role{color:var(--accent);}
+  .lp-turn.cc .lp-role{color:var(--accent2);}
+  .lp-result{font-size:12.5px; color:var(--dim); line-height:1.5;}
+  .lp-status{font-family:var(--mono); font-size:9px; letter-spacing:.12em; text-transform:uppercase; padding:2px 7px; border:1px solid var(--line); margin-right:8px; white-space:nowrap;}
+  .lp-status.ok{color:var(--accent2); border-color:var(--accent2-soft);}
+  .lp-status.partial{color:var(--warn); border-color:var(--warn);}
+  .lp-status.fail{color:var(--crit); border-color:var(--crit);}
+  .lp-files{margin:8px 0 0; font-family:var(--mono); font-size:11px; color:var(--faint); line-height:1.5;}
+  .lp-files div{word-break:break-all;}
+  .lp-verdict{margin-top:9px; font-family:var(--mono); font-size:10.5px; letter-spacing:.03em; line-height:1.45;}
+  .lp-verdict.verified{color:var(--accent2);}
+  .lp-verdict.mismatch{color:var(--warn);}
+  .lp-verdict.no-repo{color:var(--faint);}
+  .lp-proposal{font-size:13px; color:var(--text); line-height:1.5;}
+  .lp-await{display:inline-block; margin-top:9px; font-family:var(--mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); border:1px solid var(--accent-soft); padding:5px 10px;}
+  .lp-reply{font-size:12.5px; line-height:1.5; margin:12px 0 2px;}
+  .lp-reply .rl{font-family:var(--mono); font-size:8px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint); margin-right:7px;}
+  .lp-reply .you{color:var(--accent2);} .lp-reply .ner{color:var(--text);}
+  .lp-compose{position:sticky; bottom:0; display:flex; gap:8px; margin-top:14px; padding:11px 0 2px;
+              background:linear-gradient(0deg, rgba(8,11,18,.96) 72%, rgba(8,11,18,0));}
+  .lp-compose input{flex:1; min-width:0; min-height:42px; background:rgba(0,0,0,.35); border:1px solid var(--line);
+                    color:var(--text); padding:10px 12px; font-size:16px; font-family:var(--mono); outline:none;}
+  .lp-compose input:focus{border-color:var(--accent2-soft);}
+  .lp-compose button{flex:none; min-height:42px; padding:0 15px; border:1px solid var(--accent2-soft); background:transparent;
+                     color:var(--accent2); font-family:var(--mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase; cursor:pointer;}
+  .lp-compose button:hover{background:rgba(25,227,227,.08);}
+
   /* ---------- activity + news feeds ---------- */
   .feed{display:flex; flex-direction:column; max-height:min(30vh,260px); overflow-y:auto; margin:-2px -4px; padding:2px 4px;}
   .feed::-webkit-scrollbar{width:0;}
@@ -411,6 +445,7 @@
       <span class="spacer"></span>
       <nav class="np-tabs" id="npTabs" aria-label="Nerve Pages">
         <button class="np-tab" data-np="project" aria-pressed="false">PROJECT</button>
+        <button class="np-tab" data-np="loop" aria-pressed="false">LOOP</button>
         <button class="np-tab" data-np="actions" aria-pressed="false">ACTIONS</button>
       </nav>
       <span class="hsep"></span>
@@ -561,6 +596,14 @@ async function api(path){
   const token=getToken(); if(!token){openToken(); throw new Error('no token');}
   const r=await fetch(path,{headers:{'Authorization':'Bearer '+token}});
   if(r.status===401){ if(!$('#tokenModal').classList.contains('show')) toast('Invalid token'); openToken(); throw new Error('401');}
+  if(!r.ok) throw new Error('http '+r.status);
+  return r.json();
+}
+/* authed POST (JSON). The LOOP composer sends to the EXISTING /chat backend — no new backend. */
+async function apiPost(path, body){
+  const token=getToken(); if(!token){openToken(); throw new Error('no token');}
+  const r=await fetch(path,{method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
+  if(r.status===401){ if(!$('#tokenModal').classList.contains('show')) toast('Invalid token'); openToken(); throw new Error('401'); }
   if(!r.ok) throw new Error('http '+r.status);
   return r.json();
 }
@@ -1252,11 +1295,86 @@ if(!getToken()) openToken(); else refreshAll();
         sel.removeAllRanges(); sel.addRange(r); try{ document.execCommand('copy'); ok(); }catch(_){ toast('Select and copy'); } }
     });
   }
+  // ---- LOOP: the orchestrator file-loop rendered as a conversation thread (newest/actionable at bottom) ----
+  function renderLoopThread(d){
+    if(!d) return '<div class="np-empty">acquiring…</div>';
+    let h='';
+    h += d.workspace
+      ? '<div class="lp-ws">WORKSPACE · <b>'+E(d.workspace)+'</b></div>'
+      : '<div class="np-empty">No project workspace set — the file loop is idle.<br>Type below: “set the project workspace to C:\\Users\\you\\project”.</div>';
+    if(d.steps&&d.steps.length){
+      h+='<div class="np-sub">PLAN · '+(d.done_count||0)+'/'+(d.total||d.steps.length)+' DONE</div><div class="np-steps">'
+       + d.steps.map(s=>{ const mk=s.status==='done'?'✓':(s.status==='current'?'▸':'·');
+           return '<div class="np-step '+E(s.status)+'"><span class="mk">'+mk+'</span><span><span class="tt">'+s.n+'. '+E(s.title)+'</span></span></div>'; }).join('')
+       + '</div>';
+    } else if(d.workspace){ h+='<div class="np-empty">No plan yet — say “plan my project”.</div>'; }
+    if(!d.workspace) return h;                               // honest idle: workspace header + plan only
+    // NERVICE -> CLAUDE CODE: the handed-off step prompt (copyable)
+    if(d.current_prompt){
+      h+='<div class="lp-turn nervice"><div class="lp-role">NERVICE → CLAUDE CODE · STEP '+((d.current||0)+1)+'</div>'
+       + '<div class="np-promptbox" id="lpPrompt">'+E(d.current_prompt)+'</div>'
+       + '<button class="np-copy" data-copy="lpPrompt">⧉ Copy prompt</button></div>';
+    } else if(d.steps&&d.steps.length){
+      h+='<div class="lp-turn nervice"><div class="lp-role">NERVICE → CLAUDE CODE</div>'
+       + '<div class="np-empty">Say “next step” to hand off the current step’s prompt.</div></div>';
+    }
+    // CLAUDE CODE -> NERVICE: the result + git cross-check verdict (or an honest waiting state)
+    if(d.result){
+      const r=d.result, st=(r.status||'').toLowerCase();
+      h+='<div class="lp-turn cc"><div class="lp-role">CLAUDE CODE → NERVICE</div>'
+       + '<div class="lp-result"><span class="lp-status '+E(st)+'">'+E(st||'?')+'</span>'+E(r.summary||'(no summary)')+'</div>';
+      if(r.files_changed&&r.files_changed.length) h+='<div class="lp-files">'+r.files_changed.map(f=>'<div>± '+E(f)+'</div>').join('')+'</div>';
+      if(r.problems&&r.problems.length) h+='<div class="lp-files">'+r.problems.map(p=>'<div>⚠ '+E(p)+'</div>').join('')+'</div>';
+      const sub=(d.git&&d.git.subject)?E(d.git.subject):'a commit';
+      const vmap={verified:'✓ verified — git shows real work ('+sub+')',
+                  mismatch:'⚠ no new commit & a clean tree — the work may not actually be there',
+                  'no-repo':'· workspace isn’t a git repo, so this can’t be verified against commits'};
+      if(d.verdict) h+='<div class="lp-verdict '+E(d.verdict)+'">'+(vmap[d.verdict]||'')+'</div>';
+      h+='</div>';
+    } else if(d.result_error){
+      h+='<div class="lp-turn cc"><div class="lp-role">CLAUDE CODE → NERVICE</div><div class="np-empty">'+E(d.result_error)+'</div></div>';
+    }
+    // NERVICE proposes — awaiting Nate's yes/no
+    if(d.pending){
+      h+='<div class="lp-turn nervice"><div class="lp-role">NERVICE PROPOSES</div>'
+       + '<div class="lp-proposal">'+E(d.pending.summary||'(a plan change is pending)')+'</div>'
+       + '<span class="lp-await">▸ awaiting your “yes / no”</span></div>';
+    }
+    return h;
+  }
+  function loopComposeHTML(){
+    return '<div id="lpReply"></div>'
+      + '<form class="lp-compose" id="lpForm" autocomplete="off">'
+      + '<input id="lpInput" type="text" enterkeyhint="send" aria-label="Type into the loop" '
+      + 'placeholder="type into the loop — “yes”, “next step”, “check the result”…">'
+      + '<button type="submit">Send</button></form>';
+  }
+  async function sendLoop(){
+    const inp=$('#lpInput'); if(!inp) return; const msg=inp.value.trim(); if(!msg) return;
+    inp.value='';
+    $('#lpReply').innerHTML='<div class="lp-reply"><span class="rl">you</span><span class="you">'+E(msg)+'</span></div>'
+      + '<div class="lp-reply"><span class="rl">nervice</span><span class="ner" id="lpPending">…</span></div>';
+    try{
+      const d=await apiPost('/chat',{message:msg});
+      const ner=$('#lpPending'); if(ner) ner.textContent=(d&&d.reply)||'(no reply)';
+      if(cur==='loop') load('loop');                         // state may have changed (yes -> applied, etc.)
+    }catch(e){ const ner=$('#lpPending'); if(ner) ner.textContent='(couldn’t send — check the token)'; }
+    inp.focus();
+  }
+  function wireLoopCompose(){ const f=$('#lpForm'); if(f) f.addEventListener('submit', e=>{ e.preventDefault(); sendLoop(); }); }
+
   async function load(tab){
     try{
-      const d = tab==='project' ? await api('/orchestrator/state') : await api('/actions/feed');
+      const ep = tab==='project' ? '/orchestrator/state' : tab==='loop' ? '/orchestrator/loop' : '/actions/feed';
+      const d = await api(ep);
       if(cur!==tab) return;                                  // closed/switched mid-request
-      body.innerHTML = tab==='project' ? renderProject(d) : renderActions(d);
+      if(tab==='loop'){
+        let thread=$('#lpThread');
+        if(!thread){ body.innerHTML='<div id="lpThread"></div>'+loopComposeHTML(); thread=$('#lpThread'); wireLoopCompose(); }
+        thread.innerHTML=renderLoopThread(d);                // refresh ONLY the thread — the composer (focus/typed text) persists
+      } else {
+        body.innerHTML = tab==='project' ? renderProject(d) : renderActions(d);
+      }
       wireCopy();
     }catch(e){ /* 401 -> api() opens the token modal; leave the acquiring state */ }
   }
@@ -1265,8 +1383,8 @@ if(!getToken()) openToken(); else refreshAll();
   function open(tab){
     if(cur===tab){ close(); return; }                       // tab again -> dismiss
     cur=tab; setTabs(tab);
-    $('#npTitle').textContent = tab==='project'?'PROJECT':'ACTIONS';
-    $('#npSub').textContent   = tab==='project'?'· ORCHESTRATOR':'· AUDIT';
+    $('#npTitle').textContent = tab==='project'?'PROJECT':tab==='loop'?'LOOP':'ACTIONS';
+    $('#npSub').textContent   = tab==='project'?'· ORCHESTRATOR':tab==='loop'?'· FILE CHANNEL':'· AUDIT';
     body.innerHTML='<div class="np-empty">acquiring…</div>';
     scrim.classList.add('show'); document.body.classList.add('np-open');
     load(tab);
