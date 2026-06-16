@@ -17,6 +17,7 @@ import json
 import time
 import hashlib
 import pathlib
+import subprocess
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -118,6 +119,104 @@ def _save_state(state: dict) -> None:
         print(f"[orchestrator] could not save state: {repr(e)[:80]}", file=sys.stderr)
 
 
+# --------------------------------------------------------------------------- the FILE CHANNEL
+# Closes the loop WITHOUT copy-paste or screen control (docs/SCREEN_CONTROL_ARCHITECTURE.md §3): a
+# settable project WORKSPACE (where the code lives — Nate sets it; NOT guessed, NOT the SDK builder
+# jail) with a <workspace>/.nervice/ handshake. Nervice WRITES the step prompt to .nervice/prompt.md
+# and READS Claude Code's result from .nervice/result.json, cross-checked against the workspace git
+# (read-only). Nervice never runs the build, never commits, never executes CC — it only reads/writes
+# those handshake files + runs read-only git. The brain stays free (this path is deterministic).
+_HANDSHAKE_DIR = ".nervice"
+_PROMPT_FILE = "prompt.md"
+_RESULT_FILE = "result.json"
+
+# Appended to every generated step prompt when a workspace is set — the convention CC follows so its
+# result lands where Nervice can read it (the prompt text is the only "automation"; Nate runs CC).
+_CC_CONVENTION = (
+    "\n\n---\n"
+    "WHEN DONE (so Nervice can read your result with NO copy-paste):\n"
+    "1. Write a file `.nervice/result.json` in this workspace, exactly this shape:\n"
+    '   {"status":"ok|partial|fail","files_changed":["..."],"tests":"passed|failed|none",'
+    '"problems":["..."],"summary":"<one sentence>"}\n'
+    "2. Commit your changes (`git add -A && git commit -m \"...\"`) so the work is real and reviewable.\n"
+    "3. Then report what changed and WAIT for review — don't move on.")
+
+
+def _ws_path(state: dict | None = None) -> pathlib.Path | None:
+    """The configured project workspace as a Path, or None when unset. (Nate sets it explicitly.)"""
+    ws = str((state or _load_state()).get("workspace") or "").strip()
+    return pathlib.Path(ws) if ws else None
+
+
+def _git(path: pathlib.Path, *args: str) -> str | None:
+    """One READ-ONLY git command in the workspace. Returns stdout (stripped) or None on any failure.
+    Read-only by use (rev-parse / log / status only) — Nervice never commits or mutates the repo."""
+    try:
+        r = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=8)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _git_is_repo(path: pathlib.Path) -> bool:
+    return _git(path, "rev-parse", "--is-inside-work-tree") == "true"
+
+
+def _git_head(path: pathlib.Path) -> str:
+    return _git(path, "rev-parse", "HEAD") or ""
+
+
+def _git_state(path: pathlib.Path) -> dict:
+    """Read-only git snapshot used to cross-check a self-reported result: is it a repo, current HEAD,
+    latest commit (short hash + subject), and whether the working tree is dirty. The .nervice/
+    handshake files are scratch (not project work), so they're excluded from 'dirty' — otherwise an
+    untracked result.json would mask a real empty-diff mismatch. Never raises."""
+    porcelain = _git(path, "status", "--porcelain") or ""
+    dirty = any(ln.strip() and (_HANDSHAKE_DIR + "/") not in ln.replace("\\", "/")
+                for ln in porcelain.splitlines())
+    return {"is_repo": _git_is_repo(path), "head": _git_head(path),
+            "subject": _git(path, "log", "-1", "--format=%h %s") or "", "dirty": dirty}
+
+
+def _read_result_file(path: pathlib.Path) -> tuple[dict | None, str]:
+    """Read + parse <workspace>/.nervice/result.json. Returns (obj, "") on success, or (None, message)
+    when it's missing or unparseable — an honest message, never a crash."""
+    rf = path / _HANDSHAKE_DIR / _RESULT_FILE
+    if not rf.exists():
+        return None, (f"No result yet — I don't see {rf}. Run the step's prompt in Claude Code (it's in "
+                      f"{path / _HANDSHAKE_DIR / _PROMPT_FILE}); it writes the result there when it's done.")
+    try:
+        obj = json.loads(rf.read_text(encoding="utf-8"))
+    except Exception as e:
+        return None, f"I found {rf} but couldn't parse it as JSON ({type(e).__name__}) — it may be mid-write."
+    if not isinstance(obj, dict) or "status" not in obj:
+        return None, f"I found {rf} but it isn't a result object (no \"status\" field)."
+    return obj, ""
+
+
+def _write_prompt_file(idx: int, prompt: str, step: dict) -> str:
+    """When a workspace is set, write the step prompt (+ the result.json/commit convention) to
+    <workspace>/.nervice/prompt.md and record the workspace HEAD as the baseline for the next result's
+    git cross-check. Returns a short note for Nate's reply ('' when no workspace). Never raises into
+    the turn (a handshake-file hiccup must not break planning)."""
+    p = _ws_path()
+    if p is None:
+        return ""
+    try:
+        hs = p / _HANDSHAKE_DIR
+        hs.mkdir(parents=True, exist_ok=True)
+        body = f"# Nervice — step {idx + 1}: {step.get('title', '')}\n\n{prompt}{_CC_CONVENTION}"
+        (hs / _PROMPT_FILE).write_text(body, encoding="utf-8")
+        st = _load_state()
+        st["last_head"] = _git_head(p)          # baseline: a result is "real work" only if HEAD moves past this
+        _save_state(st)
+        return (f"\n\n(Wrote the prompt to {hs / _PROMPT_FILE} — Claude Code can pick it up there; "
+                "say \"check the result\" when it's done and I'll read it back.)")
+    except Exception as e:
+        print(f"[orchestrator] prompt-file write failed: {repr(e)[:80]}", file=sys.stderr)
+        return ""
+
+
 def _parse_goal(doc: str) -> str:
     """Pull the '## Goal' section text from ACTIVE.md (the real lines under it, placeholders dropped)."""
     m = re.search(r"^##\s*Goal\s*$(.*?)(?=^##\s|\Z)", doc or "", re.M | re.S)
@@ -166,6 +265,7 @@ def state_snapshot() -> dict:
         "total": len(steps),
         # the plan is stale when steps exist but the doc has changed since they were generated
         "stale": bool(doc is not None and steps and state.get("plan_hash") != _doc_hash(doc)),
+        "workspace": str(state.get("workspace") or ""),   # the file-channel project workspace ('' = unset)
         "updated": state.get("updated", ""),
     }
 
@@ -373,7 +473,8 @@ async def _gen_step_prompt(doc: str, steps: list, idx: int, lead: str = "") -> s
     cache = _load_state()
     cache.setdefault("prompts", {})[str(idx)] = prompt.strip()
     _save_state(cache)
-    return _prompt_reply(idx, len(steps), step["title"], prompt, lead=lead)
+    file_note = _write_prompt_file(idx, prompt.strip(), step)   # file channel: also write .nervice/prompt.md if a workspace is set
+    return _prompt_reply(idx, len(steps), step["title"], prompt, lead=lead) + file_note
 
 
 async def _op_next(voice: bool) -> str:
@@ -1157,6 +1258,146 @@ async def _apply_result(pending: dict) -> str:
     return done_line
 
 
+# ---------------------------- the FILE CHANNEL: set workspace + read result.json + git cross-check --
+
+_WS_SET_RE = re.compile(
+    r"\b(?:work\s*space|project\s+(?:folder|dir(?:ectory)?|path|repo(?:sitory)?))\b"
+    r"\s*(?:to|=|:|is|->|at)?\s*(\S.*)$", re.I)
+
+
+async def _op_workspace(voice: bool, user_message: str = "") -> str:
+    """Set or SHOW the project workspace (where the code lives) for the file channel. Deterministic,
+    free (NO LLM, rung=direct). Validates the folder exists; warns if it isn't a git repo (then the
+    cross-check is blind). Stores an absolute path in orchestrator_state.json. NEVER guesses a path."""
+    current_rung.set("direct")
+    state = _load_state()
+    m = _WS_SET_RE.search(user_message or "")
+    raw = (m.group(1).strip().strip('"\'`.,') if m else "")
+    if not raw:                                       # no path given -> SHOW the current workspace
+        ws = str(state.get("workspace") or "").strip()
+        if not ws:
+            return ("No project workspace set yet. Tell me where the project's CODE lives — e.g. "
+                    "\"set the project workspace to C:\\Users\\nateb\\my-project\" — and I'll write each "
+                    "step's prompt to its .nervice/ folder and read Claude Code's results back from there. "
+                    "(I never guess the path, and I never touch my own code.)")
+        repo = (" — a git repo, so I can cross-check results against real commits."
+                if _git_is_repo(pathlib.Path(ws))
+                else " — note: NOT a git repo, so I can't verify a \"done\" against commits; `git init` it.")
+        return f"The project workspace is {ws}{repo}"
+    p = pathlib.Path(raw).expanduser()
+    if not p.exists() or not p.is_dir():
+        return (f"I can't find a folder at {p}. Double-check the path and set it again — e.g. "
+                "\"set the project workspace to C:\\Users\\nateb\\my-project\".")
+    state["workspace"] = str(p)
+    state.pop("last_head", None)                      # new workspace -> reset the git baseline
+    _save_state(state)
+    extra = ("" if _git_is_repo(p) else " Heads up: it isn't a git repo yet, so I can't cross-check "
+             "Claude Code's \"done\" against real commits — `git init` it for the honest verification.")
+    return (f"Project workspace set to {p}. I'll write each step's prompt to "
+            f"{p / _HANDSHAKE_DIR / _PROMPT_FILE} and read results from {p / _HANDSHAKE_DIR / _RESULT_FILE}.{extra}")
+
+
+# A short "check the result" command (file channel) vs a long pasted CC report (paste-back).
+_CHECK_RESULT_RE = re.compile(
+    r"\b(?:check|read|fetch|grab|pull\s*up|look\s+at)\b[^.\n]{0,24}\bresult\b"
+    r"|\bresult\s+file\b"
+    r"|\b\.?nervice\b"
+    r"|\bdid\b[^.\n]{0,24}\b(?:claude\s*code|cc)\b[^.\n]{0,16}\b(?:finish|done|complete|write)\b"
+    r"|\bis\b[^.\n]{0,12}\bresult\b[^.\n]{0,12}\bready\b", re.I)
+
+
+def _is_check_result(msg: str) -> bool:
+    m = (msg or "").strip()
+    return len(m) < 80 and bool(_CHECK_RESULT_RE.search(m))
+
+
+async def propose_result_from_file(voice_mode: bool = False) -> str:
+    """FILE CHANNEL result read: parse <workspace>/.nervice/result.json (deterministic — NO LLM, so
+    rung=direct, never Claude/the SDK), CROSS-CHECK it against the workspace git (the truth-teller — a
+    "done" with no new commit and a clean tree is FLAGGED, never silently advanced), and PROPOSE the
+    next move through the SAME _PENDING gate as paste-back. Mutates nothing until 'yes'. Read-only git."""
+    global _PENDING
+    current_rung.set("direct")
+    state = _load_state()
+    steps = state.get("steps") or []
+    if not steps:
+        return _NO_PLAN_MSG
+    p = _ws_path(state)
+    if p is None:
+        return ("No project workspace set, so there's no result file to read. Set it first — "
+                "\"set the project workspace to <path>\" — then I'll read .nervice/result.json there.")
+    if not p.exists():
+        return f"The project workspace {p} isn't there anymore — set it again."
+    idx = int(state.get("current", 0))
+    if idx >= len(steps):
+        return ("Every step is already marked done — nothing to report against. Update the doc and say "
+                "\"plan my project\" for a fresh pass.")
+    obj, err = _read_result_file(p)
+    if obj is None:
+        return err                                    # honest: missing / garbage — no crash, no mutation
+    status = str(obj.get("status", "")).lower()
+    if status not in ("ok", "partial", "fail"):
+        return (f"Claude Code's result.json says status={obj.get('status')!r}, which I can't act on — "
+                "it should be ok, partial, or fail.")
+    problems = _problem_list(obj)
+    summary = str(obj.get("summary", "")).strip()
+    cur_title = steps[idx].get("title", f"step {idx + 1}")
+    n = len(steps)
+
+    git = _git_state(p)
+    baseline = str(state.get("last_head") or "")
+    # "real work" = a NEW commit since I handed over the step, OR uncommitted changes. A committed
+    # change advances HEAD (so an empty `git diff` is fine); only HEAD-unchanged AND clean = nothing.
+    work_seen = bool(git["is_repo"] and ((git["head"] and git["head"] != baseline) or git["dirty"]))
+    scope_blob = " ".join(problems) + " " + summary
+
+    if status == "ok":
+        new_steps = [dict(s) for s in steps]; new_steps[idx]["status"] = "done"
+        nxt = idx + 1; last = nxt >= n
+        _PENDING = {"kind": "result", "apply": {"steps": new_steps, "current": nxt},
+                    "show_next": (None if last else nxt),
+                    "summary_done": (f"Marked step {idx + 1} done — all {n} steps complete. Nice work."
+                                     if last else f"Marked step {idx + 1} (\"{cur_title}\") done — {idx + 1} of {n}."),
+                    "ts": time.time()}
+        if git["is_repo"] and not work_seen:          # MISMATCH — git doesn't lie: no new commit, clean tree
+            return (f"⚠️ Claude Code reported step {idx + 1} (\"{cur_title}\") done"
+                    f"{(' — ' + summary) if summary else ''}, but I see NO new commit or changes in {p} "
+                    "since I handed you the step (HEAD unchanged, working tree clean). The work may not "
+                    "actually be there. Mark it done anyway? (yes / no)")
+        verified = (f" — verified by git ({git['subject']})" if (git["is_repo"] and git["subject"])
+                    else " (workspace isn't a git repo, so I couldn't verify against commits)"
+                    if not git["is_repo"] else "")
+        tail = (summary or "looks done") + verified
+        if last:
+            return f"Step {idx + 1} (\"{cur_title}\"): {tail}. That's all {n} steps — mark it complete? (yes / no)"
+        return (f"Step {idx + 1} (\"{cur_title}\"): {tail}. Mark it done and move to step {nxt + 1} "
+                f"(\"{new_steps[nxt].get('title', '')}\")? (yes / no)")
+
+    if status == "fail":
+        prob = problems[0] if problems else (summary or "it didn't work")
+        if _SCOPE_FLAG_RE.search(scope_blob):
+            return ("⚠️ That failure looks like it'd touch Nervice's own safety/self-mod/core code — out "
+                    "of scope for a project plan. Handle it through the self-update flow, not here.")
+        fix = {"title": f"Fix: {prob}"[:80], "detail": f"Resolve the failure from step {idx + 1}: {prob}", "status": "pending"}
+        new_steps = [dict(s) for s in steps]; new_steps.insert(idx + 1, fix)
+        _PENDING = {"kind": "result", "apply": {"steps": new_steps, "current": idx}, "show_next": None,
+                    "summary_done": f"Added a fix step right after step {idx + 1}: \"{fix['title']}\".", "ts": time.time()}
+        return (f"Step {idx + 1} (\"{cur_title}\") failed: {prob}. Add a fix step right after it? "
+                "(yes adds it; no leaves the plan as-is so you can retry the step.)")
+
+    # partial
+    issue = problems[0] if problems else (summary or "something's incomplete")
+    if _SCOPE_FLAG_RE.search(scope_blob):
+        return ("⚠️ That follow-up looks like it'd touch Nervice's own code/safety — out of scope here; "
+                "handle it through the self-update flow.")
+    fu = {"title": f"Follow-up: {issue}"[:80], "detail": f"Address what step {idx + 1} left open: {issue}", "status": "pending"}
+    new_steps = [dict(s) for s in steps]; new_steps[idx]["status"] = "done"; new_steps.insert(idx + 1, fu)
+    _PENDING = {"kind": "result", "apply": {"steps": new_steps, "current": idx + 1}, "show_next": idx + 1,
+                "summary_done": f"Marked step {idx + 1} done and added a follow-up: \"{fu['title']}\".", "ts": time.time()}
+    return (f"Step {idx + 1} (\"{cur_title}\") mostly worked, but {issue}. Mark it done and add a "
+            "follow-up step for that? (yes / no)")
+
+
 _OPS = {"critique": _op_critique, "plan": _op_plan, "next": _op_next, "done": _op_done,
         "redo": _op_redo, "status": _op_status, "gaps": _op_gaps, "summary": _op_summary,
         "new": _op_new}
@@ -1169,6 +1410,12 @@ async def handle(op: str, user_message: str = "", voice_mode: bool = False) -> s
     print(f"[ROUTE: orchestrator/{op}]", file=sys.stderr)
     if op == "edit":
         return await propose_edit(user_message, voice_mode)
+    if op == "workspace":
+        return await _op_workspace(voice_mode, user_message)
     if op == "result":
+        # Two channels, ONE proposal gate: a bare "check the result" reads the workspace file (+ git
+        # cross-check); a pasted CC report goes through the paste-back parser. Same _PENDING/approve.
+        if _is_check_result(user_message):
+            return await propose_result_from_file(voice_mode)
         return await propose_result(user_message, voice_mode)
     return await _OPS.get(op, _op_status)(voice_mode)
