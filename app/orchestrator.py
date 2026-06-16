@@ -411,26 +411,45 @@ async def _op_redo(voice: bool) -> str:
 
 
 async def _op_done(voice: bool) -> str:
+    """PROPOSE marking the current step done — does NOT mutate. Sets a _PENDING confirm (the same gate
+    edits and results use); the plan changes ONLY when Nate says yes (H2: no silent state change)."""
+    global _PENDING
+    current_rung.set("direct")
     state = _load_state()
     steps = state.get("steps") or []
     if not steps:
-        current_rung.set("direct")
         return _NO_PLAN_MSG
     idx = state.get("current", 0)
     if idx >= len(steps):
-        current_rung.set("direct")
+        return "All steps were already done."
+    title = steps[idx].get("title", f"step {idx + 1}")
+    _PENDING = {"kind": "done", "idx": idx, "ts": time.time()}
+    if idx + 1 >= len(steps):
+        return f"Mark step {idx + 1} (\"{title}\") done? That's the last of {len(steps)} steps. (yes / no)"
+    return (f"Mark step {idx + 1} (\"{title}\") done and move on to step {idx + 2} "
+            f"(\"{steps[idx + 1].get('title', '')}\")? (yes / no)")
+
+
+async def _apply_done(pending: dict) -> str:
+    """Write a CONFIRMED 'mark step done' (orchestrator_state.json only), then advance and hand over the
+    next step's prompt — the old _op_done behavior, now gated behind Nate's yes. Free rung only."""
+    global _PENDING
+    current_rung.set("direct")
+    state = _load_state()
+    steps = state.get("steps") or []
+    idx = int(pending.get("idx", state.get("current", 0)))
+    _PENDING = {}
+    if not steps or idx >= len(steps):
         return "All steps were already done."
     steps[idx]["status"] = "done"
     state["current"] = idx + 1
     _save_state(state)
     done_n = idx + 1
     if state["current"] >= len(steps):
-        current_rung.set("direct")
         return f"Marked \"{steps[idx]['title']}\" done. That's all {len(steps)} steps complete — nice work."
     # advance + hand over the NEXT step's prompt (LLM op)
     doc = _read_doc()
     if doc is None:
-        current_rung.set("direct")
         return f"Marked \"{steps[idx]['title']}\" done — {done_n} of {len(steps)}. (Doc's missing, so I can't write the next prompt.)"
     nxt = state["current"]
     lead = (f"Marked \"{steps[idx]['title']}\" done — {done_n} of {len(steps)}. "
@@ -994,12 +1013,16 @@ async def resolve_edit(user_message: str) -> str | None:
     if _NO_RE.match(text):
         _PENDING = {}
         current_rung.set("direct")
+        if kind == "done":
+            return "Okay — nothing marked done; still on that step."
         if kind == "result":
             return "Okay — left the plan as it is. Paste another result, or say \"next step\" when you're ready."
         if kind == "edit":
             return "Okay — scrapped that, nothing changed."
         return "Okay, keeping the current plan (it's out of date with the doc until you re-plan)."
     if _YES_RE.match(text):
+        if kind == "done":
+            return await _apply_done(_PENDING)        # H2: confirmed mark-step-done write
         if kind == "edit":
             return await _apply_edit(_PENDING)        # may set a replan-confirm pending
         if kind == "replan":
@@ -1162,10 +1185,37 @@ _OPS = {"critique": _op_critique, "plan": _op_plan, "next": _op_next, "done": _o
         "new": _op_new}
 
 
+# H2 (layer a): tell a QUESTION about completion from a COMMAND to complete. A question reads status
+# (read-only); only a command reaches the mutating `done` op (which itself now confirms — layer b).
+_Q_OPENER_RE = re.compile(
+    r"^\s*(?:so|and|but|hey|ok|okay|well|um)?[,\s]*"
+    r"(?:is|are|am|was|were|do|does|did|has|have|how|how'?s|what|what'?s|whats|"
+    r"where|when|which|who|why)\b", re.I)
+_MUTATE_CMD_RE = re.compile(r"\b(mark|check\s*off|cross\s*off)\b", re.I)
+
+
+def _is_status_question(msg: str) -> bool:
+    """True when the utterance ASKS about state (interrogative opener, or a trailing '?' with no
+    mark-it-done command) vs COMMANDS a change. Keeps 'is it done?' / 'are we done?' / 'what's left?'
+    off the mutating done op; leaves 'mark it done' / bare 'done' as commands."""
+    m = (msg or "").strip()
+    if not m:
+        return False
+    if _Q_OPENER_RE.match(m):
+        return True
+    return m.endswith("?") and not _MUTATE_CMD_RE.search(m)
+
+
 async def handle(op: str, user_message: str = "", voice_mode: bool = False) -> str:
     """Dispatch an orchestrator op. The 'edit' op needs the full utterance; the rest take just
     voice_mode. Unknown op -> status. Free-rung-only; never Claude/the Agent SDK."""
     op = (op or "").strip().lower()
+    # H2 (layer a): a QUESTION about completion ("is it done", "is step 2 done", "are we done",
+    # "what's left") must READ status, never mark a step done. An interrogative routed to the mutating
+    # `done` op is a misroute -> read-only status. Commands ("mark it done", bare "done") fall through
+    # to _op_done, which CONFIRMS before mutating (layer b). Deterministic -> holds on every rung.
+    if op == "done" and _is_status_question(user_message):
+        op = "status"
     print(f"[ROUTE: orchestrator/{op}]", file=sys.stderr)
     if op == "edit":
         return await propose_edit(user_message, voice_mode)
