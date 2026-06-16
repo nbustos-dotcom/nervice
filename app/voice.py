@@ -297,13 +297,43 @@ def record_until_silence(max_seconds: int = 60, trailing_silence: float = 0.7,
     return np.concatenate(collected)
 
 
+# --- STT vocabulary bias (free, local). faster-whisper mishears Nervice's proper nouns ("Claude" ->
+# "claw", "Nervice" -> "say service", "Groq"/"Ollama" mangled); priming the decoder with the domain
+# vocabulary via the `hotwords` parameter makes it PREFER these real words when it hears something
+# close, WITHOUT inventing them when Nate says something genuinely different (on real speech the
+# acoustics dominate; the only verbatim leak is on pure silence, which both voice paths already gate
+# out — Silero VAD before transcribe on the API path, record_until_silence on the wake path). This
+# biases the recognizer's PRIOR — it is NOT a find-and-replace autocorrect. Passed on every
+# real-speech transcribe() below (not the zero-audio warm-up).
+_STT_HOTWORDS = ("Nervice, Claude, Groq, Ollama, Anthropic, Tailscale, Supabase, "
+                 "Kokoro, Whisper, Canvas, Silero, Nate")
+
+# Conservative wake-phrase repair (transcript side). Even with the vocab bias the assistant's NAME
+# leading an utterance can still be misheard ("Hey Nervice" -> "say service" / "hey service"). This
+# rewrites ONLY a leading wake-address: anchored at the start, a greeting word + a known "Nervice"
+# mishearing, AND only when that address is the whole utterance or ends at a comma/sentence break
+# (exactly how Whisper punctuates an address before a command). It NEVER touches "service"/"claw"/
+# "rock" elsewhere — no leading greeting, or not clause-final, means no change. So "the customer
+# service desk", "hey, the service was slow" (comma breaks the greeting+name adjacency), and "say
+# service three times" (not clause-final) are all left exactly as transcribed.
+_WAKE_FIX = re.compile(
+    r"^\s*(?:hey|hi|ok|okay|yo|say)\s+(?:nervice|service|nervus|nervis)(?=[,.!?]|\s*$)", re.IGNORECASE)
+
+
+def _fix_wake_phrase(text: str) -> str:
+    """Normalize a clearly-misheard leading wake-address to 'Hey Nervice'. Conservative by
+    construction (see _WAKE_FIX): fires only on an anchored greeting + name-variant that is the whole
+    utterance or a comma/sentence-terminated address; mid-sentence words are never rewritten."""
+    return _WAKE_FIX.sub("Hey Nervice", text, count=1)
+
+
 def transcribe(pcm) -> str:
     """faster-whisper, English. int16 PCM in -> stripped text out. Empty audio -> empty string."""
     if pcm is None or len(pcm) == 0:
         return ""
     audio = pcm.astype(np.float32) / 32768.0
-    segments, _ = _whisper.transcribe(audio, language="en")
-    return "".join(s.text for s in segments).strip()
+    segments, _ = _whisper.transcribe(audio, language="en", hotwords=_STT_HOTWORDS)
+    return _fix_wake_phrase("".join(s.text for s in segments).strip())
 
 
 _CODE_BLOCK = re.compile(r"```.*?```", re.DOTALL)
@@ -585,8 +615,8 @@ def transcribe_file(path: str) -> str:
     """Transcribe any audio file (webm/opus/ogg/wav/m4a/...) straight from disk. faster-whisper
     decodes + resamples to 16k mono via av (PyAV's bundled ffmpeg libs), so NO external ffmpeg
     binary is required — phone-browser MediaRecorder webm/opus is handled by the same decoder."""
-    segments, _ = _whisper.transcribe(path, language="en")
-    return "".join(s.text for s in segments).strip()
+    segments, _ = _whisper.transcribe(path, language="en", hotwords=_STT_HOTWORDS)
+    return _fix_wake_phrase("".join(s.text for s in segments).strip())
 
 
 def _decode_16k(path: str):
@@ -624,9 +654,9 @@ def contains_speech(audio) -> bool:
 def _transcribe_with_metrics(audio):
     """faster-whisper on a 16k float32 array -> (text, worst_no_speech_prob, worst_avg_logprob), so
     the junk gate can drop low-confidence noise. Empty / zero-segment audio -> ('', 1.0, 0.0)."""
-    segments, _ = _whisper.transcribe(audio, language="en")
+    segments, _ = _whisper.transcribe(audio, language="en", hotwords=_STT_HOTWORDS)
     segs = list(segments)
-    text = "".join(s.text for s in segs).strip()
+    text = _fix_wake_phrase("".join(s.text for s in segs).strip())
     if not segs:
         return text, 1.0, 0.0
     return text, max(s.no_speech_prob for s in segs), min(s.avg_logprob for s in segs)
