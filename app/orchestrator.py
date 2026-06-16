@@ -270,6 +270,50 @@ def state_snapshot() -> dict:
     }
 
 
+def loop_snapshot() -> dict:
+    """Read-only snapshot for the LOOP panel + GET /orchestrator/loop. Everything state_snapshot has,
+    PLUS the file-channel view: the handed-off step prompt, Claude Code's last result
+    (.nervice/result.json — status/files/summary), the git cross-check verdict, and whether a proposal
+    is awaiting Nate's yes/no. NO LLM, NO mutation, NO commits (read-only git). Honest empties: no
+    workspace set / no result file yet / garbage result all render as a reason, never a crash."""
+    out = dict(state_snapshot())
+    state = _load_state()
+    ws = out["workspace"]
+    out.update(prompt_file="", result=None, result_error="", git=None, verdict="", pending=None)
+    if _PENDING:                                   # a proposal awaiting yes/no (in-process gate)
+        out["pending"] = {"kind": _PENDING.get("kind", ""),
+                          "summary": _PENDING.get("summary_done", ""), "awaiting": True}
+    if not ws:
+        out["result_error"] = "no workspace set"
+        return out
+    p = pathlib.Path(ws)
+    out["prompt_file"] = str(p / _HANDSHAKE_DIR / _PROMPT_FILE)
+    if not p.exists():
+        out["result_error"] = f"workspace folder is missing ({p})"
+        return out
+    try:
+        git = _git_state(p)
+        out["git"] = {"is_repo": git["is_repo"], "head": (git["head"] or "")[:9],
+                      "subject": git["subject"], "dirty": git["dirty"]}
+        obj, err = _read_result_file(p)
+        if obj is None:
+            out["result_error"] = err              # honest: waiting for CC's result / garbage / missing
+            return out
+        out["result"] = {"status": str(obj.get("status", "")).lower(),
+                         "files_changed": [str(f) for f in (obj.get("files_changed") or [])][:12],
+                         "tests": str(obj.get("tests", "")),
+                         "problems": _problem_list(obj),
+                         "summary": str(obj.get("summary", "")).strip()}
+        # git verdict vs the baseline HEAD recorded when the prompt was handed off (_write_prompt_file)
+        baseline = str(state.get("last_head") or "")
+        out["verdict"] = ("no-repo" if not git["is_repo"]
+                          else "verified" if ((git["head"] and git["head"] != baseline) or git["dirty"])
+                          else "mismatch")
+    except Exception as e:                          # any fs/git hiccup -> honest, never a 500
+        out["result_error"] = f"couldn't read the loop ({type(e).__name__})"
+    return out
+
+
 # --------------------------------------------------------------------------- the FREE-only LLM call
 
 def _loads_lenient(text: str):
@@ -585,21 +629,37 @@ async def _op_gaps(voice: bool) -> str:
 
 
 async def _op_summary(voice: bool) -> str:
-    """A SHORT, Groq-grounded status update from the real project state (the same data the PROJECT
-    panel shows). Free rung only; honest empty; never fabricated progress."""
-    snap = state_snapshot()
+    """A SHORT, Groq-grounded status update from the real project state AND the file-loop (the same
+    data the PROJECT and LOOP panels show — so 'what's the loop waiting on / what did CC return' answer
+    from the real source). Free rung only; honest empty; never fabricated progress."""
+    snap = loop_snapshot()
     if not snap["has_doc"] and not snap["steps"]:
         current_rung.set("direct")
         return _NO_DOC_MSG
     gaps = snap["gaps"]
+    if not snap["workspace"]:
+        loop = "LOOP: no project workspace set, so the file channel is idle."
+    else:
+        res = snap.get("result")
+        if res:
+            v = {"verified": "git-verified by a real commit", "mismatch": "NOT git-verified (no new commit, clean tree)",
+                 "no-repo": "not a git repo, so unverifiable"}.get(snap.get("verdict", ""), "")
+            loop = (f"LOOP: Claude Code's last result = {res['status']}"
+                    + (f" — {res['summary']}" if res["summary"] else "") + (f"; {v}" if v else "") + ".")
+        else:
+            loop = f"LOOP: waiting for Claude Code's result ({snap.get('result_error', '')})."
+        if snap.get("pending"):
+            loop += f" A proposal is awaiting your yes/no: {snap['pending'].get('summary', '')}"
     ctx = (f"GOAL: {snap['goal'] or '(not stated in the doc)'}\n"
            f"PROGRESS: {snap['done_count']} of {snap['total']} steps done"
            + (f"; current step: {snap['current_title']}" if snap["current_title"] else "; no plan yet")
            + ("\nOPEN GAPS (" + str(len(gaps)) + "): " + "; ".join(g.get("title", "") for g in gaps[:4])
-              if gaps else "\nNo open critique gaps."))
-    system = ("You are Nervice giving Nate a SHORT, honest status update on his coding project, using "
-              "ONLY the real data below. One or two conversational sentences — no lists, no markdown. "
-              "Lead with where things stand. NEVER invent progress, steps, or gaps not shown here.")
+              if gaps else "\nNo open critique gaps.")
+           + "\n" + loop)
+    system = ("You are Nervice giving Nate a SHORT, honest status update on his coding project and its "
+              "build loop, using ONLY the real data below. One or two conversational sentences — no "
+              "lists, no markdown. Lead with where things stand; if a result or a yes/no is pending, "
+              "say so plainly. NEVER invent progress, steps, gaps, or results not shown here.")
     ans, rung = await _ask_free(system, ctx, want_json=False, num_predict=180)
     return ans if rung != "none" else _NEED_FREE_MSG
 
@@ -1447,6 +1507,13 @@ def _is_status_question(msg: str) -> bool:
     return m.endswith("?") and not _MUTATE_CMD_RE.search(m)
 
 
+# LOOP consistency: a loop-status QUESTION reads the loop-aware summary (the SAME source the LOOP
+# panel shows). Matches the word "loop", or "what did <Claude Code/CC> return/do/say/report".
+_LOOP_Q_RE = re.compile(
+    r"\bloop\b|\bwhat\s+did\b[^?.\n]{0,22}\b(?:claude\s*code|cc)\b[^?.\n]{0,18}"
+    r"\b(?:return|do|say|report|find|come\s+back|output|give)\b", re.I)
+
+
 async def handle(op: str, user_message: str = "", voice_mode: bool = False) -> str:
     """Dispatch an orchestrator op. The 'edit' op needs the full utterance; the rest take just
     voice_mode. Unknown op -> status. Free-rung-only; never Claude/the Agent SDK."""
@@ -1457,6 +1524,11 @@ async def handle(op: str, user_message: str = "", voice_mode: bool = False) -> s
     # to _op_done, which CONFIRMS before mutating (layer b). Deterministic -> holds on every rung.
     if op == "done" and _is_status_question(user_message):
         op = "status"
+    # LOOP consistency: a SHORT loop-status question ("what's the loop waiting on", "where's the loop",
+    # "what did Claude Code return") reads the loop-aware summary, never a destructive op or the
+    # paste-back parser. Length-gated so a long pasted CC report still parses as a result.
+    if op in ("status", "result", "next", "done") and len(user_message or "") < 90 and _LOOP_Q_RE.search(user_message or ""):
+        op = "summary"
     print(f"[ROUTE: orchestrator/{op}]", file=sys.stderr)
     if op == "edit":
         return await propose_edit(user_message, voice_mode)

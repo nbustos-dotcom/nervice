@@ -536,6 +536,16 @@ async def orchestrator_state():
     return await asyncio.to_thread(orchestrator.state_snapshot)
 
 
+@app.get("/orchestrator/loop", dependencies=[Depends(auth)])
+async def orchestrator_loop():
+    """REAL file-loop view for the Nerve Pages LOOP panel: everything /orchestrator/state has PLUS the
+    handed-off step prompt, Claude Code's last result (.nervice/result.json), the read-only git
+    cross-check verdict, and whether a proposal is awaiting yes/no. Read-only, no LLM, no mutation;
+    honest empties (no workspace / no result) instead of fabrication."""
+    from app import orchestrator
+    return await asyncio.to_thread(orchestrator.loop_snapshot)
+
+
 @app.get("/actions/feed", dependencies=[Depends(auth)])
 async def actions_feed(limit: int = 40):
     """REAL action audit for the ACTIONS panel: computer_actions.log + browser_actions.log merged,
