@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage, ClaudeSDKClient
+from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage, ClaudeSDKClient, CLIConnectionError
 
 from app import usage   # in-code Claude spend guard + USD ledger (usage.py imports no app modules)
 
@@ -50,6 +50,23 @@ class ClaudeBlocked(AllClaudeExhausted):
     reached, or free-only mode ON) — so ZERO Agent-SDK usage is incurred. Subclasses
     AllClaudeExhausted so every existing ladder handler degrades gracefully; str(exc) is the honest
     user-facing message (today's-budget / free-only)."""
+
+
+class CLIUnavailable(ClaudeBlocked):
+    """The Claude Code CLI failed to LAUNCH — the SDK raised CLIConnectionError before any request
+    ran (e.g. the Windows 'WinError 50' seen when the server is started without a usable console).
+    Nothing executed, so ZERO spend — exactly like ClaudeBlocked, which is why it subclasses it:
+    every existing AllClaudeExhausted/ClaudeBlocked handler degrades gracefully and surfaces str(exc)
+    as the honest message, so build/browse/selfmod return a sentence instead of an HTTP 500 (H1)."""
+
+
+# Honest, zero-spend messages surfaced (as str(CLIUnavailable)) when an SDK path can't launch.
+_CLI_DOWN_BUILD = ("I can't run a build right now — my code/build tool won't start on this machine "
+                   "at the moment, so nothing was run or changed.")
+_CLI_DOWN_BROWSE = ("I can't open a live browser session right now — that tool won't start on this "
+                    "machine at the moment.")
+_CLI_DOWN_SELFMOD = ("I can't run a self-update right now — the code-proposer tool won't start on "
+                     "this machine at the moment, so nothing was changed.")
 
 last_run: dict = {}  # metadata from the most recent agent_task: cost_usd, num_turns, is_error, permission_denials
 
@@ -263,6 +280,8 @@ async def agent_task(task: str) -> str:
                     text = getattr(block, "text", None)
                     if text:
                         parts.append(text)
+    except CLIConnectionError as e:
+        raise CLIUnavailable(_CLI_DOWN_BUILD) from e   # H1: SDK CLI couldn't launch -> honest degrade, no 500
     finally:
         os.environ.update(saved)
     return (final or "\n".join(parts)).strip()
@@ -338,6 +357,8 @@ async def browse_agent(task: str) -> str:
                         text = getattr(block, "text", None)
                         if text:
                             parts.append(text)
+    except CLIConnectionError as e:
+        raise CLIUnavailable(_CLI_DOWN_BROWSE) from e   # H1: SDK CLI couldn't launch -> honest degrade, no 500
     finally:
         os.environ.update(saved)
     return (final or "\n".join(parts)).strip()
@@ -391,6 +412,8 @@ async def propose_agent(instruction: str, staging_dir: str) -> str:
                     text = getattr(block, "text", None)
                     if text:
                         parts.append(text)
+    except CLIConnectionError as e:
+        raise CLIUnavailable(_CLI_DOWN_SELFMOD) from e   # H1: SDK CLI couldn't launch -> honest degrade, no 500
     finally:
         os.environ.update(saved)
     return (final or "\n".join(parts)).strip()
