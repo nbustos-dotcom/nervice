@@ -775,6 +775,71 @@ async def pending():
     return await asyncio.to_thread(_scan)
 
 
+# --------------- Self-modification proposals — the ASKS review/approve surface ---------------
+# Review + approve/reject the selfmod proposals Nate has pending. Approval routes THROUGH app/selfmod's
+# existing gate (re-validate paths -> dry-run -> apply -> compile -> assert SAFETY_FLOOR in PERSONA ->
+# commit -> rollback-on-any-failure). This layer only LISTS and forwards to selfmod — it NEVER bypasses
+# the gate, never auto-approves, and app/selfmod.py stays zero-diff.
+
+_PID_RE = re.compile(r"^[0-9][0-9-]{6,40}$")   # selfmod ids are strftime '%Y%m%d-%H%M%S-%f' (digits+hyphens)
+
+
+def _proposal_view(rec: dict) -> dict:
+    """Shape a selfmod record + its ACTUAL diff for the ASKS panel (Nate approves INFORMED, never
+    blind). Reads proposals/<id>.patch via selfmod.PROPOSALS_DIR. Read-only; never raises."""
+    from app import selfmod
+    pid = str(rec.get("id", ""))
+    diff = ""
+    try:
+        pf = selfmod.PROPOSALS_DIR / f"{pid}.patch"
+        if _PID_RE.match(pid) and pf.exists():
+            diff = pf.read_text(encoding="utf-8")
+    except Exception:
+        diff = ""
+    return {"id": pid, "paths": rec.get("paths", []), "created": rec.get("created", ""),
+            "instruction": " ".join(str(rec.get("instruction", "")).split())[:300],
+            "summary": " ".join(str(rec.get("summary", "")).split())[:600],
+            "status": rec.get("status", ""), "reason": rec.get("reason", ""),
+            "diff": diff[:20000]}
+
+
+@app.get("/proposals", dependencies=[Depends(auth)])
+async def proposals_list(history: bool = False):
+    """Pending self-update proposals with id, target files, timestamp, summary, and the ACTUAL diff.
+    Default: status=pending only; ?history=true includes applied/rejected. Read-only, no mutation."""
+    def _scan():
+        from app import selfmod
+        recs = selfmod.list_proposals()
+        if not history:
+            recs = [r for r in recs if r.get("status") == "pending"]
+        recs.sort(key=lambda r: str(r.get("created", "")), reverse=True)   # newest first
+        return [_proposal_view(r) for r in recs]
+    return {"proposals": await asyncio.to_thread(_scan)}
+
+
+@app.post("/proposals/{pid}/approve", dependencies=[Depends(auth)])
+async def proposals_approve(pid: str):
+    """Approve a pending proposal — routes THROUGH selfmod.apply() (the full gate, UNCHANGED): path
+    re-validation, dry-run, compile, the SAFETY_FLOOR assertion, commit, and rollback on any failure.
+    Returns {applied, message}; a gate block reports its reason verbatim. NEVER bypasses the gate."""
+    if not _PID_RE.match(pid or ""):
+        raise HTTPException(status_code=400, detail="bad proposal id")
+    from app import selfmod
+    ok, message = await asyncio.to_thread(selfmod.apply, pid)
+    print(f"[asks] approve {pid} -> {'APPLIED' if ok else 'blocked'}", file=sys.stderr)
+    return {"applied": bool(ok), "message": message}
+
+
+@app.post("/proposals/{pid}/reject", dependencies=[Depends(auth)])
+async def proposals_reject(pid: str):
+    """Reject/discard a pending proposal — selfmod.reject() (marks it rejected). No code is touched."""
+    if not _PID_RE.match(pid or ""):
+        raise HTTPException(status_code=400, detail="bad proposal id")
+    from app import selfmod
+    ok, message = await asyncio.to_thread(selfmod.reject, pid)
+    return {"rejected": bool(ok), "message": message}
+
+
 _DAILY_CACHE = _REPO / "data" / "daily_summary.json"
 
 

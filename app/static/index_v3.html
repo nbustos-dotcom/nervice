@@ -474,6 +474,32 @@
   .hs-ev .ev-out{display:block; color:var(--faint); font-size:11px; margin-top:1px;}
   .hs-ev .ev-ts{color:var(--faint); font-size:9.5px; white-space:nowrap;}
 
+  /* ---- ASKS panel: review + approve/reject pending selfmod proposals (diff shown, never blind) ---- */
+  .ak-outcome{font-family:var(--mono); font-size:11px; letter-spacing:.03em; line-height:1.5; padding:9px 12px;
+              border-radius:6px; margin:4px 0 12px; word-break:break-word; white-space:pre-wrap;}
+  .ak-outcome.ok{color:var(--accent2); border:1px solid var(--accent2-soft); background:rgba(25,227,227,.06);}
+  .ak-outcome.blocked{color:#fff; border:1px solid var(--crit); background:linear-gradient(90deg, rgba(255,77,98,.18), rgba(255,77,98,.05));}
+  .ak-prop{margin:14px 0; padding-left:12px; border-left:1px solid var(--accent-soft);}   /* purple rail = awaiting your judgment */
+  .ak-head{display:flex; justify-content:space-between; gap:10px; align-items:baseline; flex-wrap:wrap;}
+  .ak-files{font-family:var(--mono); font-size:12px; color:var(--accent2); word-break:break-all;}
+  .ak-ts{font-family:var(--mono); font-size:9.5px; color:var(--faint); white-space:nowrap;}
+  .ak-sum{font-size:12.5px; color:var(--dim); line-height:1.55; margin:6px 0 8px;}
+  .ak-diff{font-family:var(--mono); font-size:11px; line-height:1.45; background:rgba(0,0,0,.34); border:1px solid var(--line);
+           padding:9px 11px; margin:0; max-height:300px; overflow:auto; white-space:pre; tab-size:2;}
+  .ak-diff .dl{display:block; min-height:1em;}
+  .ak-diff .dl.add{color:#4ec98a;}            /* added lines — green */
+  .ak-diff .dl.del{color:var(--crit);}        /* removed lines — red */
+  .ak-diff .dl.hunk{color:var(--warn);}       /* @@ hunk headers */
+  .ak-diff .dl.meta{color:var(--faint);}      /* diff / --- / +++ headers */
+  .ak-actions{display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;}
+  .ak-btn{font-family:var(--mono); font-size:10.5px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+          cursor:pointer; min-height:38px; padding:0 14px; border-radius:6px; transition:.16s;}
+  .ak-btn.approve{color:#021014; background:var(--accent2); border:1px solid var(--accent2);}
+  .ak-btn.approve:hover{box-shadow:0 0 14px var(--accent2-soft);}
+  .ak-btn.reject{color:var(--dim); background:transparent; border:1px solid var(--line);}
+  .ak-btn.reject:hover{color:var(--text); border-color:var(--accent-soft);}
+  .ak-id{font-family:var(--mono); font-size:8.5px; letter-spacing:.06em; color:var(--faint); margin-top:6px;}
+
   /* ---------- activity + news feeds ---------- */
   .feed{display:flex; flex-direction:column; max-height:min(30vh,260px); overflow-y:auto; margin:-2px -4px; padding:2px 4px;}
   .feed::-webkit-scrollbar{width:0;}
@@ -527,6 +553,7 @@
         <button class="np-tab" data-np="loop" aria-pressed="false">LOOP</button>
         <button class="np-tab" data-np="actions" aria-pressed="false">ACTIONS</button>
         <button class="np-tab" data-np="hands" aria-pressed="false">HANDS</button>
+        <button class="np-tab" data-np="asks" aria-pressed="false">ASKS</button>
       </nav>
       <span class="hsep"></span>
       <div class="screenfz" id="screenFz" data-frozen="false">
@@ -1426,7 +1453,7 @@ if(!getToken()) openToken(); else refreshAll();
     +'<div class="np-head"><span class="np-title" id="npTitle">—</span><span class="np-sub" id="npSub"></span>'
     +'<button class="np-x" id="npX" aria-label="Close panel">✕</button></div><div id="npBody"></div></div>';
   (document.querySelector('.shell')||document.body).appendChild(scrim);   // inside .shell so the header (z-index) stays above the scrim
-  const body=$('#npBody'); let cur=null, timer=null;
+  const body=$('#npBody'); let cur=null, timer=null, _asksOutcome=null;
 
   function renderProject(d){
     if(!d || (!d.has_doc && !(d.steps&&d.steps.length)))
@@ -1602,10 +1629,50 @@ if(!getToken()) openToken(); else refreshAll();
     if(cur==='hands') load('hands');
   }
 
+  // ---- ASKS: review + approve/reject pending selfmod proposals. Approval routes through the server's
+  //      POST /proposals/<id>/approve -> selfmod.apply() gate (never bypassed). The DIFF is shown for
+  //      every proposal so Nate approves INFORMED, never blind. Buttons use #npBody delegation. ----
+  function diffHtml(diff){
+    if(!diff) return '(no diff in this proposal)';
+    return E(diff).split('\n').map(ln=>{ let c='';
+      if(ln.startsWith('+')&&!ln.startsWith('+++')) c='add';
+      else if(ln.startsWith('-')&&!ln.startsWith('---')) c='del';
+      else if(ln.startsWith('@@')) c='hunk';
+      else if(ln.startsWith('diff ')||ln.startsWith('+++')||ln.startsWith('---')||ln.startsWith('index ')) c='meta';
+      return '<span class="dl '+c+'">'+(ln||' ')+'</span>'; }).join('');
+  }
+  function renderAsks(d){
+    const props=(d&&d.proposals)||[]; let h='';
+    if(_asksOutcome) h+='<div class="ak-outcome '+(_asksOutcome.ok?'ok':'blocked')+'">'+E(_asksOutcome.text)+'</div>';
+    if(!props.length){ h+='<div class="np-empty">No pending self-update proposals.<br>When Nervice drafts one, it lands here for your approve / reject — with the full diff to read first.</div>'; return h; }
+    h+='<div class="np-sub">'+props.length+' PENDING SELF-UPDATE'+(props.length!==1?'S':'')+' · read the diff, then approve / reject</div>';
+    h+=props.map(p=>{ const files=(p.paths||[]).map(f=>E(f)).join(', ')||'(no target file)';
+      return '<div class="ak-prop"><div class="ak-head"><span class="ak-files">'+files+'</span>'
+        +'<span class="ak-ts">'+E((p.created||'').replace('T',' '))+'</span></div>'
+        +'<div class="ak-sum">'+E(p.summary||p.instruction||'(no summary)')+'</div>'
+        +'<pre class="ak-diff">'+diffHtml(p.diff)+'</pre>'
+        +'<div class="ak-actions">'
+        +'<button class="ak-btn approve" data-asks="approve" data-pid="'+E(p.id)+'">Approve · run the gate</button>'
+        +'<button class="ak-btn reject" data-asks="reject" data-pid="'+E(p.id)+'">Reject</button></div>'
+        +'<div class="ak-id">'+E(p.id)+'</div></div>'; }).join('');
+    return h;
+  }
+  async function asksAction(pid, act){
+    if(!pid) return;
+    try{
+      const d=await apiPost('/proposals/'+encodeURIComponent(pid)+'/'+act,{});
+      if(act==='approve'){
+        if(d && d.applied){ _asksOutcome={ok:true, text:'✓ APPLIED — '+(d.message||'')}; toast('Applied — the gate passed'); }
+        else { _asksOutcome={ok:false, text:'⛔ BLOCKED by the gate — '+(d.message||d.detail||'(no reason)')}; toast('Blocked by the gate'); }
+      } else { _asksOutcome={ok:true, text:'Rejected '+pid+(d&&d.message?(' — '+d.message):'')}; toast('Rejected'); }
+    }catch(e){ _asksOutcome={ok:false, text:act+' failed — check the token'}; toast(act+' failed'); }
+    if(cur==='asks') load('asks');
+  }
+
   async function load(tab){
     try{
       const ep = tab==='project' ? '/orchestrator/state' : tab==='loop' ? '/orchestrator/loop'
-               : tab==='hands' ? '/screen/hands' : '/actions/feed';
+               : tab==='hands' ? '/screen/hands' : tab==='asks' ? '/proposals' : '/actions/feed';
       const d = await api(ep);
       if(cur!==tab) return;                                  // closed/switched mid-request
       if(tab==='loop'){
@@ -1617,6 +1684,8 @@ if(!getToken()) openToken(); else refreshAll();
         if(!live){ body.innerHTML=handsComposeHTML()+'<div id="hsLive"></div>'; live=$('#hsLive'); }
         live.innerHTML=renderHandsLive(d);                   // refresh ONLY the live area — the compose inputs persist
         const pp=$('#hsPropose'); if(pp) pp.disabled=hsFrozen();   // freeze disables Propose (the gate would DENY anyway)
+      } else if(tab==='asks'){
+        body.innerHTML = renderAsks(d);                      // full re-render each refresh — buttons via #npBody delegation
       } else {
         body.innerHTML = tab==='project' ? renderProject(d) : renderActions(d);
       }
@@ -1627,9 +1696,9 @@ if(!getToken()) openToken(); else refreshAll();
     const on=t.dataset.np===active; t.classList.toggle('active',on); t.setAttribute('aria-pressed', on?'true':'false'); }); }
   function open(tab){
     if(cur===tab){ close(); return; }                       // tab again -> dismiss
-    cur=tab; setTabs(tab);
-    $('#npTitle').textContent = tab==='project'?'PROJECT':tab==='loop'?'LOOP':tab==='hands'?'HANDS':'ACTIONS';
-    $('#npSub').textContent   = tab==='project'?'· ORCHESTRATOR':tab==='loop'?'· FILE CHANNEL':tab==='hands'?'· SCREEN ACT · WATCH-MODE':'· AUDIT';
+    cur=tab; setTabs(tab); _asksOutcome=null;
+    $('#npTitle').textContent = tab==='project'?'PROJECT':tab==='loop'?'LOOP':tab==='hands'?'HANDS':tab==='asks'?'ASKS':'ACTIONS';
+    $('#npSub').textContent   = tab==='project'?'· ORCHESTRATOR':tab==='loop'?'· FILE CHANNEL':tab==='hands'?'· SCREEN ACT · WATCH-MODE':tab==='asks'?'· SELF-UPDATE GATE':'· AUDIT';
     body.innerHTML='<div class="np-empty">acquiring…</div>';
     scrim.classList.add('show'); document.body.classList.add('np-open');
     load(tab);
@@ -1643,7 +1712,8 @@ if(!getToken()) openToken(); else refreshAll();
   // HANDS: delegate on the STABLE #npBody so Propose/Approve/Reject/Kill clicks never race the 2.5s
   // refresh of #hsLive (which re-renders those buttons). Disabled (frozen) buttons don't fire clicks.
   body.addEventListener('click', e=>{ if(e.target.closest('#hsPropose')){ sendHandsPropose(); return; }
-    const hb=e.target.closest('[data-hands]'); if(hb) handsAction(hb.dataset.hands); });
+    const hb=e.target.closest('[data-hands]'); if(hb){ handsAction(hb.dataset.hands); return; }
+    const ab=e.target.closest('[data-asks]'); if(ab) asksAction(ab.dataset.pid, ab.dataset.asks); });
   body.addEventListener('submit', e=>{ if(e.target && e.target.id==='hsForm'){ e.preventDefault(); sendHandsPropose(); } });
   $('#npX').addEventListener('click', close);
   scrim.addEventListener('click', e=>{ if(e.target===scrim) close(); });   // click-outside (scrim, not panel)
