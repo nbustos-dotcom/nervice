@@ -89,6 +89,36 @@ _DISPLAY_Q = re.compile(
     r"\bresolution\b|\brefresh\s*rate\b|\bscreen\s+size\b|\bbrightness\b|\baspect\s+ratio\b"
     r"|\bhow\s+(?:big|large|wide)\s+is\s+(?:my|the)\s+(?:screen|display|monitor)\b", re.I)
 
+# web-read pre-guard: a clear "read/summarize a PUBLIC web page" request -> route web_read. Fires on a
+# read/summarize verb PLUS a web target (an http(s) URL, OR a page/article/site noun, OR "latest on
+# <topic>"). NARROW by design (the doorman-before-comprehension trap): a bare link, the word "read"
+# alone, or a read aimed at canvas / the result / the project / notes must NOT match — those stay
+# control / canvas / orchestrator. No URL -> the handler web-searches the best public page.
+_URL_RE = re.compile(r"https?://[^\s)<>\"']+", re.I)
+_READ_VERB = re.compile(
+    r"\b(?:summari[sz]e|summary|tl;?dr|the\s+gist|gist\s+of|recap|read|skim)\b"
+    r"|\bwhat(?:'?s|\s+does|\s+do)\b[^?.!\n]{0,24}\bsays?\b", re.I)
+_WEB_TARGET = re.compile(r"\b(page|article|webpage|web\s*page|site|website|url|link|online|the\s+web|"
+                         r"latest\s+on|news\s+(?:on|about)|article\s+about|read\s+about|this\s+(?:link|article|page))\b", re.I)
+_NOT_WEBREAD = re.compile(r"\b(canvas|the\s+result|result\s+file|result\.json|my\s+project|the\s+project|"
+                          r"the\s+plan|my\s+(?:notes?|files?|email|inbox|skills?|calendar))\b", re.I)
+
+
+def web_read_route(msg: str) -> "dict | None":
+    """Deterministic: a clear read/summarize-a-PUBLIC-page request -> {"route":"web_read","url":...},
+    else None. A read verb is REQUIRED; a URL OR a web-target noun supplies the page."""
+    m = msg or ""
+    if _NOT_WEBREAD.search(m):
+        return None                                       # canvas / result / project reads aren't web reads
+    if not _READ_VERB.search(m):
+        return None
+    url = _URL_RE.search(m)
+    if url:
+        return {"route": "web_read", "url": url.group(0).rstrip(".,);:'\"")}   # read THIS page
+    if _WEB_TARGET.search(m):
+        return {"route": "web_read", "url": ""}            # no URL -> search + read the best public page
+    return None
+
 # Vocabulary for the no-LLM keyword net ONLY (both model rungs down).
 _SYSINFO_NOUN = re.compile(r"\b(cpu|gpu|graphics card|processor|cores?|ram|memory|disk|storage|drive|"
                            r"space|specs?|hardware|uptime|operating system|\bos\b|processes?|files?|folders?)\b", re.I)
@@ -243,6 +273,11 @@ async def classify(user_message: str) -> dict:
     # never the sysinfo telemetry fast path (the stats-dump misroute).
     if _CAPABILITY.search(msg) or _DISPLAY_Q.search(msg):
         return {"route": "normal"}
+    # A clear read/summarize-a-public-page request -> the FREE owns-nothing web reader (never the
+    # metered browse_agent). Deterministic pre-guard: requires real read-a-page intent, not a bare link.
+    wr = web_read_route(msg)
+    if wr:
+        return wr
     system = _prompt_with_triggers()
     try:
         d = _coerce(await chat_json(system, msg))
