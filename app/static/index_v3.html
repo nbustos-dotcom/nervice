@@ -147,34 +147,43 @@
            overflow:hidden; border-radius:50%;
            touch-action:manipulation; user-select:none; -webkit-user-select:none;}
   .reactor svg{position:absolute; inset:0; width:100%; height:100%; overflow:hidden;}
-  .reactor .static-track{fill:none; stroke:var(--line);}
-  /* THE one hero gradient: purple identity at the core -> cyan data energy at the rings. */
-  .ring-ticks line{stroke:var(--accent); stroke-width:1;}
-  #ringOuter line{stroke:var(--accent2);}                    /* outer energy ring = cyan */
-  /* amplitude is clamped twice: JS normalizes to [0,1], and min(var(--amp),1) bounds the CSS map.
-     core 1.0-1.12, fill <=0.74, glow <=1.2 of r26 (~31+blur) — always inside the r58 inner ring. */
-  .core-glow{fill:var(--accent); opacity:calc(.10 + min(var(--amp),1)*.4); filter:blur(10px);
-             transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + min(var(--amp),1)*.2)); transition:opacity .1s linear;}
-  .core{fill:none !important; stroke:var(--accent); stroke-width:1.4;   /* stroke-only ring — backstop against refill */
-        transform-box:fill-box; transform-origin:center; transform:scale(calc(1 + min(var(--amp),1)*.12));}
-  .core-fill{fill:url(#coreGrad); opacity:calc(.5 + min(var(--amp),1)*.5);
-             transform-box:fill-box; transform-origin:center; transform:scale(calc(.34 + min(var(--amp),1)*.4));}
-  .amp-arc{fill:none !important; stroke:url(#reactorGrad); stroke-width:2; stroke-linecap:round; filter:drop-shadow(0 0 4px var(--accent-soft));}   /* open path: a fill paints a giant chord-segment — never fill */
-  .reactor.listening{--rc:#37e0ff;}  .reactor.speaking{--rc:#ff8a4c;}  .reactor.thinking{--rc:#cf9bff;}  /* violet shimmer */
-  /* State recolors are PROPERTY-SPECIFIC. Never set fill on .amp-arc/.core: filling an OPEN arc
-     path paints the giant solid segment under its chord (the half-disc bug) — stroke-only there. */
-  .reactor.listening .ring-ticks line,.reactor.listening #ringOuter line,.reactor.listening .core,.reactor.listening .amp-arc{stroke:#37e0ff;}
-  .reactor.listening .core-fill{fill:#37e0ff;}
-  .reactor.speaking .ring-ticks line,.reactor.speaking #ringOuter line,.reactor.speaking .core,.reactor.speaking .amp-arc{stroke:#ff8a4c;}  /* warm */
-  .reactor.speaking .core-fill{fill:#ff8a4c;}
-  .reactor.listening .core-glow,.reactor.speaking .core-glow,.reactor.thinking .core-glow{fill:var(--rc);}
-  /* distinct calm states. listening/speaking are amplitude-driven via --amp (JS); idle + thinking
-     get gentle CSS loops so each state reads differently. */
-  @keyframes rx-breathe{0%,100%{transform:scale(1);opacity:.12}50%{transform:scale(1.07);opacity:.2}}
-  @keyframes rx-shimmer{0%,100%{opacity:.14}50%{opacity:.44}}
-  .reactor.idle .core-glow{animation:rx-breathe 5s ease-in-out infinite;}      /* slow breathe */
-  .reactor.thinking .core-glow{animation:rx-shimmer 1.25s ease-in-out infinite;}  /* steady shimmer */
-  .reactor.listening.hearing .ring-ticks line{stroke-width:1.7;}                /* VAD: actively hearing speech */
+  /* ===== HUD instrument ring — an ORIGINAL 2D SVG gauge (not a movie asset). cyan rings, purple core. ===== */
+  .reactor{--ring:var(--accent2); --core:var(--accent);}   /* flip the two ring colours in one line here */
+  .rx-ticks line{stroke:var(--ring); opacity:.5;}
+  .rx-segs .seg{stroke:var(--ring); opacity:.2;}
+  .rx-segs .seg-on{stroke:var(--ring); opacity:.9; filter:drop-shadow(0 0 2px var(--ring));}
+  .rx-inner .rx-thinring{fill:none; stroke:var(--ring); opacity:.35; stroke-width:1;}
+  .rx-inner .idash{stroke:var(--ring); opacity:.26;}
+  .rx-accents .rx-block{fill:var(--ring); opacity:.75;}
+  .rx-accents .rx-block-dim{opacity:.32;}
+  .rx-accents .rx-prog{fill:none; stroke:var(--core); stroke-width:3; stroke-linecap:round; opacity:.85; filter:drop-shadow(0 0 3px var(--core));}
+  .rx-sweep{opacity:0;}
+  .rx-sweeparc{fill:none; stroke:var(--core); stroke-width:2.6; stroke-linecap:round; filter:drop-shadow(0 0 5px var(--core));}
+  /* faint soft core glow — driven by --amp (JS) + per-state loops. amplitude is bounded by min(var(--amp),1). */
+  .rx-core{transform-box:view-box; transform-origin:100px 100px; transition:opacity .12s linear;
+           opacity:calc(.3 + min(var(--amp),1)*.55); transform:scale(calc(1 + min(var(--amp),1)*.28));}
+  /* layered rotation — CSS, different speeds + directions, around the SVG centre (100,100) */
+  @keyframes rx-spin{to{transform:rotate(360deg);}}
+  .rx-ticks,.rx-segs,.rx-inner,.rx-sweep{transform-box:view-box; transform-origin:100px 100px;}
+  .rx-ticks{animation:rx-spin 72s linear infinite;}
+  .rx-segs{animation:rx-spin 104s linear infinite reverse;}
+  .rx-inner{animation:rx-spin 150s linear infinite;}
+  .rx-sweep{animation:rx-spin 6s linear infinite;}
+  @keyframes rx-breathe{0%,100%{opacity:.26}50%{opacity:.46}}
+  @keyframes rx-shimmer{0%,100%{opacity:.34}50%{opacity:.62}}
+  .reactor.idle .rx-core{animation:rx-breathe 5s ease-in-out infinite;}
+  /* ---- states: recolour via --ring/--core, speed via animation-duration ---- */
+  .reactor.listening{--ring:#37e0ff;}
+  .reactor.listening .rx-ticks{animation-duration:50s;} .reactor.listening .rx-segs{animation-duration:76s;}
+  .reactor.listening .rx-segs .seg{opacity:.32;}
+  .reactor.hearing .rx-segs .seg{opacity:.5;}                                  /* VAD: actively hearing speech */
+  .reactor.thinking{--ring:#cf9bff; --core:#c79bff;}
+  .reactor.thinking .rx-ticks{animation-duration:28s;} .reactor.thinking .rx-segs{animation-duration:40s;} .reactor.thinking .rx-inner{animation-duration:64s;}
+  .reactor.thinking .rx-sweep{opacity:.95;}
+  .reactor.thinking .rx-core{animation:rx-shimmer 1.4s ease-in-out infinite;}
+  .reactor.speaking .rx-core{opacity:calc(.42 + min(var(--amp),1)*.55);}
+  .reactor.speaking .rx-segs .seg-on{opacity:calc(.55 + min(var(--amp),1)*.45); filter:drop-shadow(0 0 calc(2px + min(var(--amp),1)*5px) var(--ring));}
+  .reactor.speaking .rx-ticks{animation-duration:60s;}
   .mic-label{font-family:var(--mono); font-size:10px; letter-spacing:.22em; text-transform:uppercase; color:var(--dim); min-height:14px;}
   .pill{display:inline-flex; align-items:center; gap:8px; padding:10px 18px; min-height:44px; cursor:pointer;
         font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim);
@@ -423,12 +432,12 @@
          letter-spacing:.04em; opacity:0; pointer-events:none; transition:.25s; max-width:84%;}
   #toast.show{opacity:1; transform:translateX(-50%);}
 
-  @media (max-width:1079px){ .reactor .ring-outer{display:none;} }   /* mobile: drop the outer tick ring */
+  @media (max-width:1079px){ .reactor .rx-ticks{display:none;} }   /* mobile: drop the fine outer bezel ticks */
   @media (prefers-reduced-motion:reduce){
     .panel{animation:none !important; opacity:1; transform:none;}
     .gval{transition:none !important;}
     .bub{animation:none !important;}
-    .reactor .core-glow{animation:none !important;}   /* no breathe/shimmer loops */
+    .reactor .rx-ticks,.reactor .rx-segs,.reactor .rx-inner,.reactor .rx-sweep,.reactor .rx-core{animation:none !important;}   /* static instrument */
     *{scroll-behavior:auto !important;}
   }
 </style>
@@ -483,20 +492,24 @@
           <div class="reactor idle" id="reactor" role="button" tabindex="0" aria-label="Hold to talk to Nervice">
             <svg viewBox="0 0 200 200">
               <defs>
-                <radialGradient id="coreGrad">
-                  <stop offset="0%" style="stop-color:var(--accent)"/><stop offset="55%" style="stop-color:var(--accent)"/><stop offset="100%" style="stop-color:var(--accent2)"/>
+                <radialGradient id="rxCoreGrad">
+                  <stop offset="0%" stop-color="var(--core)" stop-opacity=".95"/>
+                  <stop offset="42%" stop-color="var(--core)" stop-opacity=".4"/>
+                  <stop offset="100%" stop-color="var(--core)" stop-opacity="0"/>
                 </radialGradient>
-                <linearGradient id="reactorGrad" x1="0" y1="1" x2="1" y2="0">
-                  <stop offset="0%" style="stop-color:var(--accent)"/><stop offset="100%" style="stop-color:var(--accent2)"/>
-                </linearGradient>
               </defs>
-              <g class="ring-outer" id="ringOuter"></g>
-              <g class="ring-mid" id="ringMid"></g>
-              <circle class="static-track" cx="100" cy="100" r="58" stroke-width="1" opacity=".5"/>
-              <path class="amp-arc" id="ampArc" d=""/>
-              <circle class="core-glow" cx="100" cy="100" r="26"/>
-              <circle class="core" cx="100" cy="100" r="30"/>
-              <circle class="core-fill" cx="100" cy="100" r="30"/>
+              <!-- faint soft core glow — hollow centre, no fill -->
+              <circle class="rx-core" cx="100" cy="100" r="42" fill="url(#rxCoreGrad)"/>
+              <!-- inner thin ring + short dashes -->
+              <g class="rx-inner" id="rxInner"></g>
+              <!-- segmented band (built with an open NOTCH on one side) -->
+              <g class="rx-segs" id="rxSegs"></g>
+              <!-- outer gauge bezel: fine radial ticks -->
+              <g class="rx-ticks" id="rxTicks"></g>
+              <!-- asymmetric accents: readout blocks + a highlighted progress arc -->
+              <g class="rx-accents" id="rxAccents"></g>
+              <!-- thinking sweep: a highlighted arc the CSS rotates (shown only when .thinking) -->
+              <g class="rx-sweep" id="rxSweep"></g>
             </svg>
           </div>
           </div>
@@ -682,25 +695,32 @@ function ampLoop(){
 
 /* ================= the reactor rings + amplitude arc + spectrum : ONE continuous rAF ================= */
 (function buildReactor(){
-  // outer tick ring (long ticks) + mid ring (short ticks), as SVG lines around center 100,100
-  function ticks(g, count, r1, r2, w){
-    let s=''; for(let i=0;i<count;i++){ const a=i/count*6.28318, c=Math.cos(a), sn=Math.sin(a);
-      s+=`<line x1="${(100+c*r1).toFixed(1)}" y1="${(100+sn*r1).toFixed(1)}" x2="${(100+c*r2).toFixed(1)}" y2="${(100+sn*r2).toFixed(1)}" stroke-width="${w}"/>`; }
-    g.innerHTML=s;
-  }
-  const outer=$('#ringOuter'), mid=$('#ringMid');
-  outer.classList.add('ring-ticks'); mid.classList.add('ring-ticks');
-  ticks(outer, 60, 88, 94, 1);      // 60 fine ticks
-  ticks(mid, 24, 70, 78, 1.4);      // 24 bolder ticks
+  // build the instrument once: outer bezel ticks, a segmented band with a NOTCH, an inner thin ring +
+  // dashes, asymmetric readout-block accents + a highlighted progress arc, and the thinking sweep arc.
+  const TAU=6.2831853, pol=(r,a)=>[100+r*Math.cos(a), 100+r*Math.sin(a)];
+  const seg=(r1,r2,a,w,cls)=>{ const[x1,y1]=pol(r1,a),[x2,y2]=pol(r2,a);
+    return `<line${cls?` class="${cls}"`:''} x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke-width="${w}"/>`; };
+  // outer bezel: 96 fine ticks, every 8th longer/bolder
+  let t=''; const NT=96; for(let i=0;i<NT;i++){ const a=i/NT*TAU, lng=(i%8===0); t+=seg(lng?86:90, 95, a, lng?1.3:0.7); }
+  $('#rxTicks').innerHTML=t;
+  // segmented band r72-80 with a GAP (indices 11..18) + a few brighter "active" segments
+  let sg=''; const NS=60, GAP0=11, GAP1=19, ON=new Set([3,4,27,41,52]);
+  for(let i=0;i<NS;i++){ if(i>=GAP0&&i<GAP1) continue; const a=i/NS*TAU, on=ON.has(i); sg+=seg(72,80,a, on?2.8:2.0, on?'seg seg-on':'seg'); }
+  $('#rxSegs').innerHTML=sg;
+  // inner thin ring + 44 short dashes
+  let inr='<circle class="rx-thinring" cx="100" cy="100" r="50"/>'; const NI=44;
+  for(let i=0;i<NI;i++){ const a=i/NI*TAU+0.035; inr+=seg(44,48,a,0.7,'idash'); }
+  $('#rxInner').innerHTML=inr;
+  // asymmetric accents: 3 readout blocks (at chosen angles) + a highlighted progress arc
+  const block=(deg,len,h,cls)=>{ const[x,y]=pol(85,deg*Math.PI/180);
+    return `<rect class="${cls}" x="${(-len/2).toFixed(1)}" y="${(-h/2).toFixed(1)}" width="${len}" height="${h}" rx="1" transform="translate(${x.toFixed(1)} ${y.toFixed(1)}) rotate(${(deg+90).toFixed(1)})"/>`; };
+  const arc=(r,d0,d1,cls)=>{ const[x0,y0]=pol(r,d0*Math.PI/180),[x1,y1]=pol(r,d1*Math.PI/180), lg=(d1-d0>180)?1:0;
+    return `<path class="${cls}" d="M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 ${lg} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}"/>`; };
+  $('#rxAccents').innerHTML = block(-52,15,5,'rx-block') + block(168,11,4,'rx-block') + block(104,8,3,'rx-block rx-block-dim') + arc(66,150,232,'rx-prog');
+  // thinking sweep: a short bright arc near the top that the CSS rotates
+  $('#rxSweep').innerHTML = arc(74,-92,-30,'rx-sweeparc');
 })();
-const ampArc=$('#ampArc');
 const spec=$('#spectrum'), sctx=spec.getContext('2d');
-let aOuter=0, aMid=0, lastT=0;
-function arcPath(frac){ // amplitude arc on r=64, from top, clockwise, fraction 0..1
-  frac=Math.max(0.001,Math.min(1,frac)); const r=64, a0=-Math.PI/2, a1=a0+frac*6.28318;
-  const x0=100+r*Math.cos(a0), y0=100+r*Math.sin(a0), x1=100+r*Math.cos(a1), y1=100+r*Math.sin(a1);
-  const large=frac>0.5?1:0; return `M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`;
-}
 function drawSpectrum(){
   const W=spec.width, H=spec.height; sctx.clearRect(0,0,W,H);
   const node = orbState==='speaking'?analyser : orbState==='listening'?micAnalyser : null;
@@ -718,19 +738,11 @@ function drawSpectrum(){
   }
   sctx.globalAlpha=1;
 }
-function hud(t){
-  requestAnimationFrame(hud);
-  const dt=lastT?Math.min(0.05,(t-lastT)/1000):0.016; lastT=t;
-  const amp=ampSmooth, sp=(orbState==='thinking'?2.0:1)*(1+amp*0.9);   // calmer amp->speed coupling
-  aOuter += dt*0.18*sp; aMid -= dt*0.32*sp;
-  $('#ringOuter').setAttribute('transform',`rotate(${(aOuter*57.2958).toFixed(2)} 100 100)`);
-  $('#ringMid').setAttribute('transform',`rotate(${(aMid*57.2958).toFixed(2)} 100 100)`);
-  ampArc.setAttribute('d', arcPath(0.06 + amp*0.9));   // inner arc = live audio level (real signal)
-  drawSpectrum();
-}
-// one synchronous render so the arc + spectrum are never blank before the rAF kicks in;
-// under reduced-motion this IS the final frame (no rAF -> no rotation, static instrument).
-ampArc.setAttribute('d', arcPath(0.16)); drawSpectrum();
+// the ring layers rotate via CSS; this rAF only keeps the live audio SPECTRUM updating.
+function hud(){ requestAnimationFrame(hud); drawSpectrum(); }
+// one synchronous render so the spectrum is never blank; under reduced-motion this IS the final frame
+// (no rAF -> static spectrum; the CSS ring animations are also disabled under reduced-motion).
+drawSpectrum();
 if(!REDUCED) requestAnimationFrame(hud);
 
 /* ================= Web Audio: playback + analysers (ported) ================= */
