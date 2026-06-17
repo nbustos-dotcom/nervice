@@ -41,6 +41,7 @@ from app.llm import rate_limit_message
 from app.streaming import stream_reply
 from app import usage   # Claude/Groq spend ledger + the in-code spend-guard state (precautions #2/#3)
 from app import errorlog            # central error log + secret scrub (observability #1)
+from app import screen_policy       # Phase-1 screen-control freeze source of truth (is_frozen/set/clear)
 from app.turnlog import log_voice_timing   # persist voice stage timing to file (observability #3)
 
 USER = "nate"
@@ -953,6 +954,57 @@ async def browser_kill():
     from app import browser
     res = await browser.close_browser()
     return res
+
+
+# --------------- Screen-control FREEZE / panic stop ---------------
+# The human panic switch for the (future) screen-control "hands". It trips the SAME freeze the
+# Phase-1 policy gate already enforces: screen_policy.is_frozen() -> check_can_act() returns
+# DENY("frozen"). Single source of truth = the sentinel file data/screen_freeze.flag, so the HUD
+# button, the OS hotkey, and a bare `touch` of the file are all equivalent panic paths. Clearing is
+# an EXPLICIT human re-arm ONLY (POST /screen/unfreeze) — it never auto-clears. No acting primitive
+# exists yet; this stop is deliberately built BEFORE one ever is.
+
+class ScreenFreezeIn(BaseModel):
+    reason: str | None = None
+
+
+def _screen_freeze_state() -> dict:
+    """{frozen, reason, since}. `frozen` is the gate's authoritative (fail-closed) is_frozen();
+    reason/since are parsed from the sentinel for display only. Never raises."""
+    frozen = screen_policy.is_frozen()
+    reason, since = "", ""
+    if frozen:
+        try:
+            raw = screen_policy._FREEZE_FLAG.read_text(encoding="utf-8").strip()
+            if raw:
+                first = raw.splitlines()[0]
+                since, _, reason = first.partition("\t")
+        except Exception:
+            pass                      # frozen stands even if the detail read fails (fail-closed)
+    return {"frozen": frozen, "reason": reason, "since": since}
+
+
+@app.post("/screen/freeze", dependencies=[Depends(auth)])
+async def screen_freeze_set(inp: ScreenFreezeIn):
+    """PANIC STOP — trip the screen-control freeze. Halts ALL (future) acting at the gate.
+    Idempotent; safe to call repeatedly. Clearing requires the explicit POST /screen/unfreeze."""
+    screen_policy.set_freeze((inp.reason or "HUD panic button").strip()[:200])
+    print(f"[screen] FREEZE set via API ({(inp.reason or 'HUD panic button')[:60]})", file=sys.stderr)
+    return _screen_freeze_state()
+
+
+@app.post("/screen/unfreeze", dependencies=[Depends(auth)])
+async def screen_freeze_clear():
+    """Explicit human RE-ARM — the ONLY thing that clears the freeze. Never auto-invoked."""
+    screen_policy.clear_freeze()
+    print("[screen] freeze CLEARED via API (explicit re-arm)", file=sys.stderr)
+    return _screen_freeze_state()
+
+
+@app.get("/screen/freeze", dependencies=[Depends(auth)])
+async def screen_freeze_get():
+    """Current freeze state: {frozen, reason, since, hotkey}."""
+    return _screen_freeze_state()
 
 
 # --------------- WebSocket streaming (Phase 1) ---------------

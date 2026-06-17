@@ -65,8 +65,8 @@
                  calc(env(safe-area-inset-left) + clamp(10px,1.6vw,22px));}
 
   /* ---------- header ---------- */
-  header{display:flex; align-items:center; gap:14px; padding-bottom:10px; margin-bottom:var(--gap);
-         border-bottom:1px solid var(--line); position:relative; z-index:70;}   /* above the Nerve Pages scrim so tabs stay clickable */
+  header{display:flex; flex-wrap:wrap; align-items:center; gap:14px; padding-bottom:10px; margin-bottom:var(--gap);
+         border-bottom:1px solid var(--line); position:relative; z-index:70;}   /* wrap (never clip the FREEZE control) — desktop fits on one line so it's unchanged; above the Nerve Pages scrim so tabs stay clickable */
   .brand{font-family:var(--mono); font-weight:600; font-size:17px; letter-spacing:.34em; color:var(--text);}
   .brand b{color:var(--accent); text-shadow:0 0 12px var(--accent-soft);}
   .brand .v{font-size:9px; letter-spacing:.2em; color:var(--faint); margin-left:.5em; vertical-align:2px;}
@@ -193,6 +193,32 @@
   .pill svg{width:14px; height:14px;}
   .pill:hover{color:var(--accent); border-color:var(--accent-soft);}
   .pill.on{color:#021014; background:var(--accent); border-color:var(--accent); box-shadow:0 0 16px var(--accent-soft);}
+
+  /* ---- screen-control FREEZE / panic control (always visible in the header) ---- */
+  .screenfz{display:flex; flex-shrink:0; align-items:center; gap:8px;}   /* wrap as a whole unit, never compress the panic control */
+  .sf-chip{font-family:var(--mono); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase;
+           display:flex; align-items:center; gap:6px; color:var(--ok);
+           padding:5px 9px; border:1px solid var(--line); border-radius:6px; white-space:nowrap;}
+  .sf-chip .sf-dot{width:7px; height:7px; border-radius:50%; background:var(--ok);
+           box-shadow:0 0 8px 1px var(--accent2-soft); transition:.3s;}
+  .screenfz[data-frozen="true"] .sf-chip{color:var(--crit); border-color:var(--crit);
+           box-shadow:0 0 12px rgba(255,77,98,.45); animation:sfpulse 1s ease-in-out infinite;}
+  .screenfz[data-frozen="true"] .sf-chip .sf-dot{background:var(--crit); box-shadow:0 0 9px 2px rgba(255,77,98,.7);}
+  @keyframes sfpulse{0%,100%{opacity:1} 50%{opacity:.5}}
+  .sf-btn{font-family:var(--mono); font-size:10.5px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
+          cursor:pointer; min-height:36px; padding:0 13px; border-radius:6px; transition:.18s;}
+  .sf-btn.freeze{color:var(--crit); background:rgba(255,77,98,.08); border:1px solid var(--crit);}
+  .sf-btn.freeze:hover{color:#fff; background:var(--crit); box-shadow:0 0 16px rgba(255,77,98,.55);}
+  .sf-btn.rearm{color:var(--dim); background:transparent; border:1px solid var(--line);}
+  .sf-btn.rearm:hover{color:var(--accent); border-color:var(--accent-soft);}
+  .sf-btn.rearm.confirm{color:#0a0600; background:var(--warn); border-color:var(--warn); box-shadow:0 0 14px rgba(255,178,62,.5);}
+  /* full-width FROZEN banner under the header — impossible to miss */
+  .frozen-banner{font-family:var(--mono); font-size:12px; letter-spacing:.06em; color:#fff;
+          background:linear-gradient(90deg, rgba(255,77,98,.22), rgba(255,77,98,.08)); border:1px solid var(--crit);
+          border-radius:8px; padding:9px 14px; margin:0 0 12px; text-align:center;
+          box-shadow:0 0 18px rgba(255,77,98,.3); animation:sfpulse 1.4s ease-in-out infinite;}
+  .frozen-banner b{color:var(--crit); letter-spacing:.12em;}
+  .frozen-banner[hidden]{display:none;}
 
   /* ---------- audio spectrum ---------- */
   .spectrum{width:100%; max-width:560px; height:64px; margin:2px auto 0; display:block;}
@@ -460,9 +486,17 @@
         <button class="np-tab" data-np="actions" aria-pressed="false">ACTIONS</button>
       </nav>
       <span class="hsep"></span>
+      <div class="screenfz" id="screenFz" data-frozen="false">
+        <span class="sf-chip" id="sfChip"><span class="sf-dot"></span><span id="sfState">ARMED</span></span>
+        <button class="sf-btn freeze" id="sfFreezeBtn" type="button" title="Panic stop: freeze all screen control" aria-label="Freeze screen control">FREEZE</button>
+        <button class="sf-btn rearm" id="sfRearmBtn" type="button" title="Explicit re-arm (two-step confirm)" aria-label="Re-arm screen control" style="display:none">RE-ARM</button>
+      </div>
+      <span class="hsep"></span>
       <button class="ibtn" id="newBtn" aria-label="New chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
       <button class="ibtn" id="gearBtn" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg></button>
     </header>
+
+    <div class="frozen-banner" id="frozenBanner" role="alert" hidden></div>
 
     <main class="grid">
       <!-- LEFT RAIL -->
@@ -626,6 +660,49 @@ async function apiPost(path, body){
   if(!r.ok) throw new Error('http '+r.status);
   return r.json();
 }
+
+/* ================= screen-control FREEZE / panic stop ================= */
+/* One click freezes (panic). Clearing is a SEPARATE, two-step explicit re-arm so a stray click
+   can't resume acting. State is polled live; the gate (app/screen_policy) is the source of truth. */
+let _sfRearmArmed=false, _sfRearmT;
+function renderScreenFreeze(st){
+  const wrap=$('#screenFz'); if(!wrap) return;
+  const frozen=!!(st&&st.frozen);
+  wrap.dataset.frozen=frozen?'true':'false';
+  const stateEl=$('#sfState'); if(stateEl) stateEl.textContent=frozen?'FROZEN':'ARMED';
+  const fb=$('#sfFreezeBtn'); if(fb) fb.style.display=frozen?'none':'';
+  const rb=$('#sfRearmBtn'); if(rb) rb.style.display=frozen?'':'none';
+  const banner=$('#frozenBanner');
+  if(banner){
+    banner.hidden=!frozen;
+    if(frozen){
+      const why=(st.reason?(' — '+st.reason):'');
+      const since=(st.since?(' · since '+String(st.since).replace('T',' ')):'');
+      banner.innerHTML='<b>&#9940; SCREEN CONTROL FROZEN</b>'+why+since+' · all acting halted until you re-arm';
+    }
+  }
+  if(!frozen && _sfRearmArmed){ _sfRearmArmed=false; clearTimeout(_sfRearmT); if(rb){ rb.textContent='RE-ARM'; rb.classList.remove('confirm'); } }
+}
+async function loadScreenFreeze(){ try{ renderScreenFreeze(await api('/screen/freeze')); }catch(e){} }
+async function _sfFreeze(){
+  try{ renderScreenFreeze(await apiPost('/screen/freeze',{reason:'HUD panic button'})); toast('// SCREEN CONTROL FROZEN'); }
+  catch(e){ toast('Freeze failed'); }
+}
+function _sfRearm(){
+  const rb=$('#sfRearmBtn'); if(!rb) return;
+  if(!_sfRearmArmed){            /* first click: arm a 3s confirm window — a stray click can't un-freeze */
+    _sfRearmArmed=true; rb.textContent='CONFIRM RE-ARM'; rb.classList.add('confirm');
+    clearTimeout(_sfRearmT);
+    _sfRearmT=setTimeout(()=>{ _sfRearmArmed=false; rb.textContent='RE-ARM'; rb.classList.remove('confirm'); }, 3000);
+    return;
+  }
+  clearTimeout(_sfRearmT); _sfRearmArmed=false; rb.textContent='RE-ARM'; rb.classList.remove('confirm');
+  apiPost('/screen/unfreeze',{}).then(st=>{ renderScreenFreeze(st); toast('// SCREEN CONTROL RE-ARMED'); })
+    .catch(()=>toast('Re-arm failed'));
+}
+if($('#sfFreezeBtn')) $('#sfFreezeBtn').onclick=_sfFreeze;
+if($('#sfRearmBtn')) $('#sfRearmBtn').onclick=_sfRearm;
+setInterval(loadScreenFreeze, 5000);
 
 /* ================= background grid + circuit traces (drawn once) ================= */
 (function bg(){
@@ -1272,7 +1349,7 @@ async function loadUpdates(){
 }
 
 /* ================= boot ================= */
-function refreshAll(){ loadHealth(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); loadUpdates(); loadLastTurn(); loadLadder(); loadPending(); loadDaily(); requestLocation(false); }
+function refreshAll(){ loadHealth(); loadScreenFreeze(); loadSystem(); loadWeather(); loadStats(); loadActivity(); loadNews(); loadUpdates(); loadLastTurn(); loadLadder(); loadPending(); loadDaily(); requestLocation(false); }
 buildGauges();
 setInterval(loadSystem, 2000);
 setInterval(loadHealth, 15000);
