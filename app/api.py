@@ -1007,6 +1007,57 @@ async def screen_freeze_get():
     return _screen_freeze_state()
 
 
+# --------------- Screen-control PHASE 1: the gated acting harness (type_into) ---------------
+# A CONTROLLED harness for the first acting primitive — NOT wired into /chat NL routing. Every action
+# goes propose -> human approve -> re-validate (via app/screen_policy, the gate) -> execute on a FRESH
+# owns-nothing Playwright context. type_into is the ONLY primitive this phase (no click/submit/
+# navigate). The gate enforces brain-floor + freeze + forbidden; this layer never reimplements them.
+
+class ScreenProposeIn(BaseModel):
+    url: str
+    field: str                       # SEMANTIC locator name (label / placeholder / textbox role name)
+    value: str
+    rung: str | None = None          # deciding brain rung; defaults to groq (smart-brain). Gate checks it.
+
+
+@app.post("/screen/propose", dependencies=[Depends(auth)])
+async def screen_propose(inp: ScreenProposeIn):
+    """Propose a type_into. The gate decides: DENY (stop) or CONFIRM_REQUIRED (staged, awaiting
+    approve). NOTHING executes here — watch-mode."""
+    from app import screen_act
+    intent = {"verb": "type_into", "target": {"url": inp.url, "field": inp.field}, "value": inp.value}
+    return await screen_act.propose_action(intent, inp.rung or "groq")
+
+
+@app.post("/screen/approve", dependencies=[Depends(auth)])
+async def screen_approve():
+    """Explicit human YES — re-validate through the gate, then execute the staged type_into on the
+    owns-nothing context with verify-after-act. One-shot."""
+    from app import screen_act
+    return await screen_act.approve_action()
+
+
+@app.post("/screen/reject", dependencies=[Depends(auth)])
+async def screen_reject():
+    """Explicit human NO — discard the staged action. Nothing is typed."""
+    from app import screen_act
+    return await screen_act.reject_action()
+
+
+@app.post("/screen/kill", dependencies=[Depends(auth)])
+async def screen_kill():
+    """In-turn KILL — abort any pending/in-flight action and tear down the owns-nothing context."""
+    from app import screen_act
+    return await screen_act.kill()
+
+
+@app.get("/screen/hands", dependencies=[Depends(auth)])
+async def screen_hands(n: int = 40):
+    """The {type:"hands"} trace — recent propose/execute/result/abort events (value always redacted)."""
+    from app import screen_act
+    return {"events": screen_act.hands_events(n), "pending": screen_act.pending_summary()}
+
+
 # --------------- WebSocket streaming (Phase 1) ---------------
 # Browsers cannot set headers on WebSocket connects, so the Bearer token rides in the FIRST
 # message frame — never the URL (URLs land in logs). Nothing is processed before the token
