@@ -192,6 +192,84 @@ async def read_page() -> dict:
     return {"ok": True, "title": (await page.title()) or "", "url": page.url, "text": text}
 
 
+# ============================================================================================
+# PUBLIC web reader — OWNS NOTHING. A fully SEPARATE, ephemeral, headless browser with NO profile,
+# NO Canvas cookies, NO storage_state, NO credentials of any kind. Each read gets a FRESH clean
+# context that is closed right after. This is NEVER the persistent Canvas context above (open_page/
+# read_page/read_canvas) — those carry Nate's login. Public https pages only; fail-soft, never raises.
+# ============================================================================================
+_pub_pw = None
+_pub_browser = None
+_pub_lock = asyncio.Lock()
+_PUBLIC_MAX = 12000   # truncate a long public page so it can't blow the LLM context
+
+
+async def _ensure_public_browser():
+    """Lazy headless OWNS-NOTHING browser (singleton). Launched with launch() (no user_data_dir),
+    so it holds no profile/cookies/creds — fully isolated from the Canvas persistent context."""
+    global _pub_pw, _pub_browser
+    if _pub_browser is not None and _pub_browser.is_connected():
+        return _pub_browser
+    async with _pub_lock:
+        if _pub_browser is not None and _pub_browser.is_connected():
+            return _pub_browser
+        from playwright.async_api import async_playwright
+        _pub_pw = await async_playwright().start()
+        _pub_browser = await _pub_pw.chromium.launch(headless=True)
+        print("[browser] launched OWNS-NOTHING public reader (headless, no profile/cookies/creds)", file=sys.stderr)
+        return _pub_browser
+
+
+async def read_public_page(url: str, timeout_ms: int = 15000, max_chars: int = _PUBLIC_MAX) -> dict:
+    """Open `url` in a FRESH owns-nothing context (no Canvas creds/cookies/profile), wait for load,
+    extract readable text, truncate, CLOSE the context. Public https only. Fail-soft: returns
+    {ok:False, error} on bad-url / block / 4xx-5xx / empty / timeout — NEVER raises (no 500)."""
+    u = _https_only(url)
+    if u is None:
+        return {"ok": False, "error": "I can only open public https:// pages."}
+    ctx = None
+    try:
+        br = await _ensure_public_browser()
+        # new_context() with no storage_state / no user_data_dir = a clean slate that OWNS NOTHING
+        ctx = await br.new_context(user_agent="Mozilla/5.0 (compatible; NerviceReader/1.0; +public-read)")
+        page = await ctx.new_page()
+        resp = await page.goto(u, wait_until="domcontentloaded", timeout=timeout_ms)
+        status = (resp.status if resp else 0) or 0
+        if status >= 400:
+            await _emit("read_public", u, f"http {status}")
+            return {"ok": False, "error": f"That page returned an error (HTTP {status})."}
+        try:
+            await page.wait_for_timeout(600)          # small settle for JS-rendered pages
+        except Exception:
+            pass
+        title = ""
+        try:
+            title = (await page.title()) or ""
+        except Exception:
+            pass
+        try:
+            text = await page.evaluate(_EXTRACT_JS)
+        except Exception:
+            text = ""
+        text = re.sub(r"[ \t]+\n", "\n", text or "")
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if not text:
+            await _emit("read_public", u, "empty")
+            return {"ok": False, "error": "I opened that page but found no readable text (it may need a login or isn't an article)."}
+        truncated = len(text) > max_chars
+        await _emit("read_public", page.url, f"ok {len(text)} chars{' (truncated)' if truncated else ''} OWNS-NOTHING")
+        return {"ok": True, "url": page.url, "title": title, "text": text[:max_chars], "truncated": truncated}
+    except Exception as e:
+        await _emit("read_public", u, f"FAIL {type(e).__name__}: {repr(e)[:80]}")
+        return {"ok": False, "error": f"I couldn't read that page ({type(e).__name__})."}
+    finally:
+        if ctx is not None:
+            try:
+                await ctx.close()                     # tear down the owns-nothing context every read
+            except Exception:
+                pass
+
+
 _LOGIN_URL = re.compile(r"(login|sign[_-]?in|/auth|sso|oauth|cas/)", re.I)
 
 

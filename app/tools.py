@@ -28,6 +28,23 @@ async def _fetch_page(client: httpx.AsyncClient, url: str, char_limit: int = 250
         return ""
 
 
+async def search_top_url(query: str) -> str | None:
+    """The single best PUBLIC-page URL for a query — same DuckDuckGo engine as web_search, but just
+    the top http(s) result (no page fetch). None if the search yields nothing usable."""
+    try:
+        def _ddg():
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, max_results=5))
+        results = await asyncio.to_thread(_ddg)
+    except Exception:
+        return None
+    for r in (results or []):
+        u = (r.get("href") or r.get("url") or "").strip()
+        if u.lower().startswith("http"):
+            return u
+    return None
+
+
 async def web_search(query: str, max_results: int = 6) -> str:
     try:
         def _ddg():
