@@ -65,8 +65,8 @@
                  calc(env(safe-area-inset-left) + clamp(10px,1.6vw,22px));}
 
   /* ---------- header ---------- */
-  header{display:flex; align-items:center; gap:14px; padding-bottom:10px; margin-bottom:var(--gap);
-         border-bottom:1px solid var(--line); position:relative; z-index:70;}   /* above the Nerve Pages scrim so tabs stay clickable */
+  header{display:flex; flex-wrap:wrap; align-items:center; gap:14px; padding-bottom:10px; margin-bottom:var(--gap);
+         border-bottom:1px solid var(--line); position:relative; z-index:70;}   /* wrap (never clip the FREEZE control) — desktop fits on one line so it's unchanged; above the Nerve Pages scrim so tabs stay clickable */
   .brand{font-family:var(--mono); font-weight:600; font-size:17px; letter-spacing:.34em; color:var(--text);}
   .brand b{color:var(--accent); text-shadow:0 0 12px var(--accent-soft);}
   .brand .v{font-size:9px; letter-spacing:.2em; color:var(--faint); margin-left:.5em; vertical-align:2px;}
@@ -195,7 +195,7 @@
   .pill.on{color:#021014; background:var(--accent); border-color:var(--accent); box-shadow:0 0 16px var(--accent-soft);}
 
   /* ---- screen-control FREEZE / panic control (always visible in the header) ---- */
-  .screenfz{display:flex; align-items:center; gap:8px;}
+  .screenfz{display:flex; flex-shrink:0; align-items:center; gap:8px;}   /* wrap as a whole unit, never compress the panic control */
   .sf-chip{font-family:var(--mono); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase;
            display:flex; align-items:center; gap:6px; color:var(--ok);
            padding:5px 9px; border:1px solid var(--line); border-radius:6px; white-space:nowrap;}

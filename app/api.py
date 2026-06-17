@@ -129,11 +129,6 @@ async def _db_keepalive(stop: asyncio.Event, interval_s: float = 60.0):
 async def lifespan(_app):
     _voice_state["status"] = "warming"
     threading.Thread(target=_warm_voice, daemon=True).start()
-    try:
-        from app import screen_hotkey                 # global panic hotkey (graceful-degrades if it can't register)
-        screen_hotkey.start()
-    except Exception as e:
-        print(f"[api] screen hotkey start failed (non-fatal): {repr(e)[:80]}", file=sys.stderr)
     stop = asyncio.Event()
     keepalive = asyncio.create_task(_db_keepalive(stop))
     try:
@@ -974,8 +969,8 @@ class ScreenFreezeIn(BaseModel):
 
 
 def _screen_freeze_state() -> dict:
-    """{frozen, reason, since, hotkey}. `frozen` is the gate's authoritative (fail-closed)
-    is_frozen(); reason/since are parsed from the sentinel for display only. Never raises."""
+    """{frozen, reason, since}. `frozen` is the gate's authoritative (fail-closed) is_frozen();
+    reason/since are parsed from the sentinel for display only. Never raises."""
     frozen = screen_policy.is_frozen()
     reason, since = "", ""
     if frozen:
@@ -986,12 +981,7 @@ def _screen_freeze_state() -> dict:
                 since, _, reason = first.partition("\t")
         except Exception:
             pass                      # frozen stands even if the detail read fails (fail-closed)
-    try:
-        from app import screen_hotkey
-        hotkey = screen_hotkey.status()
-    except Exception:
-        hotkey = "unknown"
-    return {"frozen": frozen, "reason": reason, "since": since, "hotkey": hotkey}
+    return {"frozen": frozen, "reason": reason, "since": since}
 
 
 @app.post("/screen/freeze", dependencies=[Depends(auth)])

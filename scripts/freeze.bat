@@ -7,6 +7,8 @@ REM  token required. It writes the sentinel data\screen_freeze.flag via the exac
 REM  same set_freeze() the API uses, so check_can_act() then returns DENY("frozen").
 REM  It only ever SETS the freeze; re-arming is a deliberate action in the HUD
 REM  (or POST /screen/unfreeze) -- never here.
+REM  To bind a hotkey: right-click this file > Create shortcut, then open the
+REM  shortcut's Properties > Shortcut key (e.g. Ctrl+Alt+F12) -- Windows fires it system-wide.
 REM  (Even barer fallback if the venv were ever broken:  type nul >> data\screen_freeze.flag)
 REM ============================================================================
 cd /d "%~dp0.."
