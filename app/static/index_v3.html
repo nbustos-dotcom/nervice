@@ -432,6 +432,48 @@
                      color:var(--accent2); font-family:var(--mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase; cursor:pointer;}
   .lp-compose button:hover{background:rgba(25,227,227,.08);}
 
+  /* ---- HANDS panel: drive + watch the Phase-1 acting primitive (the {type:"hands"} feed) ---- */
+  .hs-compose{display:flex; flex-direction:column; gap:8px; margin:2px 0 8px;}
+  .hs-compose .lp-role{margin-bottom:1px; color:var(--accent);}
+  .hs-compose input{min-height:42px; background:rgba(0,0,0,.35); border:1px solid var(--line);
+                    color:var(--text); padding:10px 12px; font-size:16px; font-family:var(--mono); outline:none;}
+  .hs-compose input:focus{border-color:var(--accent2-soft);}
+  .hs-compose button{align-self:flex-start; min-height:40px; padding:0 16px; border:1px solid var(--accent2-soft);
+                     background:transparent; color:var(--accent2); font-family:var(--mono); font-size:11px;
+                     letter-spacing:.12em; text-transform:uppercase; cursor:pointer; transition:.16s;}
+  .hs-compose button:hover:not(:disabled){background:rgba(25,227,227,.08);}
+  .hs-compose button:disabled{opacity:.4; cursor:not-allowed;}
+  .hs-frozen{font-family:var(--mono); font-size:11px; letter-spacing:.04em; color:#fff; border:1px solid var(--crit);
+             border-radius:6px; padding:8px 12px; margin:4px 0 8px; background:linear-gradient(90deg, rgba(255,77,98,.2), rgba(255,77,98,.06));}
+  .hs-frozen b{color:var(--crit);}
+  .hs-pending{margin:8px 0; padding-left:12px; border-left:1px solid var(--accent-soft);}   /* purple rail = a proposal awaiting you */
+  .hs-pfield{font-size:13px; color:var(--text); line-height:1.7;}
+  .hs-pfield .k{font-family:var(--mono); font-size:8.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); margin:0 5px;}
+  .hs-pfield .v{color:var(--accent2); font-family:var(--mono); word-break:break-all;}
+  .hs-purl{font-family:var(--mono); font-size:11px; color:var(--faint); word-break:break-all; margin:3px 0 0;}
+  .hs-actions{display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;}
+  .hs-btn{font-family:var(--mono); font-size:10.5px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+          cursor:pointer; min-height:38px; padding:0 14px; border-radius:6px; transition:.16s;}
+  .hs-btn.approve{color:#021014; background:var(--accent2); border:1px solid var(--accent2);}
+  .hs-btn.approve:hover:not(:disabled){box-shadow:0 0 14px var(--accent2-soft);}
+  .hs-btn.approve:disabled{opacity:.35; cursor:not-allowed; filter:grayscale(.55);}
+  .hs-btn.reject{color:var(--dim); background:transparent; border:1px solid var(--line);}
+  .hs-btn.reject:hover{color:var(--text); border-color:var(--accent-soft);}
+  .hs-btn.kill{color:var(--crit); background:rgba(255,77,98,.07); border:1px solid var(--crit);}
+  .hs-btn.kill:hover{color:#fff; background:var(--crit);}
+  .hs-feed{display:flex; flex-direction:column;}
+  .hs-ev{display:grid; grid-template-columns:auto 1fr auto; gap:9px; padding:7px 0; border-top:1px solid var(--line-soft);
+         align-items:baseline; font-size:12px; font-family:var(--mono);}
+  .hs-ev .ev-t{font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; padding:2px 6px; border:1px solid var(--line); white-space:nowrap; align-self:start;}
+  .hs-ev.propose .ev-t{color:var(--accent); border-color:var(--accent-soft);}
+  .hs-ev.execute .ev-t{color:var(--warn); border-color:var(--warn);}
+  .hs-ev.result .ev-t{color:var(--accent2); border-color:var(--accent2-soft);}
+  .hs-ev.deny .ev-t,.hs-ev.abort .ev-t{color:var(--crit); border-color:var(--crit);}
+  .hs-ev .ev-b{min-width:0; color:var(--dim); line-height:1.45; word-break:break-word;}
+  .hs-ev .ev-val{color:var(--faint);}
+  .hs-ev .ev-out{display:block; color:var(--faint); font-size:11px; margin-top:1px;}
+  .hs-ev .ev-ts{color:var(--faint); font-size:9.5px; white-space:nowrap;}
+
   /* ---------- activity + news feeds ---------- */
   .feed{display:flex; flex-direction:column; max-height:min(30vh,260px); overflow-y:auto; margin:-2px -4px; padding:2px 4px;}
   .feed::-webkit-scrollbar{width:0;}
@@ -484,6 +526,7 @@
         <button class="np-tab" data-np="project" aria-pressed="false">PROJECT</button>
         <button class="np-tab" data-np="loop" aria-pressed="false">LOOP</button>
         <button class="np-tab" data-np="actions" aria-pressed="false">ACTIONS</button>
+        <button class="np-tab" data-np="hands" aria-pressed="false">HANDS</button>
       </nav>
       <span class="hsep"></span>
       <div class="screenfz" id="screenFz" data-frozen="false">
@@ -1496,15 +1539,84 @@ if(!getToken()) openToken(); else refreshAll();
   }
   function wireLoopCompose(){ const f=$('#lpForm'); if(f) f.addEventListener('submit', e=>{ e.preventDefault(); sendLoop(); }); }
 
+  // ---- HANDS: drive + watch the Phase-1 acting primitive (the {type:"hands"} feed). The gate
+  //      (app/screen_policy) decides; this panel only PROPOSES and shows the human approve/reject.
+  //      The server redacts every `value` to a length marker, so the panel never sees a raw value. ----
+  function hsFrozen(){ const fz=document.getElementById('screenFz'); return !!(fz && fz.dataset.frozen==='true'); }
+  function handsComposeHTML(){
+    return '<form class="hs-compose" id="hsForm" autocomplete="off">'
+      + '<div class="lp-role">PROPOSE A type_into · watch-mode (the gate decides, then YOU approve)</div>'
+      + '<input id="hsUrl" type="text" inputmode="url" placeholder="url — https:// (or file:// / localhost for a test page)" aria-label="URL">'
+      + '<input id="hsField" type="text" placeholder="field locator — a label / placeholder / role name" aria-label="Field locator">'
+      + '<input id="hsValue" type="password" placeholder="value to type (masked here; redacted everywhere)" aria-label="Value to type">'
+      + '<button type="button" id="hsPropose">Propose</button></form>';
+  }
+  function renderHandsLive(d){
+    const frozen=hsFrozen(); let h='';
+    if(frozen) h+='<div class="hs-frozen"><b>⛔ FROZEN</b> — the gate will DENY any action. Re-arm from the header to act.</div>';
+    if(d && d.pending){
+      const p=d.pending;
+      h+='<div class="hs-pending"><div class="lp-role">PENDING PROPOSAL · awaiting your approval</div>'
+       + '<div class="hs-pfield"><span class="k">type</span><span class="v">'+E(p.value)+'</span>'
+       + '<span class="k">into</span><span class="v">'+E(p.field)+'</span></div>'
+       + '<div class="hs-purl">'+E(p.url)+'</div>'
+       + '<div class="hs-actions">'
+       + '<button class="hs-btn approve" data-hands="approve"'+(frozen?' disabled':'')+'>Approve · type it</button>'
+       + '<button class="hs-btn reject" data-hands="reject">Reject</button></div></div>';
+    } else {
+      h+='<div class="np-empty">No proposal pending — fill the form above and Propose.</div>';
+    }
+    const ev=(d&&d.events)||[];
+    h+='<div class="np-sub">HANDS FEED · {type:"hands"} (values redacted)</div>';
+    if(!ev.length){ h+='<div class="np-empty">No hands events yet.</div>'; }
+    else { h+='<div class="hs-feed">'+ev.map(e=>
+        '<div class="hs-ev '+E(e.event)+'"><span class="ev-t">'+E(e.event)+'</span>'
+        +'<span class="ev-b"><b>'+E(e.field||'')+'</b> '+E(e.url||'')+' <span class="ev-val">'+E(e.value)+'</span>'
+        +'<span class="ev-out">'+E(e.outcome||'')+'</span></span>'
+        +'<span class="ev-ts">'+E((e.ts||'').replace('T',' ').slice(5))+'</span></div>').join('')+'</div>'; }
+    h+='<div class="hs-actions"><button class="hs-btn kill" data-hands="kill">Kill · abort &amp; tear down</button></div>';
+    return h;
+  }
+  async function sendHandsPropose(){
+    if(hsFrozen()){ toast('Frozen — re-arm before proposing'); return; }
+    const url=($('#hsUrl').value||'').trim(), field=($('#hsField').value||'').trim(), value=$('#hsValue').value||'';
+    if(!url||!field){ toast('Need a URL and a field'); return; }
+    try{
+      const d=await apiPost('/screen/propose',{url:url, field:field, value:value, rung:'groq'});
+      if(d && d.outcome==='DENY') toast('Gate DENIED: '+(d.reason||''));
+      else if(d && d.outcome==='CONFIRM_REQUIRED'){ toast('Proposed — approve below'); $('#hsValue').value=''; }
+      else if(d && d.ok===false) toast(d.error||'Propose failed');
+    }catch(e){ toast('Propose failed — check the token'); }
+    if(cur==='hands') load('hands');
+  }
+  async function handsAction(act){
+    try{
+      const d=await apiPost('/screen/'+act,{});
+      if(act==='approve'){
+        if(d && d.outcome==='EXECUTED') toast((d.result&&d.result.verified)?'Executed — verify-after-act OK':'Executed — see RESULT');
+        else if(d && d.ok===false) toast('Blocked: '+(d.reason||d.error||''));
+        else toast('Approve: '+((d&&d.outcome)||''));
+      } else if(act==='reject'){ toast('Rejected — nothing typed'); }
+      else if(act==='kill'){ toast('Killed — context torn down'); }
+    }catch(e){ toast(act+' failed — check the token'); }
+    if(cur==='hands') load('hands');
+  }
+
   async function load(tab){
     try{
-      const ep = tab==='project' ? '/orchestrator/state' : tab==='loop' ? '/orchestrator/loop' : '/actions/feed';
+      const ep = tab==='project' ? '/orchestrator/state' : tab==='loop' ? '/orchestrator/loop'
+               : tab==='hands' ? '/screen/hands' : '/actions/feed';
       const d = await api(ep);
       if(cur!==tab) return;                                  // closed/switched mid-request
       if(tab==='loop'){
         let thread=$('#lpThread');
         if(!thread){ body.innerHTML='<div id="lpThread"></div>'+loopComposeHTML(); thread=$('#lpThread'); wireLoopCompose(); }
         thread.innerHTML=renderLoopThread(d);                // refresh ONLY the thread — the composer (focus/typed text) persists
+      } else if(tab==='hands'){
+        let live=$('#hsLive');
+        if(!live){ body.innerHTML=handsComposeHTML()+'<div id="hsLive"></div>'; live=$('#hsLive'); }
+        live.innerHTML=renderHandsLive(d);                   // refresh ONLY the live area — the compose inputs persist
+        const pp=$('#hsPropose'); if(pp) pp.disabled=hsFrozen();   // freeze disables Propose (the gate would DENY anyway)
       } else {
         body.innerHTML = tab==='project' ? renderProject(d) : renderActions(d);
       }
@@ -1516,18 +1628,23 @@ if(!getToken()) openToken(); else refreshAll();
   function open(tab){
     if(cur===tab){ close(); return; }                       // tab again -> dismiss
     cur=tab; setTabs(tab);
-    $('#npTitle').textContent = tab==='project'?'PROJECT':tab==='loop'?'LOOP':'ACTIONS';
-    $('#npSub').textContent   = tab==='project'?'· ORCHESTRATOR':tab==='loop'?'· FILE CHANNEL':'· AUDIT';
+    $('#npTitle').textContent = tab==='project'?'PROJECT':tab==='loop'?'LOOP':tab==='hands'?'HANDS':'ACTIONS';
+    $('#npSub').textContent   = tab==='project'?'· ORCHESTRATOR':tab==='loop'?'· FILE CHANNEL':tab==='hands'?'· SCREEN ACT · WATCH-MODE':'· AUDIT';
     body.innerHTML='<div class="np-empty">acquiring…</div>';
     scrim.classList.add('show'); document.body.classList.add('np-open');
     load(tab);
-    clearInterval(timer); timer=setInterval(()=>load(tab), 5000);   // auto-refresh while open
+    clearInterval(timer); timer=setInterval(()=>load(tab), tab==='hands'?2500:5000);   // hands feed polls faster
   }
   function close(){
     if(!cur) return; cur=null; setTabs(null);
     clearInterval(timer); timer=null; scrim.classList.remove('show'); document.body.classList.remove('np-open');
   }
   document.querySelectorAll('.np-tab').forEach(t=> t.addEventListener('click', ()=>open(t.dataset.np)));
+  // HANDS: delegate on the STABLE #npBody so Propose/Approve/Reject/Kill clicks never race the 2.5s
+  // refresh of #hsLive (which re-renders those buttons). Disabled (frozen) buttons don't fire clicks.
+  body.addEventListener('click', e=>{ if(e.target.closest('#hsPropose')){ sendHandsPropose(); return; }
+    const hb=e.target.closest('[data-hands]'); if(hb) handsAction(hb.dataset.hands); });
+  body.addEventListener('submit', e=>{ if(e.target && e.target.id==='hsForm'){ e.preventDefault(); sendHandsPropose(); } });
   $('#npX').addEventListener('click', close);
   scrim.addEventListener('click', e=>{ if(e.target===scrim) close(); });   // click-outside (scrim, not panel)
   document.addEventListener('keydown', e=>{ if(e.key==='Escape' && cur) close(); });
