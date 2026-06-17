@@ -15,3 +15,6 @@ data/
 
 # Nate's personal project doc for the orchestrator (private; the code writes a template if absent)
 docs/projects/
+
+# local preview-tooling config — the preview MCP rewrites it each session; not shared state
+.claude/launch.json
