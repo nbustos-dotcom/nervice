@@ -1,0 +1,10 @@
+{
+  "id": "20260617-133001-438644",
+  "instruction": "Update durable memory: girlfriend's name is Maddie (spelled M-A-D-D-I-E), short for Madeline, rides horses, has a dog named Birdie. Remove any extra 'Y' suffix.",
+  "summary": "Adds Maddie's facts (spelled M-A-D-D-I-E, full name Madeline, horse rider, dog named Birdie) to the hardcoded **WHO NATE IS** context in `persona.py` \u2014 no \"Y\" suffix anywhere. Since the database-backed memory records aren't files in the cwd, this is the only diff-able surface for durable personal context; the DB records should be updated separately via the reconcile pipeline if needed.",
+  "paths": [
+    "app/persona.py"
+  ],
+  "created": "2026-06-17T13:31:11",
+  "status": "pending"
+}
