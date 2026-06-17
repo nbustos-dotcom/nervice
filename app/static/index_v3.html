@@ -162,28 +162,30 @@
   /* faint soft core glow — driven by --amp (JS) + per-state loops. amplitude is bounded by min(var(--amp),1). */
   .rx-core{transform-box:view-box; transform-origin:100px 100px; transition:opacity .12s linear;
            opacity:calc(.3 + min(var(--amp),1)*.55); transform:scale(calc(1 + min(var(--amp),1)*.28));}
-  /* layered rotation — CSS, different speeds + directions, around the SVG centre (100,100) */
-  @keyframes rx-spin{to{transform:rotate(360deg);}}
-  .rx-ticks,.rx-segs,.rx-inner,.rx-sweep{transform-box:view-box; transform-origin:100px 100px;}
-  .rx-ticks{animation:rx-spin 72s linear infinite;}
-  .rx-segs{animation:rx-spin 104s linear infinite reverse;}
-  .rx-inner{animation:rx-spin 150s linear infinite;}
-  .rx-sweep{animation:rx-spin 6s linear infinite;}
+  /* layered rotation is driven by the Web Animations API (see JS): ONE persistent spin per layer; a
+     state change only sets playbackRate, so the angle NEVER resets. transform-box centres on (100,100). */
+  .rx-ticks,.rx-segs,.rx-inner,.rx-sweep,.rx-ripple{transform-box:view-box; transform-origin:100px 100px;}
   @keyframes rx-breathe{0%,100%{opacity:.26}50%{opacity:.46}}
   @keyframes rx-shimmer{0%,100%{opacity:.34}50%{opacity:.62}}
+  @keyframes rx-breathe-l{0%,100%{opacity:.58}50%{opacity:.98}}
   .reactor.idle .rx-core{animation:rx-breathe 5s ease-in-out infinite;}
-  /* ---- states: recolour via --ring/--core, speed via animation-duration ---- */
+  /* ---- states: recolour via --ring/--core; SPEED is set on the WAAPI anims (playbackRate), not here ---- */
   .reactor.listening{--ring:#37e0ff;}
-  .reactor.listening .rx-ticks{animation-duration:50s;} .reactor.listening .rx-segs{animation-duration:76s;}
-  .reactor.listening .rx-segs .seg{opacity:.32;}
-  .reactor.hearing .rx-segs .seg{opacity:.5;}                                  /* VAD: actively hearing speech */
+  .reactor.listening .rx-segs .seg{opacity:.45;}
+  .reactor.listening .rx-segs .seg-on{opacity:1; filter:drop-shadow(0 0 3px var(--ring));}
+  .reactor.listening .rx-core{opacity:.7; animation:rx-breathe-l 2.1s ease-in-out infinite;}   /* gentle breathing pulse */
+  .reactor.hearing .rx-segs .seg{opacity:.62;}                                 /* VAD: actively hearing speech */
   .reactor.thinking{--ring:#cf9bff; --core:#c79bff;}
-  .reactor.thinking .rx-ticks{animation-duration:28s;} .reactor.thinking .rx-segs{animation-duration:40s;} .reactor.thinking .rx-inner{animation-duration:64s;}
   .reactor.thinking .rx-sweep{opacity:.95;}
   .reactor.thinking .rx-core{animation:rx-shimmer 1.4s ease-in-out infinite;}
-  .reactor.speaking .rx-core{opacity:calc(.42 + min(var(--amp),1)*.55);}
-  .reactor.speaking .rx-segs .seg-on{opacity:calc(.55 + min(var(--amp),1)*.45); filter:drop-shadow(0 0 calc(2px + min(var(--amp),1)*5px) var(--ring));}
-  .reactor.speaking .rx-ticks{animation-duration:60s;}
+  .reactor.speaking .rx-core{opacity:calc(.5 + min(var(--amp),1)*.5);}
+  .reactor.speaking .rx-segs .seg-on{opacity:calc(.7 + min(var(--amp),1)*.3); filter:drop-shadow(0 0 calc(3px + min(var(--amp),1)*6px) var(--ring));}
+  /* one-shot click flourish (pointerdown) + speaking-entrance bloom — classes toggled by JS; instant + re-fireable */
+  .rx-ripple{fill:none; stroke:var(--ring); stroke-width:2.5; opacity:0; filter:drop-shadow(0 0 4px var(--ring));}
+  .rx-hit{fill:transparent; pointer-events:all; cursor:pointer;}
+  .reactor.rx-flare .rx-segs .seg{opacity:.8;}  .reactor.rx-flare .rx-segs .seg-on{opacity:1; filter:drop-shadow(0 0 5px var(--ring));}
+  .reactor.rx-bloom .rx-segs .seg-on{opacity:1; filter:drop-shadow(0 0 7px var(--core));}
+  .reactor.rx-bloom .rx-prog{opacity:1; filter:drop-shadow(0 0 7px var(--core));}
   .mic-label{font-family:var(--mono); font-size:10px; letter-spacing:.22em; text-transform:uppercase; color:var(--dim); min-height:14px;}
   .pill{display:inline-flex; align-items:center; gap:8px; padding:10px 18px; min-height:44px; cursor:pointer;
         font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim);
@@ -510,6 +512,10 @@
               <g class="rx-accents" id="rxAccents"></g>
               <!-- thinking sweep: a highlighted arc the CSS rotates (shown only when .thinking) -->
               <g class="rx-sweep" id="rxSweep"></g>
+              <!-- one-shot click ripple (animated by JS on pointerdown) -->
+              <circle class="rx-ripple" cx="100" cy="100" r="46"/>
+              <!-- transparent hit-area over the whole orb so the entire circle (gaps + hollow centre) is clickable -->
+              <circle class="rx-hit" cx="100" cy="100" r="100"/>
             </svg>
           </div>
           </div>
@@ -658,7 +664,9 @@ const reactor=$('#reactor'), micLabel=$('#micLabel');
 let orbState='idle', ampActive=false, ampSmooth=0, ampRaf=0;
 let _thinkInt=0;
 function setState(s){
+  const _prev=orbState;
   orbState=s; reactor.className='reactor '+s;
+  try{ orbMotion(s); if(s==='speaking' && _prev!=='speaking') speakingEntrance(); }catch(_){}   // WAAPI speed + entrance (hoisted)
   micLabel.textContent = s==='listening'?(convoMode?'listening':'listening · tap to send')
                        : s==='thinking'?'processing'
                        : s==='speaking'?'speaking'
@@ -738,12 +746,48 @@ function drawSpectrum(){
   }
   sctx.globalAlpha=1;
 }
-// the ring layers rotate via CSS; this rAF only keeps the live audio SPECTRUM updating.
+// the ring layers rotate via the WAAPI (below); this rAF only keeps the live audio SPECTRUM updating.
 function hud(){ requestAnimationFrame(hud); drawSpectrum(); }
 // one synchronous render so the spectrum is never blank; under reduced-motion this IS the final frame
 // (no rAF -> static spectrum; the CSS ring animations are also disabled under reduced-motion).
 drawSpectrum();
 if(!REDUCED) requestAnimationFrame(hud);
+
+/* ===== orb MOTION: WAAPI rotation (playbackRate per state -> the angle never resets) + a one-shot click
+   flourish on pointerdown + a distinct speaking-entrance bloom. Reduced-motion: no rotation, no flourish
+   motion — the per-state colour/opacity changes alone keep the states distinct. ===== */
+let orbSpins=null;
+(function initSpin(){
+  const q=s=>document.querySelector(s);
+  if(REDUCED || !q('.rx-ticks') || !q('.rx-ticks').animate) return;            // reduced-motion: no spin at all
+  const mk=(sel,per,ccw)=>q(sel).animate(
+    [{transform:'rotate(0deg)'},{transform:`rotate(${ccw?-360:360}deg)`}],
+    {duration:per*1000, iterations:Infinity, easing:'linear'});
+  orbSpins={ ticks:mk('.rx-ticks',72,false), segs:mk('.rx-segs',104,true), inner:mk('.rx-inner',150,false), sweep:mk('.rx-sweep',6,false) };
+})();
+const ORB_RATE={ idle:1.0, listening:1.8, thinking:2.7, speaking:1.4 };        // set playbackRate, NEVER restart
+function orbMotion(state){ if(!orbSpins) return; const r=ORB_RATE[state]||1.0;
+  for(const k in orbSpins){ if(orbSpins[k]) orbSpins[k].playbackRate=r; } }
+// CLICK FLOURISH on pointerdown — instant, re-fireable, independent of the mic pipeline (fires even before
+// a turn starts). Reduced-motion: just the opacity flare, no scale/ripple motion.
+let _rip=null,_pun=null,_flT=0;
+function clickFlourish(){
+  reactor.classList.add('rx-flare'); clearTimeout(_flT); _flT=setTimeout(()=>reactor.classList.remove('rx-flare'),200);
+  if(REDUCED) return;
+  const rip=reactor.querySelector('.rx-ripple');
+  if(rip&&rip.animate){ if(_rip) _rip.cancel(); _rip=rip.animate([{transform:'scale(.55)',opacity:.6},{transform:'scale(1.8)',opacity:0}],{duration:540,easing:'cubic-bezier(.2,.7,.3,1)'}); }
+  const svg=reactor.querySelector('svg');
+  if(svg&&svg.animate){ if(_pun) _pun.cancel(); _pun=svg.animate([{transform:'scale(1)'},{transform:'scale(1.06)'},{transform:'scale(1)'}],{duration:200,easing:'ease-out'}); }
+}
+reactor.addEventListener('pointerdown', clickFlourish);
+// SPEAKING ENTRANCE — a core bloom + segment flash, clearly different from listening, then --amp takes over.
+let _blT=0;
+function speakingEntrance(){
+  reactor.classList.add('rx-bloom'); clearTimeout(_blT); _blT=setTimeout(()=>reactor.classList.remove('rx-bloom'),520);
+  if(REDUCED) return;
+  const core=reactor.querySelector('.rx-core');
+  if(core&&core.animate){ core.animate([{transform:'scale(1)',opacity:.5},{transform:'scale(1.55)',opacity:1},{transform:'scale(1)',opacity:.62}],{duration:520,easing:'ease-out'}); }
+}
 
 /* ================= Web Audio: playback + analysers (ported) ================= */
 let audioCtx=null, analyser=null, ampData=null, micAnalyser=null, nextStart=0, scheduled=0;
