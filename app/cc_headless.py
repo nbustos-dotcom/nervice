@@ -25,6 +25,7 @@ import tempfile
 from pathlib import Path
 
 from app import agent, usage, orchestrator   # reuse: CONFIG_DIR/scrub/tools, the $ cap, git+prompt handoff
+from app import headless_budget               # SEPARATE, additive run-count/cost gate + usage ledger (fail-closed)
 from app.errorlog import scrub
 
 _NERVICE_ROOT = Path(__file__).resolve().parent.parent
@@ -102,9 +103,13 @@ async def _spawn_claude_p(ws: Path, prompt: str) -> dict:
     pid = proc.pid
     try:
         out, err = await asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), timeout=_HEADLESS_TIMEOUT_S)
+        full_out = out.decode("utf-8", "replace")
+        full_err = err.decode("utf-8", "replace")
+        meta = headless_budget.parse_claude_result(full_out)                      # cost/usage from the JSON result
+        rate_limited = headless_budget.detect_rate_limit(proc.returncode, full_out, full_err, meta)
         return {"spawned": True, "pid": pid, "timed_out": False, "rc": proc.returncode,
-                "stdout_tail": scrub(out.decode("utf-8", "replace"))[-1800:],
-                "stderr_tail": scrub(err.decode("utf-8", "replace"))[-800:]}
+                "result_meta": meta, "rate_limited": rate_limited,
+                "stdout_tail": scrub(full_out)[-1800:], "stderr_tail": scrub(full_err)[-800:]}
     except asyncio.TimeoutError:
         try:
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=15)  # PID-tree kill
@@ -115,6 +120,7 @@ async def _spawn_claude_p(ws: Path, prompt: str) -> dict:
         except Exception:
             pass
         return {"spawned": True, "pid": pid, "timed_out": True, "rc": None,
+                "result_meta": {}, "rate_limited": False,
                 "error": f"headless run exceeded {_HEADLESS_TIMEOUT_S}s — killed PID {pid} (tree)."}
 
 
@@ -149,6 +155,13 @@ async def run_headless_step(workspace, prompt) -> dict:
     block = usage.claude_blocked_reason()                      # $5 cap / free_only backstop (respected, not modified)
     if block:
         return {"ok": False, "blocked": True, "error": f"spend guard blocked the step: {block}"}
+    gate = headless_budget.gate_check()                        # SEPARATE run-count/cost gate (fail-closed) — BEFORE any spawn
+    if not gate["allowed"]:
+        return {"ok": False, "blocked_headless_budget": True, "reason": gate["reason"],
+                "count": gate["count"], "cap": gate["cap"],
+                "reported_cost": gate["reported_cost"], "ceiling": gate["ceiling"],
+                "summary": f"REFUSED (no spawn): {gate['reason']} [{gate['count']}/{gate['cap']} runs today]",
+                "spawned": False}
     try:
         hs = ws / orchestrator._HANDSHAKE_DIR                  # write the prompt to <ws>/.nervice/prompt.md (handoff)
         hs.mkdir(parents=True, exist_ok=True)
@@ -168,6 +181,21 @@ async def run_headless_step(workspace, prompt) -> dict:
                    + (" (it left uncommitted changes)" if check["dirty"] else "") + ".")
     else:
         summary = f"OK: headless step committed real work — {check['subject']}."
+    meta = run.get("result_meta") or {}
+    rate_limited = bool(run.get("rate_limited"))
+    if rate_limited:
+        summary = "PAUSED: subscription rate/usage limit hit during the headless step — not retried. " + summary
+    recorded = False
+    if run.get("spawned"):                                     # a real attempt consumed quota -> record it (additive)
+        recorded = headless_budget.record_run({
+            "workspace": str(ws), "ok": ok, "committed": check["committed"],
+            "reported_cost": meta.get("reported_cost"),
+            "input_tokens": meta.get("input_tokens"), "output_tokens": meta.get("output_tokens"),
+            "turns": meta.get("turns"), "duration_ms": meta.get("duration_ms"),
+            "rc": run.get("rc"), "timed_out": run.get("timed_out"), "rate_limited": rate_limited})
+    budget = headless_budget.gate_check()                      # post-run snapshot (now includes this run)
     return {"ok": ok, "committed": check["committed"], "diff_nonempty": check["diff_nonempty"],
             "summary": summary, "error": run.get("error"), "workspace": str(ws), "git": check,
+            "rate_limited": rate_limited, "result_meta": meta, "ledger_recorded": recorded,
+            "budget": {k: budget.get(k) for k in ("count", "cap", "reported_cost", "ceiling", "allowed")},
             "run": {k: run.get(k) for k in ("spawned", "timed_out", "rc", "pid", "stdout_tail", "stderr_tail")}}
