@@ -590,6 +590,38 @@ async def loop_headless_usage():
     return await asyncio.to_thread(headless_budget.usage_view)
 
 
+# --------------- HEADLESS WATCHER LOOP (multi-step, background — NOT on the /chat path) ---------------
+# Runs a multi-step Claude Code goal HANDS-OFF in a disposable sandbox: plan (free Groq) -> one gated,
+# git-verified step -> check -> repeat, bounded + serial, STOP on any failure, PAUSE on budget/limit.
+# It HALTS for review at the end and never pushes/merges/leaves the sandbox. Inherits every per-step
+# guard from run_headless_step. Auth'd; deliberately off /chat (can't fire on a live repo by accident).
+
+class RunGoalIn(BaseModel):
+    workspace: str
+    goal: str
+    max_steps: int | None = None
+
+
+@app.post("/loop/run-goal", dependencies=[Depends(auth)])
+async def loop_run_goal(inp: RunGoalIn):
+    """Start a multi-step headless goal loop in the background; return {run_id, status:'started'} or a
+    structured refusal (bad/sandbox-failing workspace, not a repo, no goal, or a loop already active —
+    SERIAL: one at a time). Poll GET /loop/run-status/{run_id}."""
+    from app import headless_loop
+    return headless_loop.start_goal_run(inp.workspace, inp.goal, inp.max_steps)
+
+
+@app.get("/loop/run-status/{run_id}", dependencies=[Depends(auth)])
+async def loop_run_status(run_id: str):
+    """Read-only status + structured report for a headless loop run: {status, steps_done, current_step,
+    report}. 404 for an unknown run id. Never mutates, never spawns."""
+    from app import headless_loop
+    st = headless_loop.get_status(run_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="no such headless run")
+    return st
+
+
 @app.get("/actions/feed", dependencies=[Depends(auth)])
 async def actions_feed(limit: int = 40):
     """REAL action audit for the ACTIONS panel: computer_actions.log + browser_actions.log merged,
