@@ -432,6 +432,31 @@
                      color:var(--accent2); font-family:var(--mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase; cursor:pointer;}
   .lp-compose button:hover{background:rgba(25,227,227,.08);}
 
+  /* ---- WATCHER card on the LOOP page: drive + watch a hands-off multi-step goal (sandbox-only) ---- */
+  .wl-card{margin:2px 0 18px; padding:0 0 16px; border-bottom:1px solid var(--line-soft);}
+  .wl-ws{font-family:var(--mono); font-size:10.5px; letter-spacing:.03em; color:var(--faint); word-break:break-all; margin:7px 0;}
+  .wl-ws b{color:var(--accent2); font-weight:600;}
+  .wl-row{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:8px 0;}
+  .wl-hint{font-family:var(--mono); font-size:9.5px; letter-spacing:.04em; color:var(--faint);}
+  .wl-goal{width:100%; min-height:64px; resize:vertical; background:rgba(0,0,0,.35); border:1px solid var(--line);
+           color:var(--text); padding:10px 12px; font-size:15px; font-family:var(--mono); outline:none; margin-top:4px;}
+  .wl-goal:focus{border-color:var(--accent2-soft);}
+  .wl-max{width:54px; background:rgba(0,0,0,.35); border:1px solid var(--line); color:var(--text);
+          padding:5px 7px; font-family:var(--mono); font-size:13px; outline:none; margin-left:6px;}
+  .wl-steps{margin:10px 0 0; display:flex; flex-direction:column; gap:6px;}
+  .wl-step{display:grid; grid-template-columns:auto 1fr; gap:9px; font-family:var(--mono); font-size:11.5px; color:var(--dim); line-height:1.45;}
+  .wl-step .mk{color:var(--accent2);}
+  .wl-step.bad .mk{color:var(--crit);}
+  .wl-step .cm{color:var(--accent2); word-break:break-word;}
+  .wl-final{margin-top:12px; padding-left:12px; border-left:1px solid var(--accent-soft); font-size:12.5px; color:var(--dim); line-height:1.55;}
+  .wl-final .hr{display:block; margin-top:6px; font-family:var(--mono); font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--accent); word-break:break-all;}
+  .wl-refuse{font-family:var(--mono); font-size:11px; color:#fff; border:1px solid var(--crit); padding:8px 11px; margin:8px 0;
+             background:linear-gradient(90deg, rgba(255,77,98,.18), rgba(255,77,98,.05)); word-break:break-word;}
+  .lp-status.running{color:var(--accent); border-color:var(--accent-soft);}
+  .lp-status.done{color:var(--accent2); border-color:var(--accent2-soft);}
+  .lp-status.paused,.lp-status.max_steps{color:var(--warn); border-color:var(--warn);}
+  .lp-status.failed,.lp-status.error{color:var(--crit); border-color:var(--crit);}
+
   /* ---- HANDS panel: drive + watch the Phase-1 acting primitive (the {type:"hands"} feed) ---- */
   .hs-compose{display:flex; flex-direction:column; gap:8px; margin:2px 0 8px;}
   .hs-compose .lp-role{margin-bottom:1px; color:var(--accent);}
@@ -1566,6 +1591,78 @@ if(!getToken()) openToken(); else refreshAll();
   }
   function wireLoopCompose(){ const f=$('#lpForm'); if(f) f.addEventListener('submit', e=>{ e.preventDefault(); sendLoop(); }); }
 
+  // ---- WATCHER: drive + watch a hands-off multi-step goal loop (POST /loop/run-goal), SANDBOX-ONLY.
+  //      Lives at the top of the LOOP page, separate from the orchestrator thread; manages its own state
+  //      + 3s status polling. Run is disabled while THIS client has an active loop; a server-side serial
+  //      refusal (another loop running) is shown verbatim. ----
+  let _wlWs=null, _wlRunId=null, _wlActive=false, _wlTimer=null, _wlLastReport=null;
+  function watcherCardHTML(){
+    return '<div class="wl-card">'
+      + '<div class="lp-role" style="color:var(--accent2)">WATCHER · HANDS-OFF MULTI-STEP · SANDBOX-ONLY</div>'
+      + '<div class="wl-ws" id="wlWs"></div>'
+      + '<div class="wl-row"><button class="hs-btn reject" id="wlNew">New sandbox</button>'
+      +   '<span class="wl-hint">creates a fresh repo under ~/nervice-cc-sandbox</span></div>'
+      + '<textarea id="wlGoal" class="wl-goal" placeholder="describe the goal — e.g. “create calc.py with add() and subtract(), a test that passes, and a README; commit each piece”"></textarea>'
+      + '<div class="wl-row"><label class="wl-hint">max steps<input id="wlMax" class="wl-max" type="number" min="1" max="12" value="5"></label>'
+      +   '<button class="hs-btn approve" id="wlRun">Run</button></div>'
+      + '<div id="wlStatus"></div></div>';
+  }
+  function wlSetWs(){
+    const el=$('#wlWs'); if(el) el.innerHTML = _wlWs ? 'SANDBOX · <b>'+E(_wlWs)+'</b>' : 'No sandbox yet — create one, then type a goal and Run.';
+    const run=$('#wlRun'); if(run) run.disabled = _wlActive || !_wlWs;
+    const nw=$('#wlNew'); if(nw) nw.disabled = _wlActive;
+  }
+  async function wlNewSandbox(){
+    const nw=$('#wlNew'); if(nw) nw.disabled=true;
+    try{ const d=await apiPost('/loop/new-sandbox',{}); _wlWs=d.workspace; toast('// SANDBOX READY'); }
+    catch(e){ toast('New sandbox failed'); }
+    wlSetWs();
+  }
+  async function wlRun(){
+    if(_wlActive||!_wlWs) return;
+    const goal=(($('#wlGoal')&&$('#wlGoal').value)||'').trim(); if(!goal){ toast('Type a goal'); return; }
+    let ms=parseInt(($('#wlMax')&&$('#wlMax').value)||'5',10); if(!(ms>=1&&ms<=12)) ms=5;
+    const stEl=$('#wlStatus');
+    try{
+      const d=await apiPost('/loop/run-goal',{workspace:_wlWs, goal:goal, max_steps:ms});
+      if(d.started===false || d.refused){ if(stEl) stEl.innerHTML='<div class="wl-refuse">REFUSED — '+E(d.reason||'could not start')+'</div>'; return; }
+      _wlRunId=d.run_id; _wlActive=true; _wlLastReport=null; wlSetWs();
+      if(stEl) stEl.innerHTML='<div class="np-empty">started '+E(_wlRunId)+' — working…</div>';
+      clearTimeout(_wlTimer); wlPoll();
+    }catch(e){ if(stEl) stEl.innerHTML='<div class="wl-refuse">Could not start — check the token.</div>'; }
+  }
+  function wlRender(resp){
+    const stEl=$('#wlStatus'); if(!stEl||!resp) return;
+    const r=resp.report||{}, status=resp.status||'?';
+    let h='<div class="lp-result" style="margin:6px 0"><span class="lp-status '+E(status)+'">'+E(status)+'</span>'
+        + (status==='running' ? E(resp.current_step||'working…') : ('step '+(r.steps_done||0)+' of '+(r.max_steps||'?')))+'</div>';
+    if(r.steps&&r.steps.length){
+      h+='<div class="wl-steps">'+r.steps.map(s=>{ const bad=!s.ok, mk=bad?'✗':'✓';
+        const bdy = s.commit ? '<span class="cm">'+E(s.commit)+'</span>' : E(s.summary||'');
+        return '<div class="wl-step'+(bad?' bad':'')+'"><span class="mk">'+mk+'</span><span>'+bdy+'</span></div>'; }).join('')+'</div>';
+    }
+    if(status!=='running'){
+      h+='<div class="wl-final">'+E(r.reason||'')
+        + (r.total_reported_cost!=null ? '<br><span class="wl-hint">'+(r.total_runs||0)+' run(s) · ~$'+Number(r.total_reported_cost||0).toFixed(4)+'</span>' : '')
+        + '<span class="hr">⏸ HALTED FOR REVIEW — files are in '+E(r.workspace||_wlWs||'')+'</span></div>';
+    }
+    stEl.innerHTML=h;
+  }
+  async function wlPoll(){
+    if(!_wlRunId || cur!=='loop') return;                  // left the page -> stop; rehydrate on return
+    try{
+      const d=await api('/loop/run-status/'+_wlRunId);
+      _wlLastReport=d; wlRender(d);
+      if(d.status==='running'){ _wlTimer=setTimeout(wlPoll, 3000); }
+      else { _wlActive=false; wlSetWs(); toast('// LOOP '+String(d.status||'').toUpperCase()); }
+    }catch(e){ _wlTimer=setTimeout(wlPoll, 4000); }         // transient -> keep trying
+  }
+  function wlBuild(){                                       // (re)wire after the LOOP body is (re)built
+    wlSetWs();
+    if(_wlRunId && _wlLastReport) wlRender(_wlLastReport);
+    if(_wlActive && _wlRunId){ clearTimeout(_wlTimer); wlPoll(); }   // resume polling after a reopen
+  }
+
   // ---- HANDS: drive + watch the Phase-1 acting primitive (the {type:"hands"} feed). The gate
   //      (app/screen_policy) decides; this panel only PROPOSES and shows the human approve/reject.
   //      The server redacts every `value` to a length marker, so the panel never sees a raw value. ----
@@ -1677,7 +1774,7 @@ if(!getToken()) openToken(); else refreshAll();
       if(cur!==tab) return;                                  // closed/switched mid-request
       if(tab==='loop'){
         let thread=$('#lpThread');
-        if(!thread){ body.innerHTML='<div id="lpThread"></div>'+loopComposeHTML(); thread=$('#lpThread'); wireLoopCompose(); }
+        if(!thread){ body.innerHTML=watcherCardHTML()+'<div id="lpThread"></div>'+loopComposeHTML(); thread=$('#lpThread'); wireLoopCompose(); wlBuild(); }
         thread.innerHTML=renderLoopThread(d);                // refresh ONLY the thread — the composer (focus/typed text) persists
       } else if(tab==='hands'){
         let live=$('#hsLive');
@@ -1711,7 +1808,9 @@ if(!getToken()) openToken(); else refreshAll();
   document.querySelectorAll('.np-tab').forEach(t=> t.addEventListener('click', ()=>open(t.dataset.np)));
   // HANDS: delegate on the STABLE #npBody so Propose/Approve/Reject/Kill clicks never race the 2.5s
   // refresh of #hsLive (which re-renders those buttons). Disabled (frozen) buttons don't fire clicks.
-  body.addEventListener('click', e=>{ if(e.target.closest('#hsPropose')){ sendHandsPropose(); return; }
+  body.addEventListener('click', e=>{ if(e.target.closest('#wlNew')){ wlNewSandbox(); return; }
+    if(e.target.closest('#wlRun')){ wlRun(); return; }
+    if(e.target.closest('#hsPropose')){ sendHandsPropose(); return; }
     const hb=e.target.closest('[data-hands]'); if(hb){ handsAction(hb.dataset.hands); return; }
     const ab=e.target.closest('[data-asks]'); if(ab) asksAction(ab.dataset.pid, ab.dataset.asks); });
   body.addEventListener('submit', e=>{ if(e.target && e.target.id==='hsForm'){ e.preventDefault(); sendHandsPropose(); } });

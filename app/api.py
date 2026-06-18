@@ -622,6 +622,46 @@ async def loop_run_status(run_id: str):
     return st
 
 
+@app.post("/loop/new-sandbox", dependencies=[Depends(auth)])
+async def loop_new_sandbox():
+    """Create a FRESH throwaway git repo under the allowed sandbox root (~/nervice-cc-sandbox/<ts>/) with a
+    baseline commit, and return {workspace, baseline}. Takes NO path input — the server picks the path under
+    the dedicated sandbox root REUSED from cc_headless._SANDBOX_ROOTS, so it can never target a live repo.
+    The created path is re-validated by the loop's OWN sandbox guard before it's handed out. Auth'd, off /chat."""
+    from app import cc_headless
+
+    def _make():
+        temp_root = pathlib.Path(tempfile.gettempdir()).resolve()
+        root = next((r for r in cc_headless._SANDBOX_ROOTS if r != temp_root), cc_headless._SANDBOX_ROOTS[-1])
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        ws = (root / stamp).resolve()
+        if ws.exists():
+            ws = (root / (stamp + "-" + uuid.uuid4().hex[:4])).resolve()
+        ws.mkdir(parents=True, exist_ok=False)
+
+        def g(*a):
+            subprocess.run(["git", "-C", str(ws), *a], check=True, timeout=20, capture_output=True, text=True)
+        g("init", "-q")
+        g("config", "user.email", "sandbox@nervice.test")
+        g("config", "user.name", "nervice-sandbox")
+        (ws / "README.md").write_text("# nervice headless sandbox\nThrowaway workspace for a hands-off Claude Code loop.\n", encoding="utf-8")
+        g("add", "-A")
+        g("commit", "-q", "-m", "init sandbox")
+        head = subprocess.run(["git", "-C", str(ws), "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+        return str(ws), head
+
+    try:
+        ws, head = await asyncio.to_thread(_make)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"could not create sandbox: {type(e).__name__}: {repr(e)[:120]}")
+    allowed, info = cc_headless._check_workspace(ws)            # BACKSTOP: must satisfy the loop's own sandbox guard
+    if not allowed:
+        raise HTTPException(status_code=500, detail=f"created sandbox failed the sandbox guard: {info}")
+    return {"workspace": ws, "baseline": head}
+
+
 @app.get("/actions/feed", dependencies=[Depends(auth)])
 async def actions_feed(limit: int = 40):
     """REAL action audit for the ACTIONS panel: computer_actions.log + browser_actions.log merged,
