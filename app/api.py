@@ -238,6 +238,20 @@ async def health():
             "git": _GIT_HASH, "head": live, "stale": stale, "boot": _BOOT_TIME}
 
 
+# Intentionally UNAUTHENTICATED so it can be opened in a plain browser on the REAL Tauri-launched
+# (console-less) server — the one environment that can't be recreated from a bash console. Read-only,
+# NON-BILLABLE (spawns claude.exe --version only, never a query), returns non-sensitive diagnostic
+# data (versions, the CLI path, the spawn result). Same localhost/tailnet bind as the static pages,
+# which are also unauthenticated. Does NOT touch the SDK query() path, the spend guard, or any creds.
+@app.get("/diag/claude-spawn")
+async def diag_claude_spawn():
+    """NON-BILLABLE SDK-spawn self-test: runs the bundled claude.exe `--version` via the SDK's
+    anyio.open_process mechanism (both stderr variants) so the WinError 50 console-less spawn failure
+    can be checked from the real Tauri server. Never sends a prompt; no tokens; no state change."""
+    from app import diag
+    return await diag.claude_spawn_selftest()
+
+
 @app.get("/weather", dependencies=[Depends(auth)])
 async def weather():
     """Real current weather + multi-day forecast for the stored location (phone GPS if sent, else
