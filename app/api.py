@@ -581,6 +581,15 @@ async def loop_headless_step(inp: HeadlessStepIn):
     return await cc_headless.run_headless_step(inp.workspace, inp.prompt)
 
 
+@app.get("/loop/headless-usage", dependencies=[Depends(auth)])
+async def loop_headless_usage():
+    """Read-only headless-budget view: today's run-count vs cap, reported-cost vs ceiling, whether the
+    gate is open right now, and the last few runs (newest first). SEPARATE from the $ spend ledger;
+    fail-closed (gate_open=false if the ledger is unreadable). Never mutates, never spawns."""
+    from app import headless_budget
+    return await asyncio.to_thread(headless_budget.usage_view)
+
+
 @app.get("/actions/feed", dependencies=[Depends(auth)])
 async def actions_feed(limit: int = 40):
     """REAL action audit for the ACTIONS panel: computer_actions.log + browser_actions.log merged,
