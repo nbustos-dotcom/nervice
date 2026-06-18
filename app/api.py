@@ -561,6 +561,26 @@ async def orchestrator_loop():
     return await asyncio.to_thread(orchestrator.loop_snapshot)
 
 
+# --------------- HEADLESS Claude Code step (controlled trigger — NOT on the /chat path) ---------------
+# Runs ONE Claude Code coding step hands-off in a DISPOSABLE sandbox, git-verified. Deliberately a
+# separate endpoint (never reachable from chat/router) so it can't fire on a live repo by accident.
+# app/cc_headless.py default-denies any non-sandbox workspace and hard-blocks the Nervice repo + live
+# projects; subscription auth only (no key); 5-min timeout; verify-don't-trust git cross-check.
+
+class HeadlessStepIn(BaseModel):
+    workspace: str
+    prompt: str
+
+
+@app.post("/loop/headless-step", dependencies=[Depends(auth)])
+async def loop_headless_step(inp: HeadlessStepIn):
+    """Run ONE headless Claude Code step in a disposable sandbox and git-verify it. The workspace MUST
+    be a throwaway sandbox/temp git repo (default-deny; the Nervice repo + live projects are refused).
+    ONE step only — no auto-loop. Returns {ok, committed, diff_nonempty, summary, git, run, ...}."""
+    from app import cc_headless
+    return await cc_headless.run_headless_step(inp.workspace, inp.prompt)
+
+
 @app.get("/actions/feed", dependencies=[Depends(auth)])
 async def actions_feed(limit: int = 40):
     """REAL action audit for the ACTIONS panel: computer_actions.log + browser_actions.log merged,
