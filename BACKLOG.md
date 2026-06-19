@@ -17,6 +17,20 @@ Status legend: **OPEN** = not started / not built · **IN PROGRESS** = partially
   exists but the full "Nervice edits its own `.py`" loop is parked behind the safety review.
 - **Memory pipeline** — OPEN. `memory_requeue.jsonl` is *written* but never *consumed* — the clunkiest
   part of the system. Needs a consumer that drains the queue into durable memory.
+- **CORE always-on coupling (Part 1 retrieval fix → Part 2 salience)** — OPEN. Part 1
+  (`fix/memory-retrieval`, `9eb091f`) made the always-injected CORE tier hold *every* fact at
+  `salience >= 4` (was `== 5` + identity/preference only). Today that is just 6 facts, so it is trivial —
+  but Part 2 (salience re-score) will pull facts out of the `s3` cluster (52 facts, ~60% of the store) up
+  to `>= 4`, and each promoted fact then rides on **every** prompt, unconditionally. So Part 2 is *not* just
+  "re-score salience" — it has two coupled consequences it must design for, not discover later:
+  - **Prompt bloat.** The always-on set grows with every promotion. Once it passes `CORE_LIMIT` (10), CORE
+    starts truncating by `salience DESC` — silently dropping facts, with no signal to anyone that it happened.
+  - **Relevance assumption.** Always-on encodes "high salience = always relevant," which is wrong for
+    *boundary* facts. "Nate does not like Hentai" is high-signal precisely *as* a boundary/guardrail — not
+    something to surface when Nate asks about hockey.
+  Part 2's design must answer both in one breath: (a) what gets re-scored up, and by what rule; and (b)
+  whether always-on CORE needs a relevance gate or a category exclusion, so that re-scoring doesn't fix
+  recall and manufacture prompt bloat in the same move.
 - **HUD / UI one-pass redesign** — OPEN. The HUD (`app/static/index_v3.html`) wants a single coherent
   redesign pass rather than the incremental accretion it has now.
 - **Email send** — OPEN. Free SMTP, send-only, confirm-gated. Not built. (Send-only by design; no inbox.)
