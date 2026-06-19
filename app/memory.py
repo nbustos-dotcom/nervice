@@ -74,6 +74,21 @@ def _validate_op(op: dict) -> bool:
     return True
 
 
+def _reconcile_user_msg(existing_str: str, user_text: str) -> str:
+    """Capture-input gate (Part 2, Option A1): the scorer sees ONLY Nate's message (plus the EXISTING
+    related memories) — the assistant reply is NOT sent and is never mined. This kills the
+    self-ingestion loop ("who am I" -> assistant recites memory -> it gets re-stored as new rows) and
+    build/tool/proposal STATUS pollution at the source. (Measured last session: labeling the reply
+    "context only" did NOT stop the 70B mining it, so it is dropped from the scored input entirely.)
+    Accepted trade-off: a fact Nate states only by confirming the assistant's question ("yes") is not
+    captured. The FULL exchange is still used for the related-lookup embed and source_snippet, so
+    provenance stays complete. Same reconcile call, no new LLM cost; RECONCILE_SYSTEM unchanged."""
+    return (
+        f"EXISTING related memories:\n{existing_str}"
+        f"\n\nNATE'S LATEST MESSAGE (the ONLY source for durable facts — extract from this):\n{user_text}"
+    )
+
+
 async def remember(
     user_id: str,
     user_text: str,
@@ -103,10 +118,7 @@ async def remember(
         else:
             existing_str = "none"
 
-        user_msg = (
-            f"EXISTING related memories:\n{existing_str}"
-            f"\n\nLATEST exchange:\nUser: {user_text}\nAssistant: {assistant_text}"
-        )
+        user_msg = _reconcile_user_msg(existing_str, user_text)
 
         local_extract = False
         try:
