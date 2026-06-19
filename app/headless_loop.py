@@ -23,6 +23,7 @@ Hard rules enforced here:
 Does NOT touch usage.py's $ guard, safety.py, selfmod.py, SAFETY_FLOOR, or agent.py's key scrub.
 Never sets ANTHROPIC_API_KEY. No new spawn path - it only calls the existing run_headless_step.
 """
+import os
 import re
 import sys
 import json
@@ -32,6 +33,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app import cc_headless, orchestrator   # reuse: the one-step runner+guard, and the FREE planner/git helpers
+from app import agent                        # SECOND BRAIN: reuse the guarded read-only Claude reasoning call
 
 _TZ = ZoneInfo("America/Chicago")
 _RUNDIR = pathlib.Path(__file__).resolve().parent.parent / "data" / "headless_runs"   # audit trail (gitignored)
@@ -92,14 +94,76 @@ def _progress(ws: pathlib.Path) -> str:
     return f"COMMITS (newest first):\n{log}\n\nTRACKED FILES:\n{files}"
 
 
+# ---- SECOND BRAIN: Claude reasons over Groq's draft step (READ-ONLY, ONE turn) before CC runs it.
+# Reuses agent.ask_claude -> agent._ask_one (max_turns=1, allowed_tools=[] - no tools, no acting), gated
+# by agent._spend_guard (usage.claude_blocked_reason: $5/day cap + free_only) BEFORE any SDK call, with the
+# key-scrub + subscription-only auth. Best-effort: ANY block / exhaustion / error / timeout falls back to
+# Groq's draft unchanged, records second_brain="skipped:<reason>", and NEVER hard-blocks the loop.
+try:
+    _CRITIQUE_TIMEOUT_S = float(os.environ.get("NERVICE_CRITIQUE_TIMEOUT_S") or 60.0)
+except (TypeError, ValueError):
+    _CRITIQUE_TIMEOUT_S = 60.0
+
+_CRITIQUE_SYS = (
+    "You are the LOGIC CHECK in a two-model planning loop for a hands-off coding agent (CC) working in a "
+    "throwaway sandbox git repo. A first model (Groq) drafted the next step prompt. Reason over the GOAL, the "
+    "PROGRESS so far (git log + tracked files), and Groq's DRAFT, then return a CORRECTED, concrete step "
+    "prompt for CC. Catch and fix: scope-creep (more than ONE component in a step), redoing work already "
+    "committed in PROGRESS, wrong tooling (a non-standard-library dependency when the GOAL says standard "
+    "library only; pytest instead of the stdlib unittest), and hallucinated requirements the GOAL never "
+    "asked for. Keep whatever is already correct. The result MUST stay ONE complete, self-contained "
+    "component (a whole module with all its functions/methods AND its stdlib-unittest tests, or the README "
+    "once the code exists) and MUST end with the final step `FINALLY, run: git add -A && git commit -m "
+    "\"<short message>\"`. If the draft is already correct, return it essentially unchanged. Output ONLY the "
+    "final step-prompt text to hand CC - no preamble, no analysis, no options.")
+
+
+async def _claude_critique(goal: str, progress: str, draft: str) -> tuple:
+    """SECOND BRAIN. Claude reasons over Groq's draft and returns (refined_prompt, "claude"). READ-ONLY:
+    agent.ask_claude is one turn, no tools, subscription-auth, $5-cap/free-only guarded. Best-effort -
+    ANY block / exhaustion / error / timeout -> (None, "skipped:<reason>"). NEVER raises (the loop must
+    never hard-block on the second brain)."""
+    task = (f"GOAL:\n{goal}\n\nPROGRESS SO FAR (git log + tracked files):\n{progress}\n\n"
+            f"GROQ'S DRAFT STEP PROMPT:\n{draft}\n\nReturn the single corrected step prompt for CC now.")
+    # REAL timeout: the Agent SDK swallows asyncio cancellation (wait_for can't interrupt it), so we stop
+    # WAITING after the timeout and ABANDON a slow turn rather than letting it stall the loop. ask_claude
+    # itself is already bounded (max_turns=1, no tools), so a normal turn finishes well within the timeout.
+    fut = asyncio.ensure_future(agent.ask_claude(task, system=_CRITIQUE_SYS))
+    done, _ = await asyncio.wait({fut}, timeout=_CRITIQUE_TIMEOUT_S)
+    if fut not in done:                                # slow/hung turn -> abandon it, fall back to Groq
+        fut.cancel()
+        fut.add_done_callback(lambda t: t.cancelled() or t.exception())   # swallow its later result/exc
+        return None, "skipped:timeout"
+    try:
+        out = (fut.result() or "").strip()
+        return (out, "claude") if out else (None, "skipped:claude-empty")
+    except agent.CLIUnavailable:
+        return None, "skipped:cli-down"                # SDK CLI couldn't launch (zero spend)
+    except agent.ClaudeBlocked:
+        return None, "skipped:blocked"                 # $5 cap reached or free-only ON (zero spend)
+    except agent.AllClaudeExhausted:
+        return None, "skipped:exhausted"               # every Claude account failed
+    except Exception as e:
+        return None, f"skipped:{type(e).__name__}"
+
+
 async def _plan_step(goal: str, progress: str, n: int, ms: int) -> tuple:
-    """FREE next-step prompt from goal + progress. Returns (prompt, rung). rung 'none' = free exhausted."""
+    """TWO-BRAIN plan. Groq (Nervice's intent) drafts the next step; then Claude (the logic check)
+    reasons over goal + progress + draft and returns a refined prompt for CC. Returns (prompt, rung,
+    brains) where brains = {groq_draft, refined_prompt, second_brain} for the step record. rung 'none' =
+    free Groq exhausted. Best-effort second brain: any Claude failure -> Groq's draft unchanged."""
     user = (f"GOAL:\n{goal}\n\nPROGRESS SO FAR:\n{progress}\n\nThis is step {n} of at most {ms}. Write the "
             f"instruction for the NEXT COMPLETE COMPONENT not yet built - a whole module with ALL its "
             f"functions/methods AND its tests in this one step - then commit it. Use as few steps as "
             f"possible; leave README/docs for last.")
-    prompt, rung = await orchestrator._ask_free(_PLAN_SYS, user, want_json=False, num_predict=400)
-    return (prompt or "").strip(), rung
+    draft, rung = await orchestrator._ask_free(_PLAN_SYS, user, want_json=False, num_predict=400)
+    draft = (draft or "").strip()
+    if rung == "none" or not draft:                    # no Groq draft -> nothing to critique
+        return draft, rung, {"groq_draft": draft, "refined_prompt": draft, "second_brain": "skipped:no-groq-draft"}
+    refined, second_brain = await _claude_critique(goal, progress, draft)
+    final = refined if second_brain == "claude" else draft           # transparent fallback to Groq's draft
+    brains = {"groq_draft": draft[:700], "refined_prompt": final[:700], "second_brain": second_brain}
+    return final, rung, brains
 
 
 async def _check_done(goal: str, progress: str) -> tuple:
@@ -158,13 +222,14 @@ async def _run_loop(run_id: str) -> None:
     try:
         for n in range(1, ms + 1):
             run["current_step"] = f"planning step {n}/{ms}"; _persist(run)
-            prompt, rung = await _plan_step(goal, _progress(ws), n, ms)
+            prompt, rung, brains = await _plan_step(goal, _progress(ws), n, ms)
             if rung == "none" or not prompt:
                 _finish(run, "paused", f"planning unavailable (free rung exhausted) before step {n}")
                 return
             run["current_step"] = f"running step {n}/{ms}"; _persist(run)
             r = await cc_headless.run_headless_step(str(ws), prompt)     # the ONE proven gated+verified step
             verdict = _classify(run, n, prompt, r)
+            if run["steps"]: run["steps"][-1].update(brains)            # observability: both brains in the step record
             if verdict["stop"]:
                 _finish(run, verdict["status"], verdict["reason"])
                 return
