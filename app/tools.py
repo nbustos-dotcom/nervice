@@ -338,10 +338,46 @@ GET_NEWS_TOOL = {
     },
 }
 
+
+async def read_own_source(path: str = "", find: str = "", **_) -> str:
+    """Brain tool (READ-ONLY): read Nervice's own source so the brain can explain how it works. `find`
+    git-greps the repo to LOCATE the relevant file(s); `path` reads that file. Confined to the repo root
+    (refuses traversal / anything outside). NO write/delete path — app/self_read is read-only."""
+    from app import self_read
+    if find and not path:
+        r = self_read.search_source(find)
+        if not r.get("ok"):
+            return f"(couldn't search: {r.get('error')})"
+        if not r["hits"]:
+            return f"No source matches for {find!r}."
+        return f"Source matches for {find!r} (file:line) — read one with path=...:\n" + "\n".join(r["hits"])
+    if not path:
+        return "Pass `path` (e.g. app/usage.py) to read a file, or `find` to locate one first."
+    r = self_read.read_source(path)
+    if not r.get("ok"):
+        return r.get("error", "REFUSED")
+    return (f"# {r['path']} ({r['bytes']} bytes" + (", truncated" if r.get("truncated") else "") + ")\n") + r["text"]
+
+
+READ_OWN_SOURCE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_own_source",
+        "description": "Read Nervice's OWN source code (READ-ONLY) to explain how it actually works. Use when "
+                       "the user asks to see/explain how Nervice handles something about ITSELF ('show me how "
+                       "you handle the spend guard', 'how does your router work', 'what does your X code do'). "
+                       "Pass `find` (e.g. 'spend guard') to LOCATE the file(s), then `path` (e.g. 'app/usage.py') "
+                       "to read one. Confined to the repo; it never writes. Then explain the code in your own words.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "repo-relative file to read, e.g. app/usage.py"},
+            "find": {"type": "string", "description": "term to locate the relevant file(s) first, e.g. 'spend guard'"}}},
+    },
+}
+
 TOOLS = [WEATHER_TOOL, WEB_SEARCH_TOOL, CONSULT_CLAUDE_TOOL, AGENT_BUILD_TOOL,
          PROPOSE_SELF_UPDATE_TOOL, BROWSE_TOOL,
-         SYSTEM_INFO_TOOL, TOP_PROCESSES_TOOL, COUNT_FILES_TOOL, GET_NEWS_TOOL]
+         SYSTEM_INFO_TOOL, TOP_PROCESSES_TOOL, COUNT_FILES_TOOL, GET_NEWS_TOOL, READ_OWN_SOURCE_TOOL]
 TOOL_FUNCS = {"get_weather": get_weather, "web_search": web_search, "consult_claude": consult_claude,
               "agent_build": agent_build, "propose_self_update": propose_self_update, "browse": browse,
               "get_system_info": get_system_info, "get_top_processes": get_top_processes,
-              "count_files": count_files, "get_news": get_news}
+              "count_files": count_files, "get_news": get_news, "read_own_source": read_own_source}

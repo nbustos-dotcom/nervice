@@ -287,7 +287,8 @@ async def _claude_fallback(prompt: str | None = None, system: str | None = None,
 # Per-tool ceilings for the slow agent tools, applied wherever they fire: respond() uses them for
 # forced routes, and chat_with_tools applies them when the tool model calls one on its own — the
 # previously unbounded path that could wedge an API turn (and the phone UI) indefinitely.
-TOOL_TIMEOUTS = {"consult_claude": 180, "agent_build": 600, "browse": 120, "propose_self_update": 300}
+TOOL_TIMEOUTS = {"consult_claude": 180, "agent_build": 600, "browse": 120, "propose_self_update": 300,
+                 "read_own_source": 20}
 TIMEOUT_MSG = "That took too long and I stopped it — want me to try again?"
 _TERMINAL_TOOLS = ("agent_build", "propose_self_update", "browse")  # their result IS the reply
 
