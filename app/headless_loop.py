@@ -23,11 +23,14 @@ Hard rules enforced here:
 Does NOT touch usage.py's $ guard, safety.py, selfmod.py, SAFETY_FLOOR, or agent.py's key scrub.
 Never sets ANTHROPIC_API_KEY. No new spawn path - it only calls the existing run_headless_step.
 """
+import os
 import re
 import sys
 import json
 import asyncio
 import pathlib
+import subprocess
+import importlib.util
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -90,6 +93,102 @@ def _progress(ws: pathlib.Path) -> str:
     log = orchestrator._git(ws, "log", "--oneline", "-n", "40") or "(no commits yet)"
     files = orchestrator._git(ws, "ls-files") or "(none)"
     return f"COMMITS (newest first):\n{log}\n\nTRACKED FILES:\n{files}"
+
+
+# ---- LOCAL TEST GATE: after a step commits, RUN the sandbox project's tests (no Claude/Groq cost).
+# A step is only "ok" if its tests PASS; tests that fail/error STOP the loop (same as any step failure).
+# No recognizable tests -> ran=False, and the loop falls back to run_headless_step's commit-only check
+# (don't block - e.g. a README step). Tests run with THIS interpreter (sys.executable) - fine for the
+# stdlib-only projects the planner targets; a project needing its own deps is an UNKNOWN.
+_TEST_TIMEOUT_S = 120   # bounded; kill on overrun (PID-tree)
+
+
+def _find_test_files(ws: pathlib.Path) -> list:
+    """Recognizable Python test files: test_*.py / *_test.py at the root or under tests/ or test/."""
+    out = []
+    for base in (ws, ws / "tests", ws / "test"):
+        if base.is_dir():
+            out += list(base.glob("test_*.py")) + list(base.glob("*_test.py"))
+    return sorted(set(out))
+
+
+def _looks_pytest(ws: pathlib.Path, test_files: list) -> bool:
+    """True if the project is pytest-shaped: a pytest config, OR a test file that imports pytest."""
+    for cfg in ("pytest.ini", "conftest.py", "tox.ini"):
+        if (ws / cfg).exists():
+            return True
+    for cfg, marker in (("pyproject.toml", "[tool.pytest"), ("setup.cfg", "[tool:pytest]")):
+        p = ws / cfg
+        if p.exists():
+            try:
+                if marker in p.read_text(encoding="utf-8", errors="replace"):
+                    return True
+            except Exception:
+                pass
+    for f in test_files:
+        try:
+            if "import pytest" in f.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _test_summary(text: str, passed: bool) -> str:
+    """One concise line from unittest/pytest output for the step record."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    ran = next((ln for ln in reversed(lines) if ln.startswith("Ran ")), "")            # unittest "Ran N tests in Xs"
+    verdict = next((ln for ln in reversed(lines)
+                    if ln == "OK" or ln.startswith("OK ") or ln.startswith("FAILED")), "")  # unittest verdict
+    if ran or verdict:
+        return (ran + (" - " if ran and verdict else "") + verdict).strip()[:200]
+    ps = next((ln for ln in reversed(lines)
+               if any(w in ln for w in ("passed", "failed", "error", "no tests ran"))), "")  # pytest summary
+    if ps:
+        return ps.strip("= ").strip()[:200]
+    return (lines[-1][:200] if lines else ("tests passed" if passed else "tests failed"))
+
+
+async def run_tests(workspace) -> dict:
+    """Run the sandbox project's tests LOCALLY (no Claude/Groq). Python: `python -m unittest discover`
+    (stdlib), or pytest ONLY if the project is pytest-shaped AND pytest is installed. Returns
+    {ran, passed, summary, output_tail}; no recognizable tests -> ran=False. Timeout-bounded with a
+    PID-tree kill on overrun. Never raises. NOTE: pytest-style tests with pytest NOT installed fall to
+    `unittest discover`, which errors on `import pytest` - so a test that can't even run is CAUGHT."""
+    ws = pathlib.Path(workspace)
+    test_files = _find_test_files(ws)
+    if not test_files:
+        return {"ran": False, "passed": None, "summary": "no tests to verify", "output_tail": ""}
+    py = sys.executable
+    use_pytest = (importlib.util.find_spec("pytest") is not None) and _looks_pytest(ws, test_files)
+    args = ([py, "-m", "pytest", "-q"] if use_pytest
+            else [py, "-m", "unittest", "discover", "-p", "test*.py"])
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, cwd=str(ws), env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    except Exception as e:
+        return {"ran": True, "passed": False, "summary": f"could not launch tests: {type(e).__name__}",
+                "output_tail": ""}
+    pid = proc.pid
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_TEST_TIMEOUT_S)
+        text = (out or b"").decode("utf-8", "replace")
+        passed = (proc.returncode == 0)
+        return {"ran": True, "passed": passed, "summary": _test_summary(text, passed),
+                "runner": "pytest" if use_pytest else "unittest", "output_tail": text[-1600:]}
+    except asyncio.TimeoutError:
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=15)
+        except Exception:
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return {"ran": True, "passed": False, "summary": f"tests exceeded {_TEST_TIMEOUT_S}s - killed",
+                "output_tail": ""}
 
 
 async def _plan_step(goal: str, progress: str, n: int, ms: int) -> tuple:
@@ -167,6 +266,17 @@ async def _run_loop(run_id: str) -> None:
             verdict = _classify(run, n, prompt, r)
             if verdict["stop"]:
                 _finish(run, verdict["status"], verdict["reason"])
+                return
+            # TEST GATE (additive): the step committed (git check ok) - now require its tests to PASS.
+            # Runs LOCALLY in the sandbox (no Claude/Groq). No recognizable tests -> commit-only fallback.
+            run["current_step"] = f"testing step {n}/{ms}"; _persist(run)
+            tr = await run_tests(ws)
+            if run["steps"]:
+                run["steps"][-1]["tests"] = {k: tr.get(k) for k in ("ran", "passed", "summary")}
+            if tr["ran"] and not tr["passed"]:               # tests ran and FAILED/errored -> STOP, no chaining
+                if run["steps"]:
+                    run["steps"][-1]["ok"] = False
+                _finish(run, "failed", f"step {n}: committed but TESTS FAILED - {tr['summary']}")
                 return
             run["steps_done"] = n; _persist(run)
             run["current_step"] = f"checking goal after step {n}/{ms}"
