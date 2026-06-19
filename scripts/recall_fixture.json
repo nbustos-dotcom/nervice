@@ -1,0 +1,36 @@
+{
+  "user_id": "nate",
+  "_doc": [
+    "Recall test fixture for app/retrieval.retrieve(). Tunable + reviewable — edit cases here, never in the script.",
+    "Probes the diagnosed bug: GENERIC self/identity questions sit at cosine 0.58-0.72 (distance probe), ABOVE the",
+    "0.55 topic gate, so the topic tier returns nothing and the user falls back on CORE.",
+    "",
+    "case.type:   'probe' = generic question that SHOULD fail at baseline (tests the bug).",
+    "             'guard' = direct-phrasing question that already passes via topic; must keep passing after the fix.",
+    "case.expected_fail (true): a generic question whose only answer is a BELOW-FLOOR fact (salience < 4). CORE",
+    "   breadth (salience>=4) will NOT surface it and the phrasing is measured ABOVE the 0.55 gate so topic can't",
+    "   either. Reported XFAIL when it fails (as designed); tracked for the Part 2 re-score. This keeps the",
+    "   relationship seam VISIBLE so a clean identity-fact pass can't paper over it. Verified distance: 'tell me",
+    "   about my relationships' -> nearest relationship fact 0.574, nearest Maddie fact 0.584 (both > 0.55).",
+    "",
+    "must_land_in_core: substrings that, AFTER the fix, must appear in the CORE tier specifically — proves the",
+    "   >=4 essentials survive CORE_LIMIT and are not truncated by updated_at ordering. (At baseline they are",
+    "   absent, since CORE is salience==5 + identity/preference — that's the before/after contrast.)",
+    "",
+    "Every 'expect' substring is verified present in the live memories table (read-only SELECT, Report 1).",
+    "Match is case-insensitive substring against concatenated content of the core+topic facts retrieve() returns."
+  ],
+  "must_land_in_core": ["college", "hockey", "Claude Corps"],
+  "cases": [
+    {"q": "who am I",                         "expect": "college",      "type": "probe", "target_salience": 4, "fact": "identity s4: Nate is a college student"},
+    {"q": "what do I do",                     "expect": "college",      "type": "probe", "target_salience": 4, "fact": "identity s4: Nate is a college student"},
+    {"q": "tell me about myself",             "expect": "hockey",       "type": "probe", "target_salience": 4, "fact": "identity s4: Nate is a former hockey player"},
+    {"q": "what are my hobbies",              "expect": "hockey",       "type": "probe", "target_salience": 4, "fact": "identity s4: Nate is a former hockey player (former, but the only sport/hobby fact at >=4)"},
+    {"q": "what's my background",             "expect": "college",      "type": "probe", "target_salience": 4, "fact": "identity s4: Nate is a college student"},
+    {"q": "what programs should I look into", "expect": "Claude Corps", "type": "probe", "target_salience": 4, "fact": "project s4: Nate is a good fit for Claude Corps (tests the category-drop: project, excluded from CORE today)"},
+    {"q": "tell me about my relationships",   "expect": "Maddie",       "type": "probe", "expected_fail": true, "target_salience": 2, "fact": "relationship s2: Nate's girlfriend's name is Maddie -- BELOW-FLOOR relationship fact, tracked for Part 2. Measured 0.574/0.584 > 0.55 gate so topic cannot rescue it; CORE breadth (>=4) cannot either. EXPECTED-FAIL until the Part 2 re-score."},
+    {"q": "what's my favorite color",         "expect": "purple",       "type": "guard", "target_salience": 3, "fact": "preference s3: Nate's favorite color is purple (direct phrasing -> topic tier; regression guard)"},
+    {"q": "what classes am I taking",         "expect": "CS2321",       "type": "guard", "target_salience": 3, "fact": "fact s3: Nate is taking CS2321 and SAT2343 (direct phrasing -> topic tier; regression guard)"},
+    {"q": "what's my girlfriend's name",      "expect": "Maddie",       "type": "guard", "target_salience": 2, "fact": "relationship s2: same Maddie fact, asked DIRECTLY -> topic tier catches it (0.543 < 0.55); regression guard"}
+  ]
+}

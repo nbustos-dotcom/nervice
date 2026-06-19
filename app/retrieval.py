@@ -10,7 +10,18 @@ from sqlalchemy import select
 # Fix 2.2: a real relevance bar for topical recall. pgvector cosine_distance: 0 = identical,
 # higher = less related. nomic-embed-text puts genuinely related content under ~0.55; unrelated
 # chatter sits ~0.7+. Off-topic turns now inject NOTHING beyond the essentials.
-MAX_TOPIC_DISTANCE = 0.55
+MAX_TOPIC_DISTANCE = 0.55      # cosine-distance gate for the TOPIC tier — UNCHANGED (measured: raising
+                               # it drags the gate into the 0.7+ noise band; the fix is CORE breadth)
+
+# Part 1 (CORE breadth, 2026-06-19): the always-injected ESSENTIALS tier. Was salience == 5 AND
+# category in (identity, preference) — only 1 of 86 stored facts qualified, so generic "who am I"
+# turns (which don't topically hook any single fact — distance 0.58-0.72) recalled nothing useful.
+# Now ANY category at salience >= CORE_MIN_SALIENCE, ordered salience-first, capped at CORE_LIMIT.
+CORE_MIN_SALIENCE = 4          # essentials floor (was a hardcoded == 5)
+CORE_LIMIT = 10                # max essentials injected — >= the whole >=4 set so the cap never
+                               # silently truncates on updated_at ordering (recall must not hinge on
+                               # which fact was edited most recently)
+TOPIC_LIMIT = 8                # max topical (cosine) matches injected
 
 # Reliability floor: each external dependency (Ollama for embeddings, Supabase for the rows) gets a
 # timeout so a *flaky/hung* rung can't wedge a turn — not just a *down* one. Generous: warm recall is
@@ -18,12 +29,13 @@ MAX_TOPIC_DISTANCE = 0.55
 _RECALL_TIMEOUT_S = 8.0
 
 
-async def retrieve(user_id: str, query_text: str, essentials_limit: int = 3,
-                   topic_limit: int = 8) -> dict:
-    """Gated two-tier memory recall (Fix 2.2). Returns {"core": [...], "topic": [...], "degraded": bool}:
-      core  = ESSENTIALS: top salience-5 identity/preference facts only, max 3, always present.
-      topic = everything else active (any salience), by cosine distance, ONLY above the real
-              relevance threshold.
+async def retrieve(user_id: str, query_text: str, essentials_limit: int = CORE_LIMIT,
+                   topic_limit: int = TOPIC_LIMIT) -> dict:
+    """Gated two-tier memory recall (Fix 2.2; CORE breadth Part 1). Returns
+    {"core": [...], "topic": [...], "degraded": bool}:
+      core  = ESSENTIALS: any-category facts at salience >= CORE_MIN_SALIENCE (4), highest salience
+              first, max CORE_LIMIT, ALWAYS present (no embedding needed).
+      topic = everything else active (any salience), by cosine distance, ONLY under MAX_TOPIC_DISTANCE.
 
     FAIL-SOFT (reliability floor): a routed turn must NEVER 500 because the local rung or the DB
     hiccupped. The two external dependencies fail INDEPENDENTLY and SOFTLY:
@@ -50,8 +62,8 @@ async def retrieve(user_id: str, query_text: str, essentials_limit: int = 3,
             core = (await s.execute(
                 select(Memory)
                 .where(Memory.user_id == user_id, Memory.is_active == True,            # noqa: E712
-                       Memory.salience == 5, Memory.category.in_(("identity", "preference")))
-                .order_by(Memory.updated_at.desc())
+                       Memory.salience >= CORE_MIN_SALIENCE)
+                .order_by(Memory.salience.desc(), Memory.updated_at.desc())
                 .limit(essentials_limit)
             )).scalars().all()
             topic = []

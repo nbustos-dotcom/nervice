@@ -1,0 +1,81 @@
+RECALL TEST  —  3/9 PASS   (+1 XFAIL expected)
+==============================================
+thresholds: MAX_TOPIC_DISTANCE=0.55  CORE_MIN_SALIENCE=n/a (==5 + identity/preference)  CORE_LIMIT=n/a (essentials_limit=3)  TOPIC_LIMIT=n/a (topic_limit=8)
+
+Q: 'who am I'  [probe]
+   expect 'college'  ->  FAIL    (core=1 topic=0 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+
+Q: 'what do I do'  [probe]
+   expect 'college'  ->  FAIL    (core=1 topic=0 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+
+Q: 'tell me about myself'  [probe]
+   expect 'hockey'  ->  FAIL    (core=1 topic=0 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+
+Q: 'what are my hobbies'  [probe]
+   expect 'hockey'  ->  FAIL    (core=1 topic=8 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+      [topic preference   s2] Nate is interested in lo-fi hip hop music for productivity
+      [topic preference   s3] Nate is interested in computer science
+      [topic preference   s2] Nate wants to listen to music for productivity
+      [topic preference   s3] Nate uses 'play something else' as a command to open YouTube and play productivity music
+      [topic preference   s3] Nate uses 'play some banger music' as a command to open YouTube and play The Strokes.
+      [topic preference   s3] Nate uses 'play something productive' as a command to open YouTube and play productivity music
+      [topic preference   s3] Nate wants to listen to music other than The Strokes
+      [topic preference   s3] Nate wants to listen to music other than The Strokes
+
+Q: "what's my background"  [probe]
+   expect 'college'  ->  FAIL    (core=1 topic=0 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+
+Q: 'what programs should I look into'  [probe]
+   expect 'Claude Corps'  ->  FAIL    (core=1 topic=8 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+      [topic preference   s3] Nate is interested in computer science
+      [topic project      s3] Nate is taking two required courses to become eligible
+      [topic preference   s3] Nate is interested in computer science
+      [topic project      s3] Nate wants to learn about web scraping techniques and applications
+      [topic preference   s3] Nate wants to listen to music other than The Strokes
+      [topic preference   s3] Nate wants to listen to music other than The Strokes
+      [topic identity     s2] Nate is currently taking a course.
+      [topic preference   s2] Nate is interested in Eucharistic miracles
+
+Q: 'tell me about my relationships'  [probe]   EXPECTED-FAIL
+   expect 'Maddie'  ->  XFAIL (expected - Part-2 seam)    (core=1 topic=1 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+      [topic project      s3] Nate is studying data structures
+
+Q: "what's my favorite color"  [guard]
+   expect 'purple'  ->  PASS    (core=1 topic=2 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+     *[topic preference   s3] Nate's favorite color is purple, but he publicly says it is blue
+     *[topic preference   s2] Nate prefers the color purple
+
+Q: 'what classes am I taking'  [guard]
+   expect 'CS2321'  ->  PASS    (core=1 topic=8 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+      [topic identity     s2] Nate is currently taking a course.
+      [topic project      s3] Nate is taking two required courses to become eligible
+     *[topic fact         s3] Nate is taking CS2321 and SAT2343
+      [topic identity     s4] Nate is a college student
+     *[topic fact         s3] Nate has an upcoming assignment 6 for CS2321 due tomorrow
+     *[topic project      s3] Nate has an upcoming assignment 5 for CS2321 due June 14 at 11:59 pm
+     *[topic fact         s3] Nate has an upcoming assignment for CS2321 due tomorrow on Canvas and is currently checking its status.
+      [topic fact         s3] Nate has an upcoming Lab 9 for SAT2343 due tomorrow
+
+Q: "what's my girlfriend's name"  [guard]
+   expect 'Maddie'  ->  PASS    (core=1 topic=5 degraded=False)
+      [core  preference   s5] Nate prefers using free services for Nervice.
+     *[topic relationship s2] Nate's girlfriend's name is Maddie, spelled M-A-D-D-I-E, full name Madeline
+      [topic relationship s2] Nate's girlfriend has a dog named Birdie
+      [topic relationship s2] Nate's girlfriend likes riding horses
+     *[topic relationship s2] Maddie's parents are divorced
+      [topic preference   s3] Nate's favorite color is purple, but he publicly says it is blue
+
+CORE LANDING (the >=4 essentials must survive the cap, not be truncated by recency):
+   MISSING  'college'  in CORE tier
+   MISSING  'hockey'  in CORE tier
+   MISSING  'Claude Corps'  in CORE tier
+   CORE tier holds 1 fact(s): Nate prefers using free services for N
