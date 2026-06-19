@@ -261,35 +261,116 @@ _PLAY_BARE = {"it", "that", "this", "something", "anything", "music", "some musi
 # Bare plays draw from Nate's STORED favorite artists (set by voice — app/music.py), never a
 # hardcoded list. Empty list -> an honest ask, not generic music.
 
+# ---- play-query intelligence: search from the USER'S WORDS, honor "different / not X", and rotate
+#      favorites so back-to-back plays never repeat. _LAST_PLAY is in-process (single-user; lost on
+#      restart — fine, the conversation window is in-memory too). ----
+_LAST_PLAY = {"vid": None, "title": None, "query": None, "artist": None, "source": None, "recent": []}
 
-def _resolve_youtube(query: str):
-    """ytsearch1 -> (video_id, title) or (None, None). Read-only network search."""
+# Filler/placeholders with NO musical content — if only these remain, the ask is truly bare.
+_PLAY_FILLER = {
+    "play", "please", "hey", "actually", "now", "just", "go", "ahead", "and", "can", "you", "could",
+    "would", "me", "us", "some", "something", "anything", "everything", "a", "an", "the", "song",
+    "songs", "music", "track", "tracks", "tune", "tunes", "video", "videos", "stuff", "thing",
+    "things", "good", "nice", "cool", "great", "to", "for", "of", "on", "up", "put", "listen",
+    "listening", "hear", "that", "this", "it", "whatever", "like", "want", "i", "my", "more",
+    "completely", "totally", "entirely", "really", "kinda", "sorta", "maybe", "bit", "new", "else"}
+# "I want something DIFFERENT" — a new result vs the last (no specific genre named).
+_DIFFERENT_RE = re.compile(r"\b(else|different|other|another|switch\s+it\s+up|change\s+it|mix\s+it\s+up|"
+                           r"not\s+(?:that|this|the\s+same|again))\b", re.I)
+# "I don't want the strokes" / "not the strokes" / "no strokes" / "anything but jazz" -> avoid that.
+_AVOID_RE = re.compile(
+    r"\b(?:don'?t\s+want|do\s+not\s+want|not|no|without|anything\s+but|instead\s+of|avoid|"
+    r"sick\s+of|tired\s+of|enough\s+of|stop\s+playing)\s+(?:the\s+|any\s+|more\s+|that\s+)?"
+    r"([a-z0-9][a-z0-9 '&.\-]{1,38}?)\s*(?:,|\.|!|\?|;|\bplay\b|\bput\b|\band\b|$)", re.I)
+# genre/format words that already make a good search alone (don't append "music").
+_HAS_MUSIC_NOUN = re.compile(r"\b(music|playlist|mix|song|songs|beats|radio|lofi|lo-fi|jazz|hip\s*hop|"
+                             r"rap|edm|rock|pop|punk|metal|classical|study|focus|chill|ambient|"
+                             r"instrumental|soundtrack|album|remix|acoustic|piano|guitar|hits)\b", re.I)
+
+
+def _avoid_target(low: str) -> "str | None":
+    """The artist/genre the user said to AVOID ("I don't want the strokes" -> "strokes"), or None."""
+    m = _AVOID_RE.search(low)
+    if not m:
+        return None
+    a = m.group(1).strip().strip("'\"").strip()
+    if not a or a in _PLAY_FILLER or a in {"same", "the same"}:
+        return None
+    return a
+
+
+def _descriptor(low: str) -> str:
+    """The user's musical words: strip the avoid clause, the 'different' directive, and all filler.
+    Empty -> a truly bare ask. 'something productive' -> 'productive'; 'music' -> ''."""
+    s = _AVOID_RE.sub(" ", low)
+    s = _DIFFERENT_RE.sub(" ", s)
+    toks = re.findall(r"[a-z0-9'&\-]+", s)
+    return " ".join(t for t in toks if t not in _PLAY_FILLER).strip()
+
+
+def _plan_play(text: str) -> dict:
+    """Decide WHAT to search from the user's words. {query, source, avoid, want_different}. source:
+    'words' (used the request), 'repeat-different' (same vibe, new result), 'favorite' (bare fallback)."""
+    low = re.sub(r"\s+on\s+(?:youtube|yt)\b", " ", (text or "").lower()).strip()
+    avoid = _avoid_target(low)
+    want_diff = bool(_DIFFERENT_RE.search(low))
+    desc = _descriptor(low)
+    if desc:                                                  # USE THE WORDS — never substitute a favorite
+        q = desc if _HAS_MUSIC_NOUN.search(desc) else f"{desc} music"
+        return {"query": q, "source": "words", "avoid": avoid, "want_different": want_diff}
+    if want_diff and _LAST_PLAY.get("source") in ("words", "repeat-different") and _LAST_PLAY.get("query"):
+        return {"query": _LAST_PLAY["query"], "source": "repeat-different", "avoid": avoid, "want_different": True}
+    return {"query": None, "source": "favorite", "avoid": avoid, "want_different": want_diff}
+
+
+def _resolve_youtube(query: str, exclude_vids=None, avoid: "str | None" = None):
+    """ytsearchN -> (video_id, title), skipping any id in `exclude_vids` (recently-played, for
+    "something different") and any title containing `avoid` (e.g. "strokes"). Read-only search."""
     import app.net  # noqa  (truststore — Norton TLS; no-op if already injected)
     import yt_dlp
     opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
     with yt_dlp.YoutubeDL(opts) as y:
-        info = y.extract_info(f"ytsearch1:{query}", download=False)
-    entries = (info or {}).get("entries") or []
+        info = y.extract_info(f"ytsearch8:{query}", download=False)
+    entries = [e for e in ((info or {}).get("entries") or []) if e and e.get("id")]
     if not entries:
         return None, None
+    excl = {v for v in (exclude_vids or []) if v}
+    av = (avoid or "").strip().lower()
+    for e in entries:                                         # first hit not recently played and not avoided
+        title = e.get("title") or "that video"
+        if e.get("id") in excl:
+            continue
+        if av and av in title.lower():
+            continue
+        return e.get("id"), title
+    for e in entries:                                         # all recent -> first non-avoided (a repeat beats nothing)
+        if not (av and av in (e.get("title") or "").lower()):
+            return e.get("id"), e.get("title") or "that video"
     return entries[0].get("id"), entries[0].get("title") or "that video"
 
 
-def play_youtube(query: str) -> str:
-    """Resolve a real video and open its watch URL (auto-plays) in the default browser. Honest on
-    every failure path — never claims playback without a resolved video AND a real launch.
-    Bare plays ("play some music"/"play it") pick a random artist from Nate's voice-set favorites."""
-    q = (query or "").strip().strip(".!?,")
-    q = re.sub(r"\s+on\s+(?:youtube|yt)\s*$", "", q, flags=re.I).strip()
-    if not q or q.lower() in _PLAY_BARE:
+def play_youtube(query: str, raw: "str | None" = None) -> str:
+    """Resolve a real video and open its watch URL (auto-plays). Builds the search FROM the user's
+    words (genre/vibe); honors "something different / not X" by excluding the last result; only a
+    truly bare "play music" falls to a ROTATING favorite (never the one just played). `raw` is the
+    full user message (parsed for intent); `query` is the post-"play" fragment fallback. Honest on
+    every failure path; returns ONE short confirmation line — never a browser transcript."""
+    plan = _plan_play(raw if raw is not None else query)
+    avoid = plan["avoid"]
+    chosen_artist = None
+    if plan["source"] == "favorite":
         from app import music
-        artist = music.random_artist()
-        if not artist:
+        excl = [a for a in (_LAST_PLAY.get("artist"), avoid) if a]     # rotate off the last + any "not X"
+        chosen_artist = music.next_artist(exclude=excl)
+        if not chosen_artist:
             return ("I don't have your favorite artists yet — tell me who you like "
                     "(\"my favorite artists are X, Y, and Z\") and I'll play from them.")
-        q = f"{artist} songs mix"
+        q = f"{chosen_artist} songs mix"
+    else:
+        q = plan["query"]
+    exclude_vids = (_LAST_PLAY.get("recent") or []) if plan["want_different"] else None
     try:
-        vid, title = _resolve_youtube(q)
+        vid, title = _resolve_youtube(q, exclude_vids=exclude_vids, avoid=avoid)
     except Exception as e:
         print(f"[computer play resolve failed] {repr(e)[:100]}", file=sys.stderr)
         vid, title = None, None
@@ -297,6 +378,10 @@ def play_youtube(query: str) -> str:
         return f"I couldn't pull up a video for \"{q}\" — YouTube search isn't answering right now."
     r = open_url(f"https://www.youtube.com/watch?v={vid}")
     if r.lower().startswith("opened"):
+        rec = [v for v in (_LAST_PLAY.get("recent") or []) if v]
+        rec.append(vid)
+        _LAST_PLAY.update(vid=vid, title=title, query=q, artist=chosen_artist,
+                          source=plan["source"], recent=rec[-8:])      # remember recents -> "different" rotates
         _audit("PLAY", f"{q}\t{vid}\t{title}")
         return f"Playing \"{title}\" on YouTube."
     return r   # the launch itself failed — open_url's honest report stands
@@ -564,7 +649,7 @@ def focus_window(substr: str) -> str:
 
 _ACTIONS = {"open_app": lambda d: open_app(d.target),
             "open_url": lambda d: open_url(d.target, d.browser),
-            "play_youtube": lambda d: play_youtube(d.target),
+            "play_youtube": lambda d: play_youtube(d.target, d.raw),   # d.raw = full message -> use the words
             "screenshot": lambda d: screenshot(),
             "list_windows": lambda d: list_windows(),
             "focus_window": lambda d: focus_window(d.target)}

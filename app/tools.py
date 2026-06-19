@@ -154,10 +154,35 @@ _BARE_OPEN_RE = re.compile(
 _BROWSE_TASK_WORDS = re.compile(
     r"\b(tell|find|check|read|what|which|who|how|search|look|report|top|latest|news|summar\w*|"
     r"extract|list|count|price|headline|story|video|trending|review|compare|describe|click|"
-    r"play|watch|buy|order|add)\b", re.I)
+    r"buy|order|add)\b", re.I)   # 'play'/'watch' REMOVED — music playback never escalates to the browser agent
+
+# Music/video PLAYBACK must NEVER drive the visible browser agent (slow, $, wall-of-text transcript).
+# It goes to the fast, deterministic play_youtube path instead — the root cause of the 89s/$0.26 lofi run.
+_MUSIC_PLAY_TASK = re.compile(
+    r"\b(?:play|listen\s+to|put\s+on)\b[^.]{0,40}\b(?:music|song|songs|playlist|mix|track|tracks|tune|"
+    r"tunes|album|artist|lofi|lo-fi|radio|beats|hip\s*hop|jazz|rock|pop)\b"
+    r"|\b(?:youtube|spotify)\b[^.]{0,40}\bplay\b"
+    r"|\bplay\b[^.]{0,40}\bon\s+(?:youtube|spotify)\b", re.I)
+
+
+def _play_query_from_browse_task(task: str) -> str:
+    """Strip browse boilerplate ('search YouTube for …', '… and play the first result') so the
+    play_youtube parser receives the genre/vibe words, not the agent instruction."""
+    s = task or ""
+    s = re.sub(r"\b(?:search|find|look\s+up|go\s+to|open|on)\s+(?:for\s+)?(?:youtube|yt|spotify)\b", " ", s, flags=re.I)
+    s = re.sub(r"\b(?:and\s+)?(?:then\s+)?play\s+(?:the\s+)?(?:first|top|1st)\s+(?:result|video|one|hit|song)\b", " ", s, flags=re.I)
+    s = re.sub(r"\b(?:search|find|look\s+up)\s+for\b", " ", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" .,")
+    return s or (task or "")
 
 
 async def browse(task: str) -> str:
+    # MUSIC/VIDEO PLAYBACK -> the fast deterministic play_youtube path; NEVER the browser agent.
+    if _MUSIC_PLAY_TASK.search(task or ""):
+        from app import computer
+        q = _play_query_from_browse_task(task)
+        print(f"[BROWSE -> play_youtube redirect] {task[:120]}", file=sys.stderr)
+        return computer.play_youtube(q)
     if _BARE_OPEN_RE.match(task) and not _BROWSE_TASK_WORDS.search(task):
         print(f"[BROWSE skipped — bare open] {task[:120]}", file=sys.stderr)
         return ("Just opening that site wouldn't show you anything — my browser runs on the "

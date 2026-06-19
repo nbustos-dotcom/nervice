@@ -37,6 +37,19 @@ def random_artist() -> str | None:
     return random.choice(artists) if artists else None
 
 
+def next_artist(exclude: list[str] | None = None) -> str | None:
+    """A favorite to play, avoiding every name in `exclude` (case-insensitive). Lets the play path
+    rotate back-to-back bare picks (pass the last artist) and honor "something different / not X"
+    (pass the avoided name). Falls back to the full list only if EVERYTHING is excluded — a repeat
+    beats playing nothing."""
+    artists = load_artists()
+    if not artists:
+        return None
+    excl = {str(e).strip().lower() for e in (exclude or []) if str(e).strip()}
+    pool = [a for a in artists if a.lower() not in excl] or artists
+    return random.choice(pool)
+
+
 def _parse_names(blob: str) -> list[str]:
     """'X, Y and Z' -> ['X','Y','Z']. Conservative cleanup, dedup, length caps."""
     blob = re.sub(r"[.!?]+\s*$", "", (blob or "").strip())
