@@ -37,7 +37,7 @@ _TZ = ZoneInfo("America/Chicago")
 _RUNDIR = pathlib.Path(__file__).resolve().parent.parent / "data" / "headless_runs"   # audit trail (gitignored)
 
 # ---- BOUNDS (clearly-labeled config constants) ----
-_MAX_STEPS_DEFAULT = 5      # default ceiling on steps per goal - deliberately LOW
+_MAX_STEPS_DEFAULT = 8      # default ceiling on steps/goal - meaty complete-component steps need a bit more room
 _MAX_STEPS_CEILING = 12     # hard upper bound even if a caller asks for more
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")   # filesystem-safe run ids only
 
@@ -48,11 +48,26 @@ _active_run_id = None
 
 _PLAN_SYS = (
     "You drive a HANDS-OFF coding loop in a throwaway sandbox git repo. Given a GOAL and the PROGRESS so "
-    "far (committed files + git log), output the instruction for the NEXT SINGLE PIECE only - the smallest "
-    "unit of the goal that is not yet done. Rules: build ONE file or ONE function, NOT the whole goal; if a "
-    "test is required, make it pass; then run `git add -A && git commit -m \"<short message>\"`. Keep it "
-    "minimal and self-contained. Do NOT bundle multiple pieces. Do NOT ask questions - the agent runs "
-    "unattended. Output ONLY the instruction text to hand the coding agent - no preamble, no JSON, no options.")
+    "far (committed files + git log), output the instruction for the NEXT COMPLETE COMPONENT - one whole, "
+    "self-contained, committable deliverable that is not yet built. A COMPONENT is an ENTIRE module with "
+    "ALL of its functions/methods finished AND its tests, together in the SAME step (for example: the full "
+    "data model with every method plus its test file; or the storage layer plus its tests; or the CLI with "
+    "EVERY command wired up). NEVER a skeleton or stub, NEVER one method/function at a time, NEVER half a "
+    "module left for a later step. Look at PROGRESS and build only what is still MISSING: do NOT re-create, "
+    "rename, or re-do a component that already exists in the tracked files, and do NOT invent components the "
+    "GOAL did not ask for. Finish the GOAL in as FEW complete steps as possible. Build the CODE components "
+    "first; then, as soon as the code files the GOAL names already exist in the tracked files, your NEXT "
+    "component MUST be the README/docs the GOAL asks for - do NOT write or extend any more code or test "
+    "files, just create the README and commit it. "
+    "Write a SHORT, directive instruction that NAMES the exact file(s) and the functions/methods/commands "
+    "and tests to build - do NOT paste full code implementations (that buries the commit step). Tests MUST "
+    "use Python's built-in `unittest` and be runnable with `python -m unittest` - NEVER pytest or any other "
+    "third-party test framework - and the agent must actually run them and see them pass before committing. "
+    "COMMITTING IS MANDATORY and is the agent's FINAL action. The instruction MUST end with a clearly "
+    "separated final step, exactly: `FINALLY, run: git add -A && git commit -m \"<short message>\"` - and "
+    "state that the step is NOT complete and WILL BE REJECTED unless it makes the tests pass AND commits. "
+    "Do NOT ask questions - the agent runs unattended. Output ONLY the instruction text to hand the coding "
+    "agent - no preamble, no JSON, no options.")
 
 _DONE_SYS = (
     "You judge whether a coding GOAL is fully satisfied by the work COMMITTED so far in a sandbox. Given the "
@@ -80,7 +95,9 @@ def _progress(ws: pathlib.Path) -> str:
 async def _plan_step(goal: str, progress: str, n: int, ms: int) -> tuple:
     """FREE next-step prompt from goal + progress. Returns (prompt, rung). rung 'none' = free exhausted."""
     user = (f"GOAL:\n{goal}\n\nPROGRESS SO FAR:\n{progress}\n\nThis is step {n} of at most {ms}. Write the "
-            f"NEXT single-piece instruction (build ONE small unit not yet done, then commit it).")
+            f"instruction for the NEXT COMPLETE COMPONENT not yet built - a whole module with ALL its "
+            f"functions/methods AND its tests in this one step - then commit it. Use as few steps as "
+            f"possible; leave README/docs for last.")
     prompt, rung = await orchestrator._ask_free(_PLAN_SYS, user, want_json=False, num_predict=400)
     return (prompt or "").strip(), rung
 
