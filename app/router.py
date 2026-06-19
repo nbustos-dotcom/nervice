@@ -162,6 +162,33 @@ _ACTIONS_KW = re.compile(r"\b(what (?:have you|did you|you'?ve) (?:done|do|taken
 _NEWS_KW = re.compile(r"\b(news|headlines?|what'?s\s+(?:happening|going\s+on)|anything\s+(?:happening|going\s+on)|"
                       r"catch\s+me\s+up|current\s+events|what'?s\s+going\s+on)\b", re.I)
 
+# RECENT-NEWS pre-guard intent (broader than _NEWS_KW): runs BEFORE the public-page web reader so a
+# today-flavored question routes to the LIVE-headlines `news` path instead of silently returning a
+# Wikipedia article. Also catches "latest on X", "today's headlines", "breaking", "recent developments".
+_RECENT_NEWS = re.compile(
+    r"\b(news|headlines?|breaking(?:\s+news)?|current\s+events?|"
+    r"what(?:'?s|\s+is)\s+(?:happening|going\s+on|new)|anything\s+(?:happening|going\s+on|new)|catch\s+me\s+up|"
+    r"(?:happening|going\s+on)\s+in\s+the\s+world|"
+    r"latest\s+(?:news|headlines?|on|in|about|developments?|updates?)|today'?s\s+(?:news|headlines?|events?)|"
+    r"recent\s+(?:news|developments?|events?|headlines?))\b", re.I)
+_NEWS_TOPIC = re.compile(r"\b(?:news\s+(?:on|about)|latest\s+(?:on|in|about)|(?:happening|going\s+on)\s+(?:in|with|on))\s+(.+)$", re.I)
+
+
+def recent_news_route(msg: str) -> "dict | None":
+    """Deterministic: a recent-news / today-flavored question with NO specific URL -> {route:news} (the
+    LIVE-headlines path), so it never falls into the public-page reader (which returns Wikipedia, not
+    live news). A read of a SPECIFIC url/page, or a canvas/project/plan/notes read, is NOT news."""
+    m = msg or ""
+    if _URL_RE.search(m):                                  # a page was given -> read THAT (web_read), not news
+        return None
+    if _NOT_WEBREAD.search(m) or _ORCH_KW.search(m):       # canvas/project/plan/notes -> not world news
+        return None
+    if not _RECENT_NEWS.search(m):
+        return None
+    tm = _NEWS_TOPIC.search(m)
+    topic = re.sub(r"[.?!]+\s*$", "", tm.group(1)).strip().strip("\"'")[:60] if tm else ""
+    return {"route": "news", "topic": topic}
+
 
 def _orch_keyword_op(m: str) -> str | None:
     ml = (m or "").lower()
@@ -275,6 +302,9 @@ async def classify(user_message: str) -> dict:
         return {"route": "normal"}
     # A clear read/summarize-a-public-page request -> the FREE owns-nothing web reader (never the
     # metered browse_agent). Deterministic pre-guard: requires real read-a-page intent, not a bare link.
+    nr = recent_news_route(msg)                            # recent-news intent -> LIVE headlines, never the
+    if nr:                                                 # public-page reader (which returns Wikipedia)
+        return nr
     wr = web_read_route(msg)
     if wr:
         return wr
