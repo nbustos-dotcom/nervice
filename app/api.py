@@ -654,6 +654,14 @@ async def loop_new_sandbox():
         g("config", "user.email", "sandbox@nervice.test")
         g("config", "user.name", "nervice-sandbox")
         (ws / "README.md").write_text("# nervice headless sandbox\nThrowaway workspace for a hands-off Claude Code loop.\n", encoding="utf-8")
+        # Every new sandbox starts with a .gitignore so generated junk (pycache, the per-sandbox test
+        # venv from run_tests, caches) never gets committed by the loop's `git add -A`.
+        (ws / ".gitignore").write_text(
+            "__pycache__/\n*.py[cod]\n*$py.class\n"
+            ".venv-test/\n.venv/\nvenv/\nenv/\n"            # the per-sandbox test venv + any project venv
+            ".pytest_cache/\n.mypy_cache/\n.ruff_cache/\n"
+            "*.egg-info/\n.eggs/\nbuild/\ndist/\n"
+            ".DS_Store\nThumbs.db\n", encoding="utf-8")
         g("add", "-A")
         g("commit", "-q", "-m", "init sandbox")
         head = subprocess.run(["git", "-C", str(ws), "rev-parse", "--short", "HEAD"],
