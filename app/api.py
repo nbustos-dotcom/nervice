@@ -622,6 +622,14 @@ async def loop_run_status(run_id: str):
     return st
 
 
+@app.post("/loop/run-stop/{run_id}", dependencies=[Depends(auth)])
+async def loop_run_stop(run_id: str):
+    """Request a CLEAN stop of a running loop: it halts before the next step (the current step may
+    finish), marks the run 'cancelled'. Returns {ok, status} or a refusal if it's not an active run."""
+    from app import headless_loop
+    return headless_loop.request_stop(run_id)
+
+
 @app.post("/loop/new-sandbox", dependencies=[Depends(auth)])
 async def loop_new_sandbox():
     """Create a FRESH throwaway git repo under the allowed sandbox root (~/nervice-cc-sandbox/<ts>/) with a

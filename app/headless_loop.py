@@ -319,6 +319,9 @@ async def _run_loop(run_id: str) -> None:
     ws = pathlib.Path(run["workspace"]); goal = run["goal"]; ms = run["max_steps"]
     try:
         for n in range(1, ms + 1):
+            if run.get("cancel"):                                       # STOP requested -> halt before the next step
+                _finish(run, "cancelled", f"stopped by user before step {n} (started no further step)")
+                return
             run["current_step"] = f"planning step {n}/{ms}"; _persist(run)
             prompt, rung, brains = await _plan_step(goal, _progress(ws), n, ms)
             if rung == "none" or not prompt:
@@ -343,6 +346,9 @@ async def _run_loop(run_id: str) -> None:
                 _finish(run, "failed", f"step {n}: committed but TESTS FAILED - {tr['summary']}")
                 return
             run["steps_done"] = n; _persist(run)
+            if run.get("cancel"):                                       # STOP requested during the step -> halt now
+                _finish(run, "cancelled", f"stopped by user after step {n} (started no further step)")
+                return
             run["current_step"] = f"checking goal after step {n}/{ms}"
             done, why = await _check_done(goal, _progress(ws))
             if done:
@@ -379,11 +385,27 @@ def start_goal_run(workspace, goal, max_steps=None) -> dict:
     run_id = datetime.now(_TZ).strftime("%Y%m%d-%H%M%S") + "-" + ("%04x" % (abs(hash(str(ws) + goal)) & 0xFFFF))
     _runs[run_id] = {"run_id": run_id, "workspace": str(ws), "goal": str(goal).strip(), "max_steps": ms,
                      "status": "running", "steps_done": 0, "current_step": "starting", "steps": [],
-                     "reason": None, "started_ts": _now(), "ended_ts": None}
+                     "reason": None, "started_ts": _now(), "ended_ts": None, "cancel": False}
     _active_run_id = run_id
     _persist(_runs[run_id])
     _tasks[run_id] = asyncio.create_task(_run_loop(run_id))             # background on the server loop
     return {"started": True, "run_id": run_id, "status": "started", "max_steps": ms}
+
+
+def request_stop(run_id: str) -> dict:
+    """Request a CLEAN stop of a running loop. The loop checks the flag before each step, so it halts
+    before starting the next one (the current step is allowed to finish/time out - we never kill a CC
+    spawn mid-flight). Marks the run 'cancelled' in its audit log. Refuses if there's no such ACTIVE run."""
+    run = _runs.get(run_id)
+    if not run:
+        return {"ok": False, "error": "no such active run (unknown id or already finished/evicted from memory)"}
+    if run.get("status") != "running":
+        return {"ok": False, "status": run.get("status"),
+                "error": f"run is not running (status: {run.get('status')}) - nothing to stop"}
+    run["cancel"] = True
+    _persist(run)
+    return {"ok": True, "status": "stopping", "run_id": run_id,
+            "note": "the loop will halt before the next step; the current step may finish first"}
 
 
 def _build_report(run: dict) -> dict:
