@@ -31,6 +31,15 @@ Status legend: **OPEN** = not started / not built · **IN PROGRESS** = partially
   Part 2's design must answer both in one breath: (a) what gets re-scored up, and by what rule; and (b)
   whether always-on CORE needs a relevance gate or a category exclusion, so that re-scoring doesn't fix
   recall and manufacture prompt bloat in the same move.
+- **Reconcile over-supersede (contradiction logic too loose)** — OPEN. The reconcile step deactivates an
+  existing fact when a new one "contradicts" it (the supersede rule in `app/memory.py` `RECONCILE_SYSTEM`).
+  During the Part 2/A1 live merge test (`bb4b555`), a throwaway test fact ("my favorite *test* color is
+  octarine") made the 70B **supersede the real "favorite color is purple" rows** — both deactivated, two
+  octarine rows added. The model treats a near-slot fact as a contradiction, so a new or loosely-related
+  statement can silently deactivate a real one. Risk: real facts quietly lost on a fuzzy contradiction.
+  Consider tightening the supersede criterion (only a genuine same-attribute contradiction), and/or
+  surfacing supersedes for review instead of auto-applying. (Found and manually restored during the A1
+  merge — no data lost — but the mechanism stands.)
 - **HUD / UI one-pass redesign** — OPEN. The HUD (`app/static/index_v3.html`) wants a single coherent
   redesign pass rather than the incremental accretion it has now.
 - **Email send** — OPEN. Free SMTP, send-only, confirm-gated. Not built. (Send-only by design; no inbox.)
