@@ -45,8 +45,9 @@ For each durable fact assign:
 Reconcile against the EXISTING memories:
 - new fact duplicates an existing one -> noop (omit it)
 - new fact refines/extends an existing one -> update (give its id)
-- new fact contradicts an existing one -> supersede (give the old id and the corrected memory)
+- new fact is an EXPLICIT change or correction to the SAME attribute of an existing fact -- Nate signals the old value changed or was wrong (cues like "now", "actually", "no longer", "not X anymore", "changed to", "instead of") -> supersede (give the old id and the corrected memory)
 - otherwise -> add
+A statement about a NEW, DISTINCT, hypothetical, or TEST/throwaway attribute is NOT a contradiction even when it shares words or a topic with an existing fact (e.g. "favorite TEST color is octarine" does NOT contradict "favorite color is purple") -- that is an "add", never a supersede. When in doubt whether the new statement truly REPLACES the same attribute Nate stated before, choose add or update -- NEVER supersede/destroy an existing fact on mere similarity or doubt.
 
 Output ONLY valid JSON, no prose:
 {"ops":[
