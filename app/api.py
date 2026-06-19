@@ -243,11 +243,13 @@ async def health():
 # NON-BILLABLE (spawns claude.exe --version only, never a query), returns non-sensitive diagnostic
 # data (versions, the CLI path, the spawn result). Same localhost/tailnet bind as the static pages,
 # which are also unauthenticated. Does NOT touch the SDK query() path, the spend guard, or any creds.
-@app.get("/diag/claude-spawn")
+@app.get("/diag/claude-spawn", dependencies=[Depends(auth)])
 async def diag_claude_spawn():
     """NON-BILLABLE SDK-spawn self-test: runs the bundled claude.exe `--version` via the SDK's
     anyio.open_process mechanism (both stderr variants) so the WinError 50 console-less spawn failure
-    can be checked from the real Tauri server. Never sends a prompt; no tokens; no state change."""
+    can be checked from the real Tauri server. Never sends a prompt; no tokens; no state change.
+    AUTH'd (same bearer token as every other endpoint): nothing — not the HUD, sw.js, or any pre-auth
+    health check — depends on it being open, so it no longer exposes internal spawn state unauthenticated."""
     from app import diag
     return await diag.claude_spawn_selftest()
 
