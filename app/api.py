@@ -670,6 +670,34 @@ async def loop_new_sandbox():
     return {"workspace": ws, "baseline": head}
 
 
+class PruneIn(BaseModel):
+    older_than_days: float | None = None
+    keep_last_n: int | None = None
+    confirm: bool = False
+
+
+@app.get("/loop/sandboxes", dependencies=[Depends(auth)])
+async def loop_sandboxes():
+    """List throwaway sandboxes under ~/nervice-cc-sandbox (newest first, with age + size). Read-only."""
+    from app import sandbox_cleanup
+    return {"root": str(sandbox_cleanup._ROOT),
+            "sandboxes": await asyncio.to_thread(sandbox_cleanup.list_sandboxes)}
+
+
+@app.post("/loop/sandboxes/prune", dependencies=[Depends(auth)])
+async def loop_sandboxes_prune(inp: PruneIn):
+    """Prune old sandboxes by age (older_than_days) and/or keep-last-N. DRY-RUN unless confirm:true.
+    The real prune removes ONLY the dry-run's would_remove list, each re-guarded to be strictly under
+    ~/nervice-cc-sandbox (anything outside, incl. ~/nervice, is refused). Auth'd."""
+    from app import sandbox_cleanup
+    plan = await asyncio.to_thread(sandbox_cleanup.plan_prune, inp.older_than_days, inp.keep_last_n)
+    if not inp.confirm:
+        return {**plan, "confirm_to_remove": "re-POST with confirm:true to remove the 'would_remove' list"}
+    targets = [d["path"] for d in plan["would_remove"]]
+    result = await asyncio.to_thread(sandbox_cleanup.prune, targets, True)
+    return {"plan": plan, "result": result}
+
+
 @app.get("/actions/feed", dependencies=[Depends(auth)])
 async def actions_feed(limit: int = 40):
     """REAL action audit for the ACTIONS panel: computer_actions.log + browser_actions.log merged,
