@@ -150,18 +150,125 @@ def _test_summary(text: str, passed: bool) -> str:
     return (lines[-1][:200] if lines else ("tests passed" if passed else "tests failed"))
 
 
+# ---- isolated per-sandbox test venv: when a sandbox declares its OWN deps, tests must run with THOSE
+#      deps, not Nervice's interpreter. The venv lives UNDER the sandbox root (default-deny respected)
+#      and is cached across steps (re-installed only when the declared deps change). NON-Python projects
+#      are OUT OF SCOPE - no recognizable Python tests -> ran=False, stated honestly. ----
+_VENV_DIR = ".venv-test"            # per-sandbox; gitignored in new sandboxes (see new-sandbox .gitignore)
+_DEP_INSTALL_TIMEOUT_S = 240        # pip install bound (network)
+
+
+def _venv_python(venv: pathlib.Path) -> pathlib.Path:
+    return venv / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+
+
+def _declared_deps(ws: pathlib.Path):
+    """Does the sandbox declare its OWN (non-stdlib) deps? Returns (kind, install_args, fingerprint) or
+    None. requirements.txt -> `pip install -r`; pyproject [project.dependencies] / poetry deps -> install
+    each named dep. An empty/comment-only file -> None (use the stdlib path)."""
+    req = ws / "requirements.txt"
+    if req.exists():
+        try:
+            lines = [ln.strip() for ln in req.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if ln.strip() and not ln.strip().startswith("#")]
+        except Exception:
+            lines = []
+        if lines:
+            return ("requirements.txt", ["-r", str(req)], "req:" + "\n".join(sorted(lines)))
+    pp = ws / "pyproject.toml"
+    if pp.exists():
+        try:
+            import tomllib
+            data = tomllib.loads(pp.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            data = {}
+        deps = [str(d) for d in ((data.get("project") or {}).get("dependencies") or []) if str(d).strip()]
+        deps += [n for n in (((data.get("tool") or {}).get("poetry") or {}).get("dependencies") or {})
+                 if str(n).lower() != "python"]
+        if deps:
+            return ("pyproject.toml", deps, "pp:" + "\n".join(sorted(deps)))
+    return None
+
+
+async def _bounded_run(args, cwd, timeout):
+    """One bounded subprocess -> (rc, combined_output). Never raises; PID-tree kill on overrun."""
+    try:
+        proc = await asyncio.create_subprocess_exec(*args, cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    except Exception as e:
+        return None, f"launch failed: {type(e).__name__}"
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return proc.returncode, (out or b"").decode("utf-8", "replace")
+    except asyncio.TimeoutError:
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=15)
+        except Exception:
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return None, f"timed out after {timeout}s"
+
+
+async def _has_module(py: str, mod: str) -> bool:
+    rc, _o = await _bounded_run([py, "-c", f"import importlib.util,sys; "
+                                f"sys.exit(0 if importlib.util.find_spec('{mod}') else 1)"], ".", 25)
+    return rc == 0
+
+
+async def _ensure_test_venv(ws: pathlib.Path, dep):
+    """Create (or reuse) a per-sandbox venv with the declared deps installed. Returns the venv's python
+    Path, or None if setup failed. Cached: re-installs only when the deps fingerprint changes. The venv
+    is created UNDER the sandbox root (never outside ~/nervice-cc-sandbox)."""
+    kind, install, fp = dep
+    venv = ws / _VENV_DIR
+    py = _venv_python(venv)
+    stamp = venv / ".deps-fingerprint"
+    import hashlib
+    want = hashlib.sha256(fp.encode("utf-8")).hexdigest()[:16]
+    try:
+        if py.exists() and stamp.exists() and stamp.read_text(encoding="utf-8").strip() == want:
+            return py                                              # cached, deps unchanged
+    except Exception:
+        pass
+    if not py.exists():
+        rc, _o = await _bounded_run([sys.executable, "-m", "venv", str(venv)], ws, 120)
+        if rc != 0 or not py.exists():
+            return None
+    rc, out = await _bounded_run([str(py), "-m", "pip", "install", "--disable-pip-version-check", "-q", *install],
+                                 ws, _DEP_INSTALL_TIMEOUT_S)
+    if rc != 0:
+        print(f"[test-venv] pip install failed in {ws.name}: {(out or '')[-200:]}", file=sys.stderr)
+        return None
+    try:
+        stamp.write_text(want, encoding="utf-8")
+    except Exception:
+        pass
+    return py
+
+
 async def run_tests(workspace) -> dict:
-    """Run the sandbox project's tests LOCALLY (no Claude/Groq). Python: `python -m unittest discover`
-    (stdlib), or pytest ONLY if the project is pytest-shaped AND pytest is installed. Returns
-    {ran, passed, summary, output_tail}; no recognizable tests -> ran=False. Timeout-bounded with a
-    PID-tree kill on overrun. Never raises. NOTE: pytest-style tests with pytest NOT installed fall to
-    `unittest discover`, which errors on `import pytest` - so a test that can't even run is CAUGHT."""
+    """Run the sandbox project's tests (no Claude/Groq). If the sandbox declares its OWN deps
+    (requirements.txt / pyproject), they're installed into an isolated per-sandbox venv and tests run
+    THERE; otherwise the stdlib path (Nervice's interpreter) is used. Python only - a project with no
+    recognizable Python tests -> ran=False (NON-Python is OUT OF SCOPE, stated honestly). Returns
+    {ran, passed, summary, env, output_tail}. Timeout-bounded; never raises. pytest-shaped tests where
+    pytest isn't importable fall to `unittest discover` (which errors on `import pytest` -> CAUGHT)."""
     ws = pathlib.Path(workspace)
     test_files = _find_test_files(ws)
     if not test_files:
-        return {"ran": False, "passed": None, "summary": "no tests to verify", "output_tail": ""}
-    py = sys.executable
-    use_pytest = (importlib.util.find_spec("pytest") is not None) and _looks_pytest(ws, test_files)
+        return {"ran": False, "passed": None, "summary": "no tests to verify", "output_tail": "", "env": "none"}
+    dep = _declared_deps(ws)
+    if dep:                                                        # sandbox declares its OWN deps -> isolated venv
+        venv_py = await _ensure_test_venv(ws, dep)
+        py = str(venv_py) if venv_py else sys.executable
+        envname = (f"isolated venv ({dep[0]})" if venv_py
+                   else f"venv setup FAILED ({dep[0]}) - fell back to the Nervice interpreter")
+    else:
+        py, envname = sys.executable, "stdlib (Nervice interpreter)"
+    use_pytest = _looks_pytest(ws, test_files) and await _has_module(py, "pytest")
     args = ([py, "-m", "pytest", "-q"] if use_pytest
             else [py, "-m", "unittest", "discover", "-p", "test*.py"])
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
@@ -171,14 +278,14 @@ async def run_tests(workspace) -> dict:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     except Exception as e:
         return {"ran": True, "passed": False, "summary": f"could not launch tests: {type(e).__name__}",
-                "output_tail": ""}
+                "output_tail": "", "env": envname}
     pid = proc.pid
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=_TEST_TIMEOUT_S)
         text = (out or b"").decode("utf-8", "replace")
         passed = (proc.returncode == 0)
         return {"ran": True, "passed": passed, "summary": _test_summary(text, passed),
-                "runner": "pytest" if use_pytest else "unittest", "output_tail": text[-1600:]}
+                "runner": "pytest" if use_pytest else "unittest", "env": envname, "output_tail": text[-1600:]}
     except asyncio.TimeoutError:
         try:
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=15)
@@ -189,7 +296,7 @@ async def run_tests(workspace) -> dict:
         except Exception:
             pass
         return {"ran": True, "passed": False, "summary": f"tests exceeded {_TEST_TIMEOUT_S}s - killed",
-                "output_tail": ""}
+                "output_tail": "", "env": envname}
 
 
 # ---- SECOND BRAIN: Claude reasons over Groq's draft step (READ-ONLY, ONE turn) before CC runs it.
@@ -319,6 +426,9 @@ async def _run_loop(run_id: str) -> None:
     ws = pathlib.Path(run["workspace"]); goal = run["goal"]; ms = run["max_steps"]
     try:
         for n in range(1, ms + 1):
+            if run.get("cancel"):                                       # STOP requested -> halt before the next step
+                _finish(run, "cancelled", f"stopped by user before step {n} (started no further step)")
+                return
             run["current_step"] = f"planning step {n}/{ms}"; _persist(run)
             prompt, rung, brains = await _plan_step(goal, _progress(ws), n, ms)
             if rung == "none" or not prompt:
@@ -336,13 +446,16 @@ async def _run_loop(run_id: str) -> None:
             run["current_step"] = f"testing step {n}/{ms}"; _persist(run)
             tr = await run_tests(ws)
             if run["steps"]:
-                run["steps"][-1]["tests"] = {k: tr.get(k) for k in ("ran", "passed", "summary")}
+                run["steps"][-1]["tests"] = {k: tr.get(k) for k in ("ran", "passed", "summary", "env")}
             if tr["ran"] and not tr["passed"]:               # tests ran and FAILED/errored -> STOP, no chaining
                 if run["steps"]:
                     run["steps"][-1]["ok"] = False
                 _finish(run, "failed", f"step {n}: committed but TESTS FAILED - {tr['summary']}")
                 return
             run["steps_done"] = n; _persist(run)
+            if run.get("cancel"):                                       # STOP requested during the step -> halt now
+                _finish(run, "cancelled", f"stopped by user after step {n} (started no further step)")
+                return
             run["current_step"] = f"checking goal after step {n}/{ms}"
             done, why = await _check_done(goal, _progress(ws))
             if done:
@@ -379,11 +492,27 @@ def start_goal_run(workspace, goal, max_steps=None) -> dict:
     run_id = datetime.now(_TZ).strftime("%Y%m%d-%H%M%S") + "-" + ("%04x" % (abs(hash(str(ws) + goal)) & 0xFFFF))
     _runs[run_id] = {"run_id": run_id, "workspace": str(ws), "goal": str(goal).strip(), "max_steps": ms,
                      "status": "running", "steps_done": 0, "current_step": "starting", "steps": [],
-                     "reason": None, "started_ts": _now(), "ended_ts": None}
+                     "reason": None, "started_ts": _now(), "ended_ts": None, "cancel": False}
     _active_run_id = run_id
     _persist(_runs[run_id])
     _tasks[run_id] = asyncio.create_task(_run_loop(run_id))             # background on the server loop
     return {"started": True, "run_id": run_id, "status": "started", "max_steps": ms}
+
+
+def request_stop(run_id: str) -> dict:
+    """Request a CLEAN stop of a running loop. The loop checks the flag before each step, so it halts
+    before starting the next one (the current step is allowed to finish/time out - we never kill a CC
+    spawn mid-flight). Marks the run 'cancelled' in its audit log. Refuses if there's no such ACTIVE run."""
+    run = _runs.get(run_id)
+    if not run:
+        return {"ok": False, "error": "no such active run (unknown id or already finished/evicted from memory)"}
+    if run.get("status") != "running":
+        return {"ok": False, "status": run.get("status"),
+                "error": f"run is not running (status: {run.get('status')}) - nothing to stop"}
+    run["cancel"] = True
+    _persist(run)
+    return {"ok": True, "status": "stopping", "run_id": run_id,
+            "note": "the loop will halt before the next step; the current step may finish first"}
 
 
 def _build_report(run: dict) -> dict:

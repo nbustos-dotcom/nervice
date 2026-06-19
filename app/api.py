@@ -243,11 +243,13 @@ async def health():
 # NON-BILLABLE (spawns claude.exe --version only, never a query), returns non-sensitive diagnostic
 # data (versions, the CLI path, the spawn result). Same localhost/tailnet bind as the static pages,
 # which are also unauthenticated. Does NOT touch the SDK query() path, the spend guard, or any creds.
-@app.get("/diag/claude-spawn")
+@app.get("/diag/claude-spawn", dependencies=[Depends(auth)])
 async def diag_claude_spawn():
     """NON-BILLABLE SDK-spawn self-test: runs the bundled claude.exe `--version` via the SDK's
     anyio.open_process mechanism (both stderr variants) so the WinError 50 console-less spawn failure
-    can be checked from the real Tauri server. Never sends a prompt; no tokens; no state change."""
+    can be checked from the real Tauri server. Never sends a prompt; no tokens; no state change.
+    AUTH'd (same bearer token as every other endpoint): nothing — not the HUD, sw.js, or any pre-auth
+    health check — depends on it being open, so it no longer exposes internal spawn state unauthenticated."""
     from app import diag
     return await diag.claude_spawn_selftest()
 
@@ -622,6 +624,14 @@ async def loop_run_status(run_id: str):
     return st
 
 
+@app.post("/loop/run-stop/{run_id}", dependencies=[Depends(auth)])
+async def loop_run_stop(run_id: str):
+    """Request a CLEAN stop of a running loop: it halts before the next step (the current step may
+    finish), marks the run 'cancelled'. Returns {ok, status} or a refusal if it's not an active run."""
+    from app import headless_loop
+    return headless_loop.request_stop(run_id)
+
+
 @app.post("/loop/new-sandbox", dependencies=[Depends(auth)])
 async def loop_new_sandbox():
     """Create a FRESH throwaway git repo under the allowed sandbox root (~/nervice-cc-sandbox/<ts>/) with a
@@ -646,6 +656,14 @@ async def loop_new_sandbox():
         g("config", "user.email", "sandbox@nervice.test")
         g("config", "user.name", "nervice-sandbox")
         (ws / "README.md").write_text("# nervice headless sandbox\nThrowaway workspace for a hands-off Claude Code loop.\n", encoding="utf-8")
+        # Every new sandbox starts with a .gitignore so generated junk (pycache, the per-sandbox test
+        # venv from run_tests, caches) never gets committed by the loop's `git add -A`.
+        (ws / ".gitignore").write_text(
+            "__pycache__/\n*.py[cod]\n*$py.class\n"
+            ".venv-test/\n.venv/\nvenv/\nenv/\n"            # the per-sandbox test venv + any project venv
+            ".pytest_cache/\n.mypy_cache/\n.ruff_cache/\n"
+            "*.egg-info/\n.eggs/\nbuild/\ndist/\n"
+            ".DS_Store\nThumbs.db\n", encoding="utf-8")
         g("add", "-A")
         g("commit", "-q", "-m", "init sandbox")
         head = subprocess.run(["git", "-C", str(ws), "rev-parse", "--short", "HEAD"],
@@ -660,6 +678,34 @@ async def loop_new_sandbox():
     if not allowed:
         raise HTTPException(status_code=500, detail=f"created sandbox failed the sandbox guard: {info}")
     return {"workspace": ws, "baseline": head}
+
+
+class PruneIn(BaseModel):
+    older_than_days: float | None = None
+    keep_last_n: int | None = None
+    confirm: bool = False
+
+
+@app.get("/loop/sandboxes", dependencies=[Depends(auth)])
+async def loop_sandboxes():
+    """List throwaway sandboxes under ~/nervice-cc-sandbox (newest first, with age + size). Read-only."""
+    from app import sandbox_cleanup
+    return {"root": str(sandbox_cleanup._ROOT),
+            "sandboxes": await asyncio.to_thread(sandbox_cleanup.list_sandboxes)}
+
+
+@app.post("/loop/sandboxes/prune", dependencies=[Depends(auth)])
+async def loop_sandboxes_prune(inp: PruneIn):
+    """Prune old sandboxes by age (older_than_days) and/or keep-last-N. DRY-RUN unless confirm:true.
+    The real prune removes ONLY the dry-run's would_remove list, each re-guarded to be strictly under
+    ~/nervice-cc-sandbox (anything outside, incl. ~/nervice, is refused). Auth'd."""
+    from app import sandbox_cleanup
+    plan = await asyncio.to_thread(sandbox_cleanup.plan_prune, inp.older_than_days, inp.keep_last_n)
+    if not inp.confirm:
+        return {**plan, "confirm_to_remove": "re-POST with confirm:true to remove the 'would_remove' list"}
+    targets = [d["path"] for d in plan["would_remove"]]
+    result = await asyncio.to_thread(sandbox_cleanup.prune, targets, True)
+    return {"plan": plan, "result": result}
 
 
 @app.get("/actions/feed", dependencies=[Depends(auth)])

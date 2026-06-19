@@ -1604,13 +1604,22 @@ if(!getToken()) openToken(); else refreshAll();
       +   '<span class="wl-hint">creates a fresh repo under ~/nervice-cc-sandbox</span></div>'
       + '<textarea id="wlGoal" class="wl-goal" placeholder="describe the goal — e.g. “create calc.py with add() and subtract(), a test that passes, and a README; commit each piece”"></textarea>'
       + '<div class="wl-row"><label class="wl-hint">max steps<input id="wlMax" class="wl-max" type="number" min="1" max="12" value="5"></label>'
-      +   '<button class="hs-btn approve" id="wlRun">Run</button></div>'
+      +   '<button class="hs-btn approve" id="wlRun">Run</button>'
+      +   '<button class="hs-btn kill" id="wlStop" style="display:none">Stop</button></div>'
       + '<div id="wlStatus"></div></div>';
   }
   function wlSetWs(){
     const el=$('#wlWs'); if(el) el.innerHTML = _wlWs ? 'SANDBOX · <b>'+E(_wlWs)+'</b>' : 'No sandbox yet — create one, then type a goal and Run.';
     const run=$('#wlRun'); if(run) run.disabled = _wlActive || !_wlWs;
     const nw=$('#wlNew'); if(nw) nw.disabled = _wlActive;
+    const stop=$('#wlStop'); if(stop){ stop.style.display = _wlActive ? '' : 'none'; stop.disabled = false; }
+  }
+  async function wlStop(){
+    if(!_wlRunId) return;
+    const stop=$('#wlStop'); if(stop) stop.disabled=true;
+    try{ const d=await apiPost('/loop/run-stop/'+_wlRunId,{});
+         toast(d&&d.ok ? '// STOPPING — halts before the next step' : ('// '+((d&&d.error)||'could not stop'))); }
+    catch(e){ toast('Stop failed'); if(stop) stop.disabled=false; }
   }
   async function wlNewSandbox(){
     const nw=$('#wlNew'); if(nw) nw.disabled=true;
@@ -1810,6 +1819,7 @@ if(!getToken()) openToken(); else refreshAll();
   // refresh of #hsLive (which re-renders those buttons). Disabled (frozen) buttons don't fire clicks.
   body.addEventListener('click', e=>{ if(e.target.closest('#wlNew')){ wlNewSandbox(); return; }
     if(e.target.closest('#wlRun')){ wlRun(); return; }
+    if(e.target.closest('#wlStop')){ wlStop(); return; }
     if(e.target.closest('#hsPropose')){ sendHandsPropose(); return; }
     const hb=e.target.closest('[data-hands]'); if(hb){ handsAction(hb.dataset.hands); return; }
     const ab=e.target.closest('[data-asks]'); if(ab) asksAction(ab.dataset.pid, ab.dataset.asks); });

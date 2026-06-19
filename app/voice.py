@@ -651,15 +651,34 @@ def contains_speech(audio) -> bool:
     return best >= need
 
 
+def _aggregate_confidence(segs):
+    """Clip-level (no_speech_prob, avg_logprob) from per-segment metrics, WEIGHTED by each segment's
+    transcribed-text length. A single low-confidence segment (a pause whisper renders as a faint word,
+    a quiet trailing part of a MULTI-PART utterance, a hesitation) can no longer junk the whole clip —
+    the confident, content-bearing segments dominate; pure-silence segments (no text) are excluded; a
+    clip that's low-confidence THROUGHOUT still scores low. A single-segment clip is unchanged (its own
+    metrics). No transcribable content at all -> (1.0, 0.0) = treat as non-speech."""
+    rows = [(len((s.text or "").strip()), float(s.no_speech_prob), float(s.avg_logprob)) for s in segs]
+    total = sum(w for w, _, _ in rows)
+    if total <= 0:
+        return 1.0, 0.0
+    nsp = sum(w * n for w, n, _ in rows) / total
+    alp = sum(w * a for w, _, a in rows) / total
+    return nsp, alp
+
+
 def _transcribe_with_metrics(audio):
-    """faster-whisper on a 16k float32 array -> (text, worst_no_speech_prob, worst_avg_logprob), so
-    the junk gate can drop low-confidence noise. Empty / zero-segment audio -> ('', 1.0, 0.0)."""
+    """faster-whisper on a 16k float32 array -> (text, no_speech_prob, avg_logprob), so the junk gate
+    can drop low-confidence noise WITHOUT dropping a multi-part utterance over one weak segment (the
+    metrics are text-length-weighted across segments — see _aggregate_confidence). Empty / zero-segment
+    audio -> ('', 1.0, 0.0)."""
     segments, _ = _whisper.transcribe(audio, language="en", hotwords=_STT_HOTWORDS)
     segs = list(segments)
     text = _fix_wake_phrase("".join(s.text for s in segs).strip())
     if not segs:
         return text, 1.0, 0.0
-    return text, max(s.no_speech_prob for s in segs), min(s.avg_logprob for s in segs)
+    nsp, alp = _aggregate_confidence(segs)
+    return text, nsp, alp
 
 
 def transcribe_clip(path: str) -> dict:
