@@ -29,6 +29,33 @@ def _requeue_log(entry: dict) -> None:
     except Exception as e:
         print(f"[memory requeue log failed] {repr(e)[:80]}", file=sys.stderr)
 
+
+_SUPERSEDE_LOG = pathlib.Path(__file__).resolve().parent.parent / "data" / "supersede_log.jsonl"
+
+
+def _supersede_log(old_id, new_id, new_content, salience, category, candidates, user_id, conv) -> None:
+    """Append a full record of every supersede (an existing fact deactivated by a new one). Defensive
+    like _requeue_log: ANY failure (incl. building the entry) is caught, logged to stderr, and
+    swallowed -- it can NEVER break the supersede itself. Captures enough to REVERSE a wrong supersede
+    from the log alone: old id+content, new id+content, salience, and the candidate set the model saw."""
+    try:
+        old_content = next((c.get("content") for c in candidates if c.get("id") == old_id),
+                           "(superseded row was not in the candidate set)")
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "user_id": user_id, "conv": conv,
+            "old_id": old_id, "old_content": old_content,
+            "new_id": new_id, "new_content": new_content,
+            "salience": salience, "category": category,
+            "candidates": candidates,
+        }
+        _SUPERSEDE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SUPERSEDE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[supersede log failed] {repr(e)[:80]}", file=sys.stderr)
+
+
 VALID_CATEGORIES = {"identity", "preference", "project", "relationship", "goal", "fact"}
 
 RECONCILE_SYSTEM = """
@@ -45,8 +72,9 @@ For each durable fact assign:
 Reconcile against the EXISTING memories:
 - new fact duplicates an existing one -> noop (omit it)
 - new fact refines/extends an existing one -> update (give its id)
-- new fact contradicts an existing one -> supersede (give the old id and the corrected memory)
+- new fact is an EXPLICIT change or correction to the SAME attribute of an existing fact -- Nate signals the old value changed or was wrong (cues like "now", "actually", "no longer", "not X anymore", "changed to", "instead of") -> supersede (give the old id and the corrected memory)
 - otherwise -> add
+A statement about a NEW, DISTINCT, hypothetical, or TEST/throwaway attribute is NOT a contradiction even when it shares words or a topic with an existing fact (e.g. "favorite TEST color is octarine" does NOT contradict "favorite color is purple") -- that is an "add", never a supersede. When in doubt whether the new statement truly REPLACES the same attribute Nate stated before, choose add or update -- NEVER supersede/destroy an existing fact on mere similarity or doubt.
 
 Output ONLY valid JSON, no prose:
 {"ops":[
@@ -116,6 +144,7 @@ async def remember(
             import json
             existing_str = json.dumps(existing_json)
         else:
+            existing_json = []
             existing_str = "none"
 
         user_msg = _reconcile_user_msg(existing_str, user_text)
@@ -199,6 +228,9 @@ async def remember(
                     .where(Memory.id == uuid.UUID(old_id), Memory.user_id == user_id)
                     .values(is_active=False, superseded_by=new_row.id, updated_at=now)
                 )
+                _supersede_log(old_id=old_id, new_id=str(new_row.id), new_content=content,
+                               salience=salience, category=op["category"], candidates=existing_json,
+                               user_id=user_id, conv=source_conv_id)
                 applied.append({"op": "supersede", "content": content})
 
         await session.commit()

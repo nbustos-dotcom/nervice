@@ -936,6 +936,29 @@ async def pending():
     return await asyncio.to_thread(_scan)
 
 
+@app.get("/memory/supersedes", dependencies=[Depends(auth)])
+async def memory_supersedes(limit: int = 20):
+    """Recent supersede events (an existing memory deactivated by a new one), newest first, from
+    data/supersede_log.jsonl. Lets Nate eyeball a WRONG supersede — a real fact nuked by a loosely-
+    related one — at a glance. Each event carries old id+content, new id+content, salience, and the
+    candidate set the model saw, so a bad one is both spottable AND reversible from the log alone."""
+    def _scan():
+        import json as _json
+        events = []
+        try:
+            with open(_REPO / "data" / "supersede_log.jsonl", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            events.append(_json.loads(line))
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+        return {"count": len(events), "events": events[-limit:][::-1]}
+    return await asyncio.to_thread(_scan)
+
+
 # --------------- Self-modification proposals — the ASKS review/approve surface ---------------
 # Review + approve/reject the selfmod proposals Nate has pending. Approval routes THROUGH app/selfmod's
 # existing gate (re-validate paths -> dry-run -> apply -> compile -> assert SAFETY_FLOOR in PERSONA ->
