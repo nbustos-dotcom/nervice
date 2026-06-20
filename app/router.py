@@ -52,14 +52,22 @@ _MUSIC_OPS = {"set", "add", "remove", "list", "clear"}
 _SYS_QUESTIONS = {"cpu", "ram", "gpu", "disk", "os", "uptime", "specs", "top_proc", "file_count"}
 _ORCH_OPS = {"new", "edit", "critique", "plan", "next", "done", "redo", "status", "gaps", "summary", "result", "workspace"}
 
-# Deterministic guard: a complaint/reaction about a prior action must stay conversational and NEVER
-# reach the browse agent or the control interpreter, regardless of what the LLM router decides.
+# Deterministic guard: a complaint/reaction about a prior action -- OR a correction that the prior turn
+# missed the point ("you did not answer my question", "that's not what I asked") -- must stay
+# conversational and NEVER reach a tool route, regardless of what the LLM router decides. The brain
+# holds the conversation window, so a turn routed normal sees the prior turns and re-answers (B-lite).
+# The correction patterns are anchored ("you did not <answer>", "that's not what i <asked>") so real
+# commands ("play music", "open notepad", "did you answer the email?") are NOT swept in.
 _FOLLOWUP = re.compile(
     r"\b(did(n'?t| not)\s+(appear|open|work|show|launch|come up|do anything|pop up)|"
     r"not\s+(showing|there|appearing|visible|working|here)|"
     r"don'?t\s+see|can'?t\s+see\s+(it|anything|that)|i\s+(want to|wanna)\s+see\s+it|"
     r"where('?s| is| did)\s+it|nothing\s+(happened|appeared|opened|showed)|"
-    r"it'?s\s+not\s+(here|showing|there|working|open|up))\b", re.I)
+    r"it'?s\s+not\s+(here|showing|there|working|open|up)|"
+    r"you\s+(did\s*n'?t|did\s+not|never)\s+(answer|respond|address|reply)|"
+    r"that'?s\s+not\s+what\s+i\s+(asked|meant|said|wanted)|"
+    r"you\s+(ignored|missed|avoided|dodged|skipped)\s+(my|the)\s+(question|point)|"
+    r"(does|did)\s*n'?t\s+answer\s+(my|the)\s+question)\b", re.I)
 
 # Deterministic guard: a question about Nervice's OWN abilities ("can you see/read/access/control X",
 # "what can you do", "are you able to") asks about CAPABILITIES, not hardware telemetry — it must
