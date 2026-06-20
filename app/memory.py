@@ -13,11 +13,12 @@ from app.llm import chat_json
 from app.models import Memory
 from app import ollama_client as ollama
 
-# When Groq is capped, extraction runs on the LOCAL rung with a QUARANTINE: salience capped <=3
-# (stays OUT of the always-injected CORE tier, which requires >=4) and the ops are logged here for
-# batch re-verification when Groq resets. Failed extractions are queued here too — never lost.
+# When Groq is capped, extraction runs on the LOCAL rung with a salience CEILING: capped <=4 -- the
+# conservative 4B (measured Q2: it tracks the 70B and never sprays highs) CAN reach the always-injected
+# CORE tier (>=4), but the top 5=core-identity tier stays reserved for a 70B re-score. Every 4B op is
+# logged here for batch re-verification when Groq resets. Failed extractions are queued here too -- never lost.
 _REQUEUE = pathlib.Path(__file__).resolve().parent.parent / "data" / "memory_requeue.jsonl"
-_LOCAL_SALIENCE_CAP = 3
+_LOCAL_SALIENCE_CAP = 4
 
 
 def _requeue_log(entry: dict) -> None:
@@ -178,8 +179,8 @@ async def remember(
             content = op["content"].strip()
             salience = op["salience"]
             if local_extract:
-                # QUARANTINE: a 4B extraction never enters the always-injected CORE tier (>=4)
-                # and is flagged for re-verification when Groq resets.
+                # CEILING: a 4B extraction can now reach CORE (>=4) but never the top 5=core-identity
+                # tier (reserved for a 70B re-score); flagged for re-verification when Groq resets.
                 salience = min(salience, _LOCAL_SALIENCE_CAP)
                 _requeue_log({"kind": "verify", "user_id": user_id, "conv": source_conv_id,
                               "op": kind, "content": content[:300], "extractor": "ollama-qwen3.5:4b"})
