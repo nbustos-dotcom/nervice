@@ -68,7 +68,7 @@ DO NOT store: task-local details, transient states or moods, meta-observations a
 
 For each durable fact assign:
 - category: one of identity, preference, project, relationship, goal, fact
-- salience 1-5: 5=core identity or hard constraints; 4=strong stable preferences or major decisions; 3=project/architecture facts; 2=minor preferences or people; 1=weak or uncertain.
+- salience 1-5: 5=core identity or hard constraints; 4=strong stable preferences, major decisions, or a CLOSE/important relationship (partner/spouse, immediate family, a close friend -- a person central to Nate's life); 3=project/architecture facts; 2=minor preferences, or an INCIDENTAL person (someone mentioned in passing, a one-off name, an acquaintance, or a service worker like a barista/clerk); 1=weak or uncertain.
 
 Reconcile against the EXISTING memories:
 - new fact duplicates an existing one -> noop (omit it)
