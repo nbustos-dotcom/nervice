@@ -34,7 +34,7 @@ ROUTES + their JSON shapes:
 {"route":"orchestrator","op":"new|edit|critique|plan|next|done|redo|status|gaps|summary|result|workspace"}
   orchestrator = managing Nate's CODING PROJECT PLAN (the project doc at docs/projects/ACTIVE.md). op new = "start a new project", "new project", "create a project", "set up a new project", "begin a new project" — BEGINS a guided setup where Nervice asks questions and writes the project doc for him (this is the META setup of the project doc, NOT writing code/files — that's build). op edit = an EDIT to the EXISTING project — "change the goal to X", "add a step for X", "add a requirement X", "remove step 2", "remove the X step", "reorder step 3 before step 1", "rewrite requirement 1 as X", "change step 2 to X" (editing the CURRENT project doc/plan — NOT starting a new one). op critique = "critique my project", "review my project doc", "find gaps in my plan". op plan = "plan my project", "break it into steps", "show the plan", "what's the plan". op next = "next step", "give me the next step", "what do I paste next", "what's the next prompt". op done = a COMMAND to mark the current step COMPLETE: "mark step done", "mark it done", "I finished that step", "that step's done". A QUESTION about completion is NOT op done — "is it done", "is step 2 done", "are we done", "did I finish", "what's left" are op status. op redo = "redo", "redo that step", "give me a different prompt for this step". op status = a READ-ONLY status read, NEVER a mutation: "project status", "how many steps left", "what's left", "is it done", "is step 2 done", "are we done". op gaps = "show gaps", "show me the critique". op summary = "how's my project", "how's the project going", "give me a project update", "where am I on the project", "what's the loop waiting on", "what did Claude Code return", "where's the loop", "what's the loop doing". op result = Nate is PASTING Claude Code's report/output back after running a step's prompt — cues like "here's what Claude Code said", "here's the result", "CC said:", "result:", "it finished, here's the output", usually followed by the pasted report text. Nervice reads the report and proposes the next move (mark done + next step, or add a fix/follow-up step). The report arrives TWO ways, BOTH op result: Nate PASTES it, OR — when a project workspace is set — Nate says "check the result" / "read the result file" / "did Claude Code finish" / "fetch the result" and Nervice reads the workspace's .nervice/result.json itself (then git-cross-checks it). op workspace = set or SHOW where the project's CODE lives for that file channel — "set the project workspace to <path>", "set my project folder to X", "where's the workspace", "show the project workspace". NOT a request to build (that's build) and NOT a status question (that's summary). This is about Nate's coding PROJECT plan — NOT Canvas (school) and NOT building files right now.
 {"route":"actions"} actions = a question about what NERVICE has DONE / its own recent activity ("what have you done", "what actions have you taken", "what did you do", "what have you been up to", "what have you been doing lately", "what have you been working on"). Reads Nervice's real action audit log. NOT "what's the plan" (that's orchestrator) and NOT a request to DO something (that's control).
-{"route":"news","topic":"<specific subject, or empty for general>"} news = a request for CURRENT EVENTS / world headlines, fetched LIVE and summarized from real results: "what's the news", "what's happening", "what's happening today", "any news", "anything going on", "what's going on", "catch me up", "news about X" (topic "X"), "any tech/cyber/political news" (topic the subject). topic = the named subject if there is one, else empty for general headlines. WORLD/current-events ONLY — NOT "what's the news with my project / how's Nervice going" (that's orchestrator), and NOT a reaction to something that just happened (that's normal).
+{"route":"news","topic":"<specific subject, or empty for general>"} news = a request for CURRENT EVENTS / world headlines, fetched LIVE and summarized from real results: "what's the news", "what's the news today", "any news", "any tech/cyber/political news" (topic the subject), "news about X" (topic "X"), "headlines", "catch me up on X". A casual check-in or greeting ("what's going on", "what's up", "what's happening", "anything new", "what's the latest update you got") is normal, NOT news — route news ONLY when Nate explicitly asks for world/current-events/headlines. topic = the named subject if there is one, else empty for general headlines. WORLD/current-events ONLY — NOT "what's the news with my project / how's Nervice going" (that's orchestrator), and NOT a reaction to something that just happened (that's normal).
 {"route":"normal"} normal = everything else: chat, opinions, simple facts, and any DISCUSSION (vs an explicit action request).
 
 RULES:
@@ -52,14 +52,22 @@ _MUSIC_OPS = {"set", "add", "remove", "list", "clear"}
 _SYS_QUESTIONS = {"cpu", "ram", "gpu", "disk", "os", "uptime", "specs", "top_proc", "file_count"}
 _ORCH_OPS = {"new", "edit", "critique", "plan", "next", "done", "redo", "status", "gaps", "summary", "result", "workspace"}
 
-# Deterministic guard: a complaint/reaction about a prior action must stay conversational and NEVER
-# reach the browse agent or the control interpreter, regardless of what the LLM router decides.
+# Deterministic guard: a complaint/reaction about a prior action -- OR a correction that the prior turn
+# missed the point ("you did not answer my question", "that's not what I asked") -- must stay
+# conversational and NEVER reach a tool route, regardless of what the LLM router decides. The brain
+# holds the conversation window, so a turn routed normal sees the prior turns and re-answers (B-lite).
+# The correction patterns are anchored ("you did not <answer>", "that's not what i <asked>") so real
+# commands ("play music", "open notepad", "did you answer the email?") are NOT swept in.
 _FOLLOWUP = re.compile(
     r"\b(did(n'?t| not)\s+(appear|open|work|show|launch|come up|do anything|pop up)|"
     r"not\s+(showing|there|appearing|visible|working|here)|"
     r"don'?t\s+see|can'?t\s+see\s+(it|anything|that)|i\s+(want to|wanna)\s+see\s+it|"
     r"where('?s| is| did)\s+it|nothing\s+(happened|appeared|opened|showed)|"
-    r"it'?s\s+not\s+(here|showing|there|working|open|up))\b", re.I)
+    r"it'?s\s+not\s+(here|showing|there|working|open|up)|"
+    r"you\s+(did\s*n'?t|did\s+not|never)\s+(answer|respond|address|reply)|"
+    r"that'?s\s+not\s+what\s+i\s+(asked|meant|said|wanted)|"
+    r"you\s+(ignored|missed|avoided|dodged|skipped)\s+(my|the)\s+(question|point)|"
+    r"(does|did)\s*n'?t\s+answer\s+(my|the)\s+question)\b", re.I)
 
 # Deterministic guard: a question about Nervice's OWN abilities ("can you see/read/access/control X",
 # "what can you do", "are you able to") asks about CAPABILITIES, not hardware telemetry — it must
@@ -162,15 +170,21 @@ _ACTIONS_KW = re.compile(r"\b(what (?:have you|did you|you'?ve) (?:done|do|taken
 _NEWS_KW = re.compile(r"\b(news|headlines?|what'?s\s+(?:happening|going\s+on)|anything\s+(?:happening|going\s+on)|"
                       r"catch\s+me\s+up|current\s+events|what'?s\s+going\s+on)\b", re.I)
 
-# RECENT-NEWS pre-guard intent (broader than _NEWS_KW): runs BEFORE the public-page web reader so a
-# today-flavored question routes to the LIVE-headlines `news` path instead of silently returning a
-# Wikipedia article. Also catches "latest on X", "today's headlines", "breaking", "recent developments".
+# RECENT-NEWS pre-guard intent: runs BEFORE the public-page web reader so an EXPLICIT current-events
+# question routes to the LIVE-headlines `news` path instead of silently returning a Wikipedia article.
+# NARROWED (bias-to-conversation): bare phatic check-ins ("what's going on", "what's happening",
+# "anything new") and self-referential "latest update YOU received" are NOT news -- they fall to the
+# brain (which holds the window). News needs an explicit news/headlines/current-events cue.
 _RECENT_NEWS = re.compile(
-    r"\b(news|headlines?|breaking(?:\s+news)?|current\s+events?|"
-    r"what(?:'?s|\s+is)\s+(?:happening|going\s+on|new)|anything\s+(?:happening|going\s+on|new)|catch\s+me\s+up|"
+    r"\b(news|headlines?|breaking(?:\s+news)?|current\s+events?|catch\s+me\s+up|"
     r"(?:happening|going\s+on)\s+in\s+the\s+world|"
-    r"latest\s+(?:news|headlines?|on|in|about|developments?|updates?)|today'?s\s+(?:news|headlines?|events?)|"
+    r"latest\s+(?:news|headlines?|on|in|about|developments?)|today'?s\s+(?:news|headlines?|events?)|"
     r"recent\s+(?:news|developments?|events?|headlines?))\b", re.I)
+# Self-referential "update(s) YOU/Nervice received/got" or "your latest update" -> about Nervice itself
+# (normal/actions), NEVER world news, even when phrased with a news-ish word.
+_SELF_UPDATE = re.compile(
+    r"\b(?:your|nervice'?s)\s+(?:latest\s+)?(?:news\s+)?updates?\b"
+    r"|\bupdates?\b[^?.!\n]{0,20}\byou(?:'?ve)?\s+(?:received|got|gotten|had|have)\b", re.I)
 _NEWS_TOPIC = re.compile(r"\b(?:news\s+(?:on|about)|latest\s+(?:on|in|about)|(?:happening|going\s+on)\s+(?:in|with|on))\s+(.+)$", re.I)
 
 
@@ -182,6 +196,8 @@ def recent_news_route(msg: str) -> "dict | None":
     if _URL_RE.search(m):                                  # a page was given -> read THAT (web_read), not news
         return None
     if _NOT_WEBREAD.search(m) or _ORCH_KW.search(m):       # canvas/project/plan/notes -> not world news
+        return None
+    if _SELF_UPDATE.search(m):                             # "latest update YOU received" -> Nervice itself, normal
         return None
     if not _RECENT_NEWS.search(m):
         return None
